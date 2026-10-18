@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.request,uuid
 import yaml
+from baseline import RUNTIME_SNAPSHOT_FILES
 
 PROJECT=Path(__file__).resolve().parent.parent
 LOCAL=PROJECT/'.local';LOCAL.mkdir(exist_ok=True)
@@ -250,7 +251,9 @@ def backup(root,path=None,allow_configured=False):
   assert state.get('user_sid')==user_sid(),'Backup belongs to another Windows user'
   assert Path(state['client_root']).resolve()==root.resolve(),'Existing baseline is for a different client data directory'
   for name,digest in state['sha256'].items():assert hashlib.sha256(((path/'client'/name) if (path/'client'/name).exists() else path/name).read_bytes()).hexdigest()==digest,'Backup integrity failure'
-  for name,digest in state.get('extra_sha256',{}).items():assert hashlib.sha256((path/name).read_bytes()).hexdigest()==digest,'System backup integrity failure'
+  for name,digest in state.get('extra_sha256',{}).items():
+   if name in RUNTIME_SNAPSHOT_FILES:continue
+   assert hashlib.sha256((path/name).read_bytes()).hexdigest()==digest,'System backup integrity failure'
   return
  if not allow_configured:
   assert not already_configured(root),'Client already carries this project enhancement. Capture the baseline before the first apply instead of snapshotting an already-configured state.'
@@ -265,6 +268,8 @@ def seal():
  backup(Path(state['client_root']),path);extras=state.setdefault('extra_sha256',{})
  for file in path.iterdir():
   if not file.is_file() or file==manifest:continue
+  if file.name in RUNTIME_SNAPSHOT_FILES:
+   extras.pop(file.name,None);continue
   digest=hashlib.sha256(file.read_bytes()).hexdigest()
   assert file.name not in extras or extras[file.name]==digest,'Previously sealed system snapshot changed'
   extras[file.name]=digest

@@ -1,6 +1,11 @@
 from pathlib import Path
 import json,hashlib,os,socket
 FINAL=Path(__file__).resolve().parent.parent/'.local'
+# system.ps1 rewrites disabled-by-apply.json on every apply with the adapters that
+# still had IPv6 enabled in that run, so its content legitimately changes after the
+# snapshot is sealed. It is a runtime record consumed by restore, not a restorable
+# part of the baseline: never seal or integrity-check it.
+RUNTIME_SNAPSHOT_FILES={'disabled-by-apply.json'}
 def snapshot():
  value=os.environ.get('CCN_SNAPSHOT')
  if value:return Path(value)
@@ -18,5 +23,6 @@ def verify():
   if not p.exists():p=path/name
   assert p.is_file() and hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Backup integrity failure'
  for name,digest in m.get('extra_sha256',{}).items():
+  if name in RUNTIME_SNAPSHOT_FILES:continue
   assert hashlib.sha256((path/name).read_bytes()).hexdigest()==digest,'System backup integrity failure'
  return m
