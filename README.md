@@ -23,6 +23,21 @@
 
 本机沿用 `.local/legacy-binding.json` 指向的最早恢复基线，不把本次较新的状态当作“最初状态”。新电脑没有这个私密桥接文件，自动建立自己的首次基线。不要把本机 `.local` 复制到另一台电脑使用。
 
+### 恢复后 IPv6 仍未启用怎么办
+
+先分清两种失效，它们的表现一样（`netsh interface ipv6 show interfaces` 只剩 Loopback），原因完全不同：
+
+1. **网卡绑定被禁用**。旧版本只按网卡名称回放快照，而 `Get-NetAdapterBinding -Name` 支持通配符（Windows 虚拟网卡名形如 `本地连接* 1`），匹配失败会静默 `continue`；apply 之后新建或重建的网卡也不在快照里，于是绑定一直保持禁用。现在改为按 `InterfaceGuid` 精确匹配，并额外记录 apply 实际禁用了哪些网卡。
+2. **Tcpip6 驱动被设为手动/禁用启动**。此时注册表里 `UpperBind`、`Linkage\Bind`、`DisabledComponents` 可能全都正常，但驱动不加载，IPv6 协议栈整体不存在，任何 `Enable-NetAdapterBinding` 都不会有效果。恢复流程现在会检查 `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6` 的 `Start` 值，发现是 3/4 时改回 1。
+
+已经被旧版本恢复过、但 IPv6 仍未启用的机器，可以单独修复，不必重跑整套恢复：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/system.ps1 -Action repair-bindings
+```
+
+需要管理员权限，执行后重启 Windows。用 `netsh interface ipv6 show interfaces` 能重新列出物理网卡即表示恢复成功。若个别网卡仍报失败，说明它的 TCP/IPv6 组件是被移除而非禁用，此时才需要 `netcfg -d` 加重启（会重置全部网络配置）。
+
 ## 每一步做什么、有什么用
 
 | 步骤 | 修改及用途 | 影响与边界 |
@@ -37,7 +52,7 @@
 | DNS | fake-ip；默认 Cloudflare/Google DoH 经固定节点，国内名单单独使用国内 DoH；保留本地域名解析 | 沿用“默认海外”的策略，不改成所有域名先询问国内 DNS |
 | DNS Type 64/65 | 在每条上游解析路径附加 `disable-qtype-64=true` 和 `disable-qtype-65=true`，覆盖默认/直连/节点域名/系统私有域名策略 | SVCB/HTTPS 查询得到空响应；这不是拦截 64/65 端口。可能失去 ECH 与部分服务发现优化，不关闭 TLS 证书校验，也不等于关闭全部 QUIC |
 | TUN | mixed、auto-route、auto-detect-interface、strict-route，接管 TCP/UDP 53 | 接管普通 Windows 程序、curl/git/npm 等；其他 VPN、WSL、容器转发和应用自带加密 DNS需另行实测 |
-| IPv6 | Clash/DNS IPv6 关闭；系统 DisabledComponents=255，禁用现有网卡 IPv6 绑定 | 需要重启；新网卡出现后重新检查。恢复时按原网卡记录还原，不启用原先已关闭的绑定 |
+| IPv6 | Clash/DNS IPv6 关闭；系统 DisabledComponents=255，禁用现有网卡 IPv6 绑定，并把实际被禁用的网卡清单写入 `.local/baseline/disabled-by-apply.json` | 需要重启；新网卡出现后重新检查。恢复时按网卡 GUID 精确还原，并补启 apply 之后新增的网卡；若原始基线本身是在 IPv6 已禁用状态下采集的，恢复为可用而不是回放该禁用状态 |
 | 代理清理 | 关闭系统/WinHTTP 代理，清理 HTTP(S)/ALL/NO_PROXY 及 git/npm/Docker 客户端代理覆盖 | 保存原值。已打开的进程可能保留旧环境变量，需重新启动 |
 | 严格防火墙 | 默认出站 Block，禁用原本地出站 Allow，保留核心、TUN、LAN、DHCP 必要路径 | 核心程序本身允许出站，必须保持正确配置；动态共享服务、管理员软件及将来新增允许规则仍需审核 |
 | 核心故障保护 | 节点坏但核心运行时国内仍直连；整个核心停止时所有公网阻断 | 后一种情况下国内公网也会断。这是有意的严格行为，并非误报 |
