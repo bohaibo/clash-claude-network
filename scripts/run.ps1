@@ -17,8 +17,8 @@ function Get-Snapshots {
  @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Where-Object {Test-Path -LiteralPath (Join-Path $_.FullName 'manifest.json')} | Sort-Object Name -Descending)
 }
 function Show-Snapshots {
- $list=Get-Snapshots
- if(!$list.Count){Write-Host '还没有任何快照。先执行一次「配置」才会生成第一份。';return @()}
+ $list=@(Get-Snapshots)
+ if(!$list.Count){Write-Host '还没有可恢复的快照。请先执行菜单 4「保存当前快照」或菜单 1/2「配置」；若保存失败，请查看失败提示。';return @()}
  Write-Host '快照列表（新的在上面）：'
  for($i=0;$i -lt $list.Count;$i++){
   $state=Get-Content -LiteralPath (Join-Path $list[$i].FullName 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -62,7 +62,7 @@ if($Action -eq 'list-snapshots'){Show-Snapshots | Out-Null;return}
 
 # Pick the restore target before elevation so the interactive prompt stays visible.
 if($Action -eq 'restore' -and !$Snapshot){
- $list=Show-Snapshots
+ $list=@(Show-Snapshots)
  if(!$list.Count){throw '没有可恢复的快照。'}
  if($list.Count -eq 1){$Snapshot=$list[0].Name;Write-Host ('只有一份快照，直接使用：'+$Snapshot)}
  else{
@@ -86,8 +86,11 @@ if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principa
 if($Snapshot){$env:CCN_SNAPSHOT=Join-Path (Join-Path $local 'snapshots') $Snapshot}
 
 if($Action -eq 'snapshot'){
- $output=& $python (Join-Path $PSScriptRoot 'client.py') create-snapshot
- if($LASTEXITCODE -ne 0){throw '快照采集失败，未做任何改动。'}
+ $snapshotError=Join-Path $local 'snapshot-error.log'
+ try{
+  $output=& $python (Join-Path $PSScriptRoot 'client.py') create-snapshot 2> $snapshotError
+  if($LASTEXITCODE -ne 0){throw 'client.py failed'}
+ }catch{throw ('快照采集失败，未做任何改动。详细错误保存在：'+$snapshotError)}
  $created=($output | Select-Object -Last 1) | ConvertFrom-Json
  $env:CCN_SNAPSHOT=$created.snapshot
  & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
@@ -95,6 +98,7 @@ if($Action -eq 'snapshot'){
   & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw '浏览器策略备份失败。'}
   & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw '浏览器语言备份失败。'}
  }
+ & $python (Join-Path $PSScriptRoot 'client.py') seal;if($LASTEXITCODE -ne 0){throw '快照封存校验失败，不能视为保存成功。'}
  Write-Host ('快照已保存：'+$created.snapshot)
  return
 }

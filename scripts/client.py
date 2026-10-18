@@ -257,7 +257,12 @@ def backup(root,path=None,allow_configured=False):
   return
  if not allow_configured:
   assert not already_configured(root),'Client already carries this project enhancement. Capture the baseline before the first apply instead of snapshotting an already-configured state.'
- path.mkdir(parents=True,exist_ok=True);shutil.copytree(root,path/'client',dirs_exist_ok=True)
+ # A running Clash holds its instance lock open, including for administrators.
+ # Exclude the same runtime-only files that restore deliberately never replays.
+ def ignore_runtime(directory,names):
+  relative=Path(directory).relative_to(root)
+  return [name for name in names if is_volatile(relative/name)]
+ path.mkdir(parents=True,exist_ok=True);shutil.copytree(root,path/'client',dirs_exist_ok=True,ignore=ignore_runtime)
  write(manifest,{'computer':socket.gethostname(),'user_sid':user_sid(),'client_root':str(root),'time':datetime.datetime.now().astimezone().isoformat(),
   'kind':'auto','coverage':{},'sha256':{str(p.relative_to(path/'client')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (path/'client').rglob('*') if p.is_file()}})
 def user_sid():
@@ -333,8 +338,12 @@ def is_volatile(relative):
  # and replaying them cannot change behaviour, but they abort a whole restore.
  return relative.name in VOLATILE_NAMES or relative.suffix=='.lock' or (relative.parts and relative.parts[0] in VOLATILE_DIRS)
 def restore_client():
- plan=json.loads((LOCAL/'plan.json').read_text());root=root_path(plan['root'])
- path=snapshot_dir();backup(root,path)
+ from baseline import verify
+ state=verify();path=snapshot_dir();root=root_path(state['client_root']);backup(root,path)
+ # Manual snapshots work before the first apply, when no plan exists yet.
+ plan_path=LOCAL/'plan.json'
+ plan=json.loads(plan_path.read_text(encoding='utf-8')) if plan_path.exists() else {}
+ if plan:assert Path(plan['root']).resolve()==root,'Plan belongs to a different client data directory'
  original=path/'client';locked=[]
  for p in original.rglob('*'):
   if not p.is_file():continue
@@ -346,7 +355,7 @@ def restore_client():
   except PermissionError:
    # A single held file must not leave the rest of the client half restored.
    locked.append(str(relative))
- for relative in plan['generated_files']:
+ for relative in plan.get('generated_files',[]):
   p=safe_file(root,relative)
   if p.exists() and not (original/relative).exists():p.unlink()
  api(root,'PUT','/configs?force=true',{'payload':(root/'clash-verge.yaml').read_text(encoding='utf-8')})
