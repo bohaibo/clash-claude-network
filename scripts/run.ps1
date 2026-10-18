@@ -1,11 +1,16 @@
-param([ValidateSet('apply','restore','snapshot','list-snapshots')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[switch]$SkipBrowser)
+﻿param([ValidateSet('apply','restore','snapshot','list-snapshots')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[switch]$SkipBrowser)
 $ErrorActionPreference='Stop'
+# 提权后的新控制台默认是 936 代码页，中文和表情会在 PowerShell 与 Python 之间
+# 互相解码错误（甚至让 print 直接抛 UnicodeEncodeError）。两端统一成 UTF-8。
+$env:PYTHONUTF8='1'
+$env:PYTHONIOENCODING='utf-8'
+try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{}
 $project=Split-Path -Parent $PSScriptRoot
 $local=Join-Path $project '.local';New-Item -Path $local -ItemType Directory -Force | Out-Null
 $python=(Get-Command python.exe -ErrorAction Stop).Source
-if($python -like '*\Microsoft\WindowsApps\*'){throw 'Windows Store Python alias detected. Use an installed Python runtime; no software will be installed automatically.'}
+if($python -like '*\Microsoft\WindowsApps\*'){throw '检测到的是 Windows 应用商店的 Python 占位程序。请使用正式安装的 Python，脚本不会自动安装任何软件。'}
 & $python -c 'import yaml,sys;assert sys.version_info >= (3,10)'
-if($LASTEXITCODE -ne 0){throw 'Python 3.10+ and PyYAML are required. Read README.md; do not run a partial installation.'}
+if($LASTEXITCODE -ne 0){throw '需要 Python 3.10 及以上版本，并且已安装 PyYAML。请先阅读 README.md，不要只装一半依赖。'}
 
 function Get-Snapshots {
  $root=Join-Path $local 'snapshots'
@@ -13,10 +18,10 @@ function Get-Snapshots {
 }
 function Show-Snapshots {
  $list=Get-Snapshots
- if(!$list.Count){Write-Host 'No snapshot captured yet. Run apply once to create the first one.';return @()}
- Write-Host 'Snapshots (newest first):'
+ if(!$list.Count){Write-Host '还没有任何快照。先执行一次「配置」才会生成第一份。';return @()}
+ Write-Host '快照列表（新的在上面）：'
  for($i=0;$i -lt $list.Count;$i++){
-  $state=Get-Content -LiteralPath (Join-Path $list[$i].FullName 'manifest.json') -Raw | ConvertFrom-Json
+  $state=Get-Content -LiteralPath (Join-Path $list[$i].FullName 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
   $kind=if($state.kind){[string]$state.kind}else{'auto'}
   Write-Host ('  {0}. {1}  {2}  [{3}]' -f ($i+1),$list[$i].Name,$state.time,$kind)
  }
@@ -28,12 +33,12 @@ if($Action -eq 'list-snapshots'){Show-Snapshots | Out-Null;return}
 # Pick the restore target before elevation so the interactive prompt stays visible.
 if($Action -eq 'restore' -and !$Snapshot){
  $list=Show-Snapshots
- if(!$list.Count){throw 'No snapshot available to restore.'}
- if($list.Count -eq 1){$Snapshot=$list[0].Name;Write-Host ('Using the only snapshot: '+$Snapshot)}
+ if(!$list.Count){throw '没有可恢复的快照。'}
+ if($list.Count -eq 1){$Snapshot=$list[0].Name;Write-Host ('只有一份快照，直接使用：'+$Snapshot)}
  else{
-  $pick=Read-Host ('Select snapshot [1-'+$list.Count+']')
+  $pick=Read-Host ('请输入要恢复的快照编号 [1-'+$list.Count+']')
   $index=0
-  if(![int]::TryParse($pick,[ref]$index) -or $index -lt 1 -or $index -gt $list.Count){throw 'Invalid snapshot selection'}
+  if(![int]::TryParse($pick,[ref]$index) -or $index -lt 1 -or $index -gt $list.Count){throw '快照编号无效。'}
   $Snapshot=$list[$index-1].Name
  }
 }
@@ -52,96 +57,155 @@ if($Snapshot){$env:CCN_SNAPSHOT=Join-Path (Join-Path $local 'snapshots') $Snapsh
 
 if($Action -eq 'snapshot'){
  $output=& $python (Join-Path $PSScriptRoot 'client.py') create-snapshot
- if($LASTEXITCODE -ne 0){throw 'Snapshot capture failed; nothing changed'}
+ if($LASTEXITCODE -ne 0){throw '快照采集失败，未做任何改动。'}
  $created=($output | Select-Object -Last 1) | ConvertFrom-Json
  $env:CCN_SNAPSHOT=$created.snapshot
  & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
  if(!$SkipBrowser){
-  & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser policy capture failed'}
-  & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser language capture failed'}
+  & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw '浏览器策略备份失败。'}
+  & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw '浏览器语言备份失败。'}
  }
- Write-Host ('Snapshot saved: '+$created.snapshot)
+ Write-Host ('快照已保存：'+$created.snapshot)
  return
 }
 
 if(!$Acknowledged) {
  if($Action -eq 'apply'){
-  Write-Host 'This applies strict outbound blocking, disables IPv6, changes Singapore region/languages, clears proxy overrides, and restarts Chrome/Edge.'
-  Write-Host 'If Mihomo stops, domestic public Internet is blocked too. VPN, Docker, WSL, video calls and remote access can be affected. Save browser pages first.'
-  if($SkipBrowser){Write-Host 'Browser policies and languages will be left untouched (-SkipBrowser).'}
+  Write-Host '即将执行：严格出站防火墙、关闭系统 IPv6、把区域/语言改成新加坡、清理代理环境变量。'
+  Write-Host '注意：Mihomo 停止运行时，国内公网也会一起断。VPN、Docker、WSL、视频通话、远程控制都可能受影响。'
+  if($SkipBrowser){Write-Host '浏览器：本次完全不碰，不会关闭 Chrome/Edge，也不改 WebRTC 和语言。'}
+  else{Write-Host '浏览器：会强制关闭 Chrome/Edge 来改 WebRTC 与语言设置，结束后自动帮你恢复上次的标签页。请先保存网页内容。'}
  }
- else{Write-Host ('This restores the snapshot: '+$Snapshot)}
- if((Read-Host 'Type YES to confirm') -cne 'YES'){return}
+ else{Write-Host ('即将恢复到这份快照：'+$Snapshot)}
+ $answer=Read-Host '确认执行请输入 1（直接回车 = 取消）'
+ if($answer -ne '1' -and $answer -cne '是' -and $answer -ine 'YES'){Write-Host '已取消，没有做任何改动。';return}
 }
-$opened=@(Get-Process chrome,msedge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)
+# 需要改浏览器设置时强制关闭 Chrome/Edge；-SkipBrowser 时一律不碰。
+$opened=@()
+if(!$SkipBrowser){$opened=@(Get-Process chrome,msedge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)}
 $clashProgram=@(Get-Process clash-verge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path -Unique)
 $result=[ordered]@{success=$false;action=$Action}
 try {
  if($opened.Count){Stop-Process -Name $opened -Force}
  if($Action -eq 'apply') {
   Get-Service -Name clash_verge_service -ErrorAction Stop | Out-Null
-  & $python (Join-Path $PSScriptRoot 'test_dns_filter.py');if($LASTEXITCODE -ne 0){throw 'Installed core DNS type-filter control test failed; no system settings changed.'}
-  if(!$Node){$Node=Read-Host 'Exact existing node name (no automatic node replacement)'}
+  & $python (Join-Path $PSScriptRoot 'test_dns_filter.py');if($LASTEXITCODE -ne 0){throw '内核 DNS 类型过滤自检未通过，未改动任何系统设置。'}
+  if(!$Node){
+   # 优先沿用上次的节点，避免每次手打完整节点名；没有历史时按编号选择。
+   $lastNode=$null
+   $planFile=Join-Path $local 'plan.json'
+   if(Test-Path -LiteralPath $planFile){try{$lastNode=([string](Get-Content -LiteralPath $planFile -Raw -Encoding UTF8 | ConvertFrom-Json).node)}catch{$lastNode=$null}}
+   if($lastNode){
+    Write-Host ('上次使用的节点：'+$lastNode)
+    $answerNode=Read-Host '直接回车沿用它；要换节点就输入新的完整节点名'
+    if([string]::IsNullOrWhiteSpace($answerNode)){$Node=$lastNode}else{$Node=$answerNode.Trim()}
+   } else {
+    $subs=@()
+    try{
+     $discovered=& $python (Join-Path $PSScriptRoot 'client.py') discover 2>$null | Select-Object -Last 1 | ConvertFrom-Json
+     $subs=@($discovered.subscriptions)
+    }catch{$subs=@()}
+    if($subs.Count){
+     Write-Host '可用订阅：'
+     for($i=0;$i -lt $subs.Count;$i++){Write-Host ('  {0}. {1}（{2} 个节点）' -f ($i+1),$subs[$i].name,@($subs[$i].nodes).Count)}
+     $pick=Read-Host ('请输入订阅编号 [1-'+$subs.Count+']，也可以直接输入完整节点名')
+     $index=0
+     if([int]::TryParse($pick,[ref]$index) -and $index -ge 1 -and $index -le $subs.Count){
+      $chosen=$subs[$index-1];$nodes=@($chosen.nodes)
+      Write-Host ('订阅「'+$chosen.name+'」的节点：')
+      for($j=0;$j -lt $nodes.Count;$j++){Write-Host ('  {0}. {1}' -f ($j+1),$nodes[$j])}
+      $nodePick=Read-Host ('请输入节点编号 [1-'+$nodes.Count+']')
+      $nodeIndex=0
+      if(![int]::TryParse($nodePick,[ref]$nodeIndex) -or $nodeIndex -lt 1 -or $nodeIndex -gt $nodes.Count){throw '节点编号无效。'}
+      $Node=[string]$nodes[$nodeIndex-1]
+      if(!$Subscription){$Subscription=[string]$chosen.name}
+     } else {$Node=$pick.Trim()}
+    } else {
+     $Node=Read-Host '请输入订阅里已存在的完整节点名（不会自动替换成别的节点）'
+    }
+   }
+   Write-Host ('将使用节点：'+$Node)
+  }
   Get-Process clash-verge -ErrorAction SilentlyContinue | Stop-Process -Force
   $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region)
   if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
-  $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw 'Candidate/backup preparation failed; no system settings changed.'}
+  $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw '候选配置/备份生成失败，未改动任何系统设置。'}
   $planState=($prepared | Select-Object -Last 1) | ConvertFrom-Json
   $env:CCN_SNAPSHOT=$planState.snapshot
-  Write-Host ('Snapshot in use: '+$planState.snapshot)
+  Write-Host ('本次的回滚点（快照）：'+$planState.snapshot)
   & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
   if(!$SkipBrowser){
-   & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser policy backup failed'}
-   & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser language backup failed'}
+   & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw '浏览器策略备份失败。'}
+   & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw '浏览器语言备份失败。'}
   }
-  & $python (Join-Path $PSScriptRoot 'client.py') seal;if($LASTEXITCODE -ne 0){throw 'System backup sealing failed'}
-  & $python (Join-Path $PSScriptRoot 'client.py') apply-client;if($LASTEXITCODE -ne 0){throw 'Client application failed'}
+  & $python (Join-Path $PSScriptRoot 'client.py') seal;if($LASTEXITCODE -ne 0){throw '系统备份封存失败。'}
+  & $python (Join-Path $PSScriptRoot 'client.py') apply-client;if($LASTEXITCODE -ne 0){throw '客户端配置写入失败。'}
   $watchToken='guard-'+[Guid]::NewGuid().ToString('N')
   $watchArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'watchdog.ps1')+'"'),'-Token',$watchToken)
   Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $watchArgs | Out-Null
   & (Join-Path $PSScriptRoot 'system.ps1') -Action apply -Python $python
   if(!$SkipBrowser){
-   & $python (Join-Path $PSScriptRoot 'browser_settings.py') apply;if($LASTEXITCODE -ne 0){throw 'Browser policies failed'}
-   & $python (Join-Path $PSScriptRoot 'browser_languages.py') apply;if($LASTEXITCODE -ne 0){throw 'Browser languages failed'}
+   & $python (Join-Path $PSScriptRoot 'browser_settings.py') apply;if($LASTEXITCODE -ne 0){throw '浏览器策略写入失败。'}
+   & $python (Join-Path $PSScriptRoot 'browser_languages.py') apply;if($LASTEXITCODE -ne 0){throw '浏览器语言写入失败。'}
   }
-  & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw 'Network verification failed'}
-  & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw 'Core-exit protection/restart verification failed'}
-  & $python (Join-Path $PSScriptRoot 'verify.py');if($LASTEXITCODE -ne 0){throw 'Network did not recover after core-exit check'}
+  & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw '网络验证未通过。'}
+  & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw '内核退出保护/重启验证未通过。'}
+  & $python (Join-Path $PSScriptRoot 'verify.py');if($LASTEXITCODE -ne 0){throw '内核退出测试之后网络没有恢复。'}
   $guardMutex=New-Object Threading.Mutex($false,('Local\CCN-'+$watchToken))
   [void]$guardMutex.WaitOne()
   try {
-   if(Test-Path -LiteralPath (Join-Path $local ($watchToken+'.rollback'))){throw 'Firewall watchdog rolled back before completion; not a successful deployment.'}
-   if(@(Get-NetFirewallProfile | Where-Object {$_.DefaultOutboundAction.ToString() -ne 'Block'}).Count){throw 'Strict firewall is no longer active.'}
-   if(@(Get-NetFirewallRule -PolicyStore PersistentStore -Name 'CCN-Portable-*' -ErrorAction SilentlyContinue).Count -ne 4){throw 'Strict firewall rules are incomplete.'}
+   if(Test-Path -LiteralPath (Join-Path $local ($watchToken+'.rollback'))){throw '防火墙看门狗已回滚，本次部署不算成功。'}
+   if(@(Get-NetFirewallProfile | Where-Object {$_.DefaultOutboundAction.ToString() -ne 'Block'}).Count){throw '严格防火墙已经不再生效。'}
+   if(@(Get-NetFirewallRule -PolicyStore PersistentStore -Name 'CCN-Portable-*' -ErrorAction SilentlyContinue).Count -ne 4){throw '严格防火墙规则不完整。'}
    Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Verified'
   } finally {$guardMutex.ReleaseMutex();$guardMutex.Dispose()}
   & (Join-Path $PSScriptRoot 'update_task.ps1') -Action install -Python $python
  } else {
-  & $python -c 'from baseline import verify;verify()'
-  if($LASTEXITCODE -ne 0){throw 'Snapshot verification failed; no settings restored'}
+  # `python -c` only puts the current directory on sys.path, and the menu entry
+  # starts this script from the project root, so baseline.py was never importable.
+  # Do not build a quoted path into the -c string: PowerShell 5.1 strips embedded
+  # double quotes when calling a native program. Switch directory instead.
+  Push-Location $PSScriptRoot
+  try{& $python -c 'from baseline import verify;verify()'}finally{Pop-Location}
+  if($LASTEXITCODE -ne 0){throw '快照校验失败，未恢复任何设置。'}
   & (Join-Path $PSScriptRoot 'update_task.ps1') -Action remove -Python $python
-  & (Join-Path $PSScriptRoot 'system.ps1') -Action restore -Python $python
-  & $python (Join-Path $PSScriptRoot 'browser_settings.py') restore;if($LASTEXITCODE -ne 0){throw 'Browser policy restoration failed'}
-  & $python (Join-Path $PSScriptRoot 'browser_languages.py') restore;if($LASTEXITCODE -ne 0){throw 'Browser language restoration failed'}
+  # A snapshot captured without elevation has no system.json: system.ps1 would
+  # throw on the missing file even though nothing system-level was ever changed.
+  if(Test-Path -LiteralPath (Join-Path $env:CCN_SNAPSHOT 'system.json')){
+   & (Join-Path $PSScriptRoot 'system.ps1') -Action restore -Python $python
+  } else {
+   Write-Warning '这份快照只记录了客户端状态（没有 system.json）。本机从未被本项目改过防火墙、IPv6、区域和语言，所以只还原客户端与浏览器设置。'
+  }
+  & $python (Join-Path $PSScriptRoot 'browser_settings.py') restore;if($LASTEXITCODE -ne 0){throw '浏览器策略还原失败。'}
+  & $python (Join-Path $PSScriptRoot 'browser_languages.py') restore;if($LASTEXITCODE -ne 0){throw '浏览器语言还原失败。'}
   Get-Process clash-verge -ErrorAction SilentlyContinue | Stop-Process -Force
-  & $python (Join-Path $PSScriptRoot 'client.py') restore-client;if($LASTEXITCODE -ne 0){throw 'Client restoration failed'}
+  & $python (Join-Path $PSScriptRoot 'client.py') restore-client;if($LASTEXITCODE -ne 0){throw '客户端还原失败。'}
  }
  $result.success=$true
- Write-Host ('Completed. Restored from: '+$env:CCN_SNAPSHOT)
- Write-Host 'Restart Windows for IPv6/language changes. Network checks do not prove Claude account usability.'
+ if($Action -eq 'apply'){
+  Write-Host ('配置已完成并生效。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT)
+  Write-Host '固定节点组 Claude-Overseas-Pinned 只包含你指定的节点。要撤销请运行菜单 3「恢复」。'
+ } else {
+  Write-Host ('恢复已完成。使用的快照：'+$env:CCN_SNAPSHOT)
+ }
+ Write-Host 'IPv6 和语言改动要重启 Windows 才完全生效。网络测试不能证明 Claude 账号本身可用。'
 } catch {
  $result.error=$_.Exception.Message
  if($Action -eq 'apply' -and $env:CCN_SNAPSHOT -and (Test-Path -LiteralPath (Join-Path $env:CCN_SNAPSHOT 'system.json'))) {
   try{& (Join-Path $PSScriptRoot 'system.ps1') -Action rollback-firewall -Python $python;$result.firewallRollback=$true;if($watchToken){Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Rolled back'}}catch{$result.firewallRollback=$false}
  }
  Write-Error $_ -ErrorAction Continue
- Write-Host 'Configuration is incomplete and may be partially applied: the firewall watchdog rolls back firewall rules only, not timezone, language, IPv6 or proxy changes. Run restore before retrying.'
+ if($Action -eq 'apply'){
+  Write-Host '配置没有完成，可能只改了一部分：看门狗只回滚防火墙规则，时区、语言、IPv6 和代理设置不会自动还原。重试之前请先执行「恢复」。'
+ } else {
+  Write-Host '恢复没有完成，可能只还原了一部分。可以直接再执行一次「恢复」。'
+ }
 } finally {
  $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
  if(Get-ScheduledTask -TaskName 'Clash Verge' -ErrorAction SilentlyContinue){Start-ScheduledTask -TaskName 'Clash Verge'}
  elseif($clashProgram.Count -eq 1 -and (Test-Path -LiteralPath $clashProgram[0])){Start-Process -FilePath $clashProgram[0]}
- if($opened -contains 'chrome'){Start-Process -FilePath "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" -ArgumentList '--restore-last-session'}
- if($opened -contains 'msedge'){Start-Process -FilePath "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" -ArgumentList '--restore-last-session'}
+ # 浏览器不再自动拉起：配置/恢复结束后由你自己打开，避免多开窗口。
+ # 需要恢复上次标签页时，Chrome/Edge 启动后会用自带的"恢复"功能。
 }
-if(!$NoPause){Read-Host 'Press Enter to close'}
+if(!$NoPause){Read-Host '按回车键关闭窗口'}
 if(!$result.success){exit 1}

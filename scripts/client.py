@@ -65,7 +65,7 @@ def new_snapshot():
 def root_path(value=None):
  assert os.name=='nt','Bundled system adapter supports Windows only. Read references/windows.md for the supported platform.'
  root=Path(value) if value else Path(os.environ['APPDATA'])/'io.github.clash-verge-rev.clash-verge-rev'
- assert (root/'profiles.yaml').is_file() and (root/'clash-verge.yaml').is_file(),'Clash Verge Rev data directory not found'
+ assert (root/'profiles.yaml').is_file() and (root/'clash-verge.yaml').is_file(),'找不到 Clash Verge Rev 的数据目录。'
  return root.resolve()
 def safe_file(root,relative):
  path=(root/relative).resolve();assert path.is_relative_to(root.resolve()),'Path escapes client directory';return path
@@ -87,7 +87,7 @@ def discover(root):
 def select(root,node,subscription=None):
  matches=[r for r in discover(root)['subscriptions'] if node in r['nodes'] and
           (subscription is None or subscription in (r['name'],r['uid']))]
- assert len(matches)==1,'Node missing or ambiguous. Supply an exact subscription name/UID; do not guess.'
+ assert len(matches)==1,'节点不存在或有重名。请指定订阅名称或 UID；不要猜测。'
  return next(x for x in load(root/'profiles.yaml')['items'] if x['uid']==matches[0]['uid'])
 def download_rules():
  data={};metadata={};opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -102,9 +102,11 @@ def download_rules():
     assert re.fullmatch(r'[a-zA-Z0-9.*_-]+',v),'Unrecognized domain-list syntax'
     v='+.'+v[2:] if v.startswith('*.') else v
     if v not in ('+.douban.*','+.jianshu.*'):
-     name=v.removeprefix('+.');assert '*' not in name
-     assert '.' in name or name in ('cn','xn--fiqs8s'),'Overbroad public suffix requires review'
-     assert all(re.fullmatch(r'[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?',label) for label in name.split('.'))
+     # Never reuse the outer loop variable here: clobbering `name` would key
+     # this source under the last domain instead of 'domains'.
+     bare=v.removeprefix('+.');assert '*' not in bare
+     assert '.' in bare or bare in ('cn','xn--fiqs8s'),'Overbroad public suffix requires review'
+     assert all(re.fullmatch(r'[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?',label) for label in bare.split('.'))
     values.append(v)
   else:
    values=yaml.safe_load(raw)['payload'];assert isinstance(values,list)
@@ -280,11 +282,25 @@ def prepare(root,node,subscription,region):
   plan['generated_files']=list(dict.fromkeys(earlier.get('generated_files',[])+plan['generated_files']))
  write(LOCAL/'plan.json',plan);write(LOCAL/'settings.json',{'node':node,'subscription':item['uid'],'region':region})
  return {'prepared':True,'node':node,'snapshot':str(path),'rule_count':len(candidate['rules'])}
+def is_file_safe(path):
+ try:return path.is_file()
+ except OSError:return False
 def actual_core():
  command="Get-CimInstance Win32_Process | Where-Object {$_.Name -eq 'verge-mihomo.exe'} | Select-Object -ExpandProperty ExecutablePath"
- result=subprocess.check_output(['powershell.exe','-NoProfile','-Command',command],text=True).strip().splitlines()
- assert len(result)==1 and Path(result[0]).is_file(),'Cannot identify unique actual core executable for firewall rule'
- return result[0]
+ try:
+  result=subprocess.check_output(['powershell.exe','-NoProfile','-Command',command],text=True,stderr=subprocess.DEVNULL).strip().splitlines()
+ except OSError:
+  result=[]
+ result=[line.strip() for line in result if line.strip()]
+ if len(result)==1 and Path(result[0]).is_file():return result[0]
+ # Fallback for an unelevated or sandboxed caller: the core runs as SYSTEM, so
+ # its image path cannot be queried. Accept only a single unambiguous install.
+ # The elevated apply re-runs this function and overwrites the unverified value.
+ candidates=[p for p in (Path(os.environ.get('PROGRAMFILES',r'C:\Program Files'))/'Clash Verge/verge-mihomo.exe',
+             Path(os.environ.get('PROGRAMDATA',r'C:\ProgramData'))/'clash-verge-service/cores/verge-mihomo.exe') if is_file_safe(p)]
+ assert len(candidates)==1,'Cannot identify unique actual core executable for firewall rule'
+ print('core path not verifiable without elevation; using single install: '+str(candidates[0]),file=sys.stderr)
+ return str(candidates[0])
 def apply_client():
  plan=json.loads((LOCAL/'plan.json').read_text());root=root_path(plan['root']);backup(root,Path(plan['snapshot']) if plan.get('snapshot') else None)
  text=(LOCAL/'candidate.yaml').read_text(encoding='utf-8');current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
@@ -305,17 +321,31 @@ def apply_client():
    elif path.exists():path.unlink()
   api(root,'PUT','/configs?force=true',{'payload':current});raise
  return {'client_applied':True,'node':plan['node']}
+VOLATILE_NAMES=('singleton-instance.lock','singleton-instance.json','cache.db')
+VOLATILE_DIRS=('logs','clash-verge-rev-backup')
+def is_volatile(relative):
+ # Runtime state only: locks, caches and logs are held open by the running client
+ # and replaying them cannot change behaviour, but they abort a whole restore.
+ return relative.name in VOLATILE_NAMES or relative.suffix=='.lock' or (relative.parts and relative.parts[0] in VOLATILE_DIRS)
 def restore_client():
  plan=json.loads((LOCAL/'plan.json').read_text());root=root_path(plan['root'])
  path=snapshot_dir();backup(root,path)
- original=path/'client'
+ original=path/'client';locked=[]
  for p in original.rglob('*'):
-  if p.is_file():dest=safe_file(root,str(p.relative_to(original)));dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,dest)
+  if not p.is_file():continue
+  relative=p.relative_to(original)
+  if is_volatile(relative):continue
+  dest=safe_file(root,str(relative))
+  try:
+   dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,dest)
+  except PermissionError:
+   # A single held file must not leave the rest of the client half restored.
+   locked.append(str(relative))
  for relative in plan['generated_files']:
   p=safe_file(root,relative)
   if p.exists() and not (original/relative).exists():p.unlink()
  api(root,'PUT','/configs?force=true',{'payload':(root/'clash-verge.yaml').read_text(encoding='utf-8')})
- return {'client_restored':True}
+ return {'client_restored':True,'locked_not_restored':locked}
 def create_snapshot(root=None,node=None):
  # Manual snapshot: capture whatever the machine looks like now, configured or not.
  root=root_path(root);path=new_snapshot();backup(root,path,allow_configured=True)
@@ -335,4 +365,8 @@ if __name__=='__main__':
  elif args.action=='create-snapshot':result=create_snapshot(args.root,args.node)
  elif args.action=='apply-client':result=apply_client()
  else:result=restore_client()
- print(json.dumps(result,ensure_ascii=False))
+ # ASCII-only stdout: the caller is Windows PowerShell, whose pipe decoding
+ # follows the console code page (936 in an elevated window) and cannot carry
+ # emoji node names. \uXXXX escapes survive any code page and ConvertFrom-Json
+ # turns them back into the original characters.
+ print(json.dumps(result,ensure_ascii=True))

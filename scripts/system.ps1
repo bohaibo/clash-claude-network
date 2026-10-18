@@ -1,4 +1,4 @@
-param([ValidateSet('snapshot','apply','restore','rollback-firewall','repair-bindings')][string]$Action,[string]$Python)
+﻿param([ValidateSet('snapshot','apply','restore','rollback-firewall','repair-bindings')][string]$Action,[string]$Python)
 $ErrorActionPreference='Stop'
 $project=Split-Path -Parent $PSScriptRoot
 $localDir=Join-Path $project '.local'
@@ -46,13 +46,13 @@ function Restore-Firewall($saved) {
   foreach($name in $saved.enabledOutboundRules){Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue | Enable-NetFirewallRule}
 }
 if($Action -eq 'snapshot') {
-  if(Test-Path -LiteralPath $file){Write-Output 'Existing snapshot system state retained.';return}
+  if(Test-Path -LiteralPath $file){Write-Output '已有系统状态快照，保留原文件不覆盖。';return}
   # A manual snapshot may legitimately capture an already-configured machine, so the
   # "no project firewall rules without a baseline" guard only applies to automatic ones.
   $manifestFile=Join-Path $stateDir 'manifest.json'
   $kind='auto'
   if(Test-Path -LiteralPath $manifestFile){$kind=[string](Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json).kind}
-  if($kind -ne 'manual' -and @(Get-NetFirewallRule -PolicyStore PersistentStore -Name ($prefix+'*') -ErrorAction SilentlyContinue).Count){throw 'Existing project firewall rules found without the original baseline. Capture a manual snapshot instead of creating an automatic one.'}
+  if($kind -ne 'manual' -and @(Get-NetFirewallRule -PolicyStore PersistentStore -Name ($prefix+'*') -ErrorAction SilentlyContinue).Count){throw '发现本项目残留的防火墙规则，但没有原始基线。请改为「保存当前快照」，不要新建自动快照。'}
   $ipKey='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters'
   $ipValue=Get-ItemProperty -LiteralPath $ipKey -Name DisabledComponents -ErrorAction SilentlyContinue
   $proxyKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -73,7 +73,7 @@ if($Action -eq 'snapshot') {
   }
   & netsh.exe winhttp dump | Set-Content -LiteralPath (Join-Path $stateDir 'winhttp.txt') -Encoding UTF8
   & netsh.exe advfirewall export (Join-Path $stateDir 'firewall.wfw') | Out-Null
-  if($LASTEXITCODE -ne 0){throw 'Firewall export failed; no system settings changed.'}
+  if($LASTEXITCODE -ne 0){throw '防火墙导出失败，未改动任何系统设置。'}
   [ordered]@{timezone=(Get-TimeZone).Id;culture=(Get-Culture).Name;languages=@(Get-WinUserLanguageList);serviceStartupType=(Get-Service clash_verge_service).StartType.ToString();
     ipv6=@{exists=($null -ne $ipValue);value=if($ipValue){$ipValue.DisabledComponents}else{$null}};
     bindings=@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object {
@@ -89,7 +89,7 @@ if($Action -eq 'repair-bindings') {
   # re-enable ms_tcpip6 on every adapter, drop the global IPv6 kill switch, and
   # make sure the Tcpip6 driver itself is allowed to load at boot.
   $serviceFixed=Repair-Tcpip6Service
-  if($serviceFixed){Write-Warning 'Tcpip6 driver startup type was Manual/Disabled; set to system start. A reboot is required before IPv6 works.'}
+  if($serviceFixed){Write-Warning 'Tcpip6 驱动被设为手动/禁用，已改回随系统启动。需要重启 Windows 后 IPv6 才会生效。'}
   Remove-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name DisabledComponents -ErrorAction SilentlyContinue
   $failed=New-Object System.Collections.Generic.List[string]
   foreach($adapter in @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue)){
@@ -97,9 +97,9 @@ if($Action -eq 'repair-bindings') {
       try{Set-AdapterIpv6Binding $adapter $true}catch{$failed.Add("$($adapter.Name): $($_.Exception.Message)")}
     }
   }
-  foreach($entry in $failed){Write-Warning "IPv6 binding could not be enabled on $entry"}
-  if($failed.Count){throw 'Some adapters still have IPv6 disabled. Their TCP/IPv6 component may have been removed; netcfg -d followed by a reboot may be required.'}
-  Write-Host 'IPv6 binding re-enabled on every adapter. Restart Windows for it to take effect.'
+  foreach($entry in $failed){Write-Warning "以下网卡无法重新启用 IPv6：$entry"}
+  if($failed.Count){throw '仍有网卡的 IPv6 处于禁用状态，可能其 TCP/IPv6 组件已被移除；可能需要执行 netcfg -d 后重启。'}
+  Write-Host '已重新启用所有网卡的 IPv6，重启 Windows 后生效。'
   return
 }
 $saved=Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
@@ -108,7 +108,7 @@ if($Action -eq 'restore') {
   Restore-Firewall $saved
   Set-Service -Name clash_verge_service -StartupType $saved.serviceStartupType
   $serviceFixed=Repair-Tcpip6Service
-  if($serviceFixed){Write-Warning 'Tcpip6 driver startup type was Manual/Disabled; set to system start. A reboot is required before IPv6 works.'}
+  if($serviceFixed){Write-Warning 'Tcpip6 驱动被设为手动/禁用，已改回随系统启动。需要重启 Windows 后 IPv6 才会生效。'}
   # A baseline captured after an earlier run already disabled IPv6 would faithfully
   # restore the broken state. Detect that case and treat IPv6 as "must be usable".
   $snapshotBindings=@($saved.bindings | Where-Object {$null -ne $_})
@@ -116,7 +116,7 @@ if($Action -eq 'restore') {
   $baselineDisabled=($snapshotBindings.Count -gt 0 -and $snapshotEnabledCount -eq 0) -or ($saved.ipv6.exists -and [int]$saved.ipv6.value -eq 255)
   if($baselineDisabled){
     Remove-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name DisabledComponents -ErrorAction SilentlyContinue
-    Write-Warning 'The original baseline was captured while IPv6 was already disabled. Restoring IPv6 as usable instead of replaying that state.'
+    Write-Warning '原始基线是在 IPv6 已被禁用时采集的，因此这里恢复成「可用」，而不是回放那个禁用状态。'
   }
   elseif($saved.ipv6.exists){New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name DisabledComponents -PropertyType DWord -Value ([int]$saved.ipv6.value) -Force | Out-Null}
   else {Remove-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name DisabledComponents -ErrorAction SilentlyContinue}
@@ -133,8 +133,8 @@ if($Action -eq 'restore') {
       if($record.guid){[void]$knownGuids.Add([string]$record.guid)}
       if($record.name){[void]$knownNames.Add([string]$record.name)}
       $adapter=Find-Adapter ([string]$record.guid) ([string]$record.name) ([string]$record.description)
-      if(!$adapter){$bindingWarnings.Add("adapter disabled during apply no longer exists: $($record.name)");continue}
-      try{Set-AdapterIpv6Binding $adapter $true}catch{$bindingWarnings.Add("could not re-enable IPv6 on $($adapter.Name): $($_.Exception.Message)")}
+      if(!$adapter){$bindingWarnings.Add("配置时被禁用的网卡已不存在：$($record.name)");continue}
+      try{Set-AdapterIpv6Binding $adapter $true}catch{$bindingWarnings.Add("无法重新启用网卡 $($adapter.Name) 的 IPv6：$($_.Exception.Message)")}
     }
   }
   foreach($binding in $snapshotBindings){
@@ -144,30 +144,48 @@ if($Action -eq 'restore') {
     elseif($null -eq $binding.enabled){continue}
     else{$targetState=[bool]$binding.enabled}
     $adapter=Find-Adapter ([string]$binding.guid) ([string]$binding.Name) ([string]$binding.description)
-    if(!$adapter){$bindingWarnings.Add("adapter from the original snapshot is absent: $($binding.Name)");continue}
-    try{Set-AdapterIpv6Binding $adapter $targetState}catch{$bindingWarnings.Add("could not restore IPv6 binding on $($adapter.Name): $($_.Exception.Message)")}
+    if(!$adapter){$bindingWarnings.Add("原始快照里的网卡已不存在：$($binding.Name)");continue}
+    try{Set-AdapterIpv6Binding $adapter $targetState}catch{$bindingWarnings.Add("无法还原网卡 $($adapter.Name) 的 IPv6 绑定：$($_.Exception.Message)")}
   }
   foreach($adapter in @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue)){
     if($knownGuids -contains [string]$adapter.InterfaceGuid){continue}
     if($knownNames -contains [string]$adapter.Name){continue}
     if((Get-AdapterIpv6Enabled $adapter) -ne $false){continue}
-    try{Set-AdapterIpv6Binding $adapter $true;$bindingWarnings.Add("re-enabled IPv6 on adapter missing from both records: $($adapter.Name)")}catch{$bindingWarnings.Add("could not re-enable IPv6 on unrecorded adapter $($adapter.Name): $($_.Exception.Message)")}
+    try{Set-AdapterIpv6Binding $adapter $true;$bindingWarnings.Add("已为两份记录中都不存在的网卡重新启用 IPv6：$($adapter.Name)")}catch{$bindingWarnings.Add("无法为未记录的网卡 $($adapter.Name) 重新启用 IPv6：$($_.Exception.Message)")}
   }
   $stillDisabled=@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {(Get-AdapterIpv6Enabled $_) -eq $false})
-  foreach($adapter in $stillDisabled){$bindingWarnings.Add("IPv6 binding still disabled after restore: $($adapter.Name)")}
+  foreach($adapter in $stillDisabled){$bindingWarnings.Add("还原后 IPv6 仍处于禁用状态：$($adapter.Name)")}
   foreach($message in $bindingWarnings){Write-Warning $message}
   Set-TimeZone -Id $saved.timezone;Set-Culture -CultureInfo $saved.culture
-  $languages=New-WinUserLanguageList $saved.languages[0].LanguageTag;$languages.Clear()
-  foreach($entry in $saved.languages){$item=(New-WinUserLanguageList $entry.LanguageTag)[0];$item.InputMethodTips.Clear();foreach($tip in $entry.InputMethodTips){$item.InputMethodTips.Add([string]$tip)};$item.Spellchecking=[bool]$entry.Spellchecking;$item.Handwriting=[bool]$entry.Handwriting;$languages.Add($item)}
-  Set-WinUserLanguageList -LanguageList $languages -Force
+  # @(Get-WinUserLanguageList) is stored one level too deep in the snapshot
+  # ([ [ {..}, {..} ] ]), so .LanguageTag used to return an array and
+  # New-WinUserLanguageList -Language rejected it, aborting the whole restore.
+  # Flatten it, and never let a cosmetic language step block the rest.
+  try{
+    $savedLanguages=@($saved.languages)
+    if($savedLanguages.Count -eq 1 -and $savedLanguages[0] -is [System.Array]){$savedLanguages=@($savedLanguages[0])}
+    $savedLanguages=@($savedLanguages | Where-Object {$null -ne $_ -and $_ -isnot [System.Array]})
+    if($savedLanguages.Count){
+      $languages=New-WinUserLanguageList ([string]($savedLanguages[0].LanguageTag));$languages.Clear()
+      foreach($entry in $savedLanguages){$item=(New-WinUserLanguageList ([string]($entry.LanguageTag)))[0];$item.InputMethodTips.Clear();foreach($tip in @($entry.InputMethodTips)){$item.InputMethodTips.Add([string]$tip)};$item.Spellchecking=[bool]$entry.Spellchecking;$item.Handwriting=[bool]$entry.Handwriting;$languages.Add($item)}
+      Set-WinUserLanguageList -LanguageList $languages -Force
+    }
+  }catch{Write-Warning ('语言列表还原失败，其余设置继续还原：'+$_.Exception.Message)}
   foreach($scope in @('User','Machine')){foreach($property in $saved.environment.$scope.PSObject.Properties){[Environment]::SetEnvironmentVariable($property.Name,$property.Value,$scope)}}
   $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
   foreach($property in $saved.proxy.PSObject.Properties){
     if($property.Value.exists){$kind=if($property.Name -eq 'ProxyEnable'){'DWord'}else{'String'};New-ItemProperty -LiteralPath $key -Name $property.Name -Value $property.Value.value -PropertyType $kind -Force | Out-Null}
     else {Remove-ItemProperty -LiteralPath $key -Name $property.Name -ErrorAction SilentlyContinue}
   }
-  & netsh.exe exec (Join-Path $stateDir 'winhttp.txt') | Out-Null
-  if($LASTEXITCODE -ne 0){throw 'WinHTTP restoration failed; inspect the retained dump.'}
+  # Set-Content -Encoding UTF8 writes a BOM, and netsh cannot parse "\ufeff" as
+  # the first command, so exec failed on a dump this project itself produced.
+  # Re-write a BOM-free copy before replaying it.
+  $dumpFile=Join-Path $stateDir 'winhttp.txt'
+  $execFile=Join-Path $stateDir 'winhttp.exec.txt'
+  $dumpText=Get-Content -LiteralPath $dumpFile -Raw -Encoding UTF8
+  [IO.File]::WriteAllText($execFile,$dumpText,(New-Object System.Text.UTF8Encoding($false)))
+  & netsh.exe exec $execFile | Out-Null
+  if($LASTEXITCODE -ne 0){throw 'WinHTTP 还原失败，请查看保留的导出文件。'}
   foreach($entry in $saved.appFiles.PSObject.Properties.Value){
     if($entry.exists){Copy-Item -LiteralPath (Join-Path $stateDir $entry.copy) -Destination $entry.path -Force}
     elseif(Test-Path -LiteralPath $entry.path){Remove-Item -LiteralPath $entry.path}
@@ -187,7 +205,7 @@ New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Pa
 # when they are later renamed, rebuilt or re-plugged and no longer match the snapshot.
 $ipv6Targets=@(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object {(Get-AdapterIpv6Enabled $_) -eq $true})
 foreach($adapter in $ipv6Targets){
-  try{Set-AdapterIpv6Binding $adapter $false}catch{Write-Warning "could not disable IPv6 on $($adapter.Name): $($_.Exception.Message)"}
+  try{Set-AdapterIpv6Binding $adapter $false}catch{Write-Warning "无法禁用网卡 $($adapter.Name) 的 IPv6：$($_.Exception.Message)"}
 }
 $applyRecords=@($ipv6Targets | ForEach-Object {[ordered]@{name=[string]$_.Name;guid=[string]$_.InterfaceGuid;description=[string]$_.InterfaceDescription}})
 if($applyRecords.Count){$applyRecords | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $stateDir 'disabled-by-apply.json') -Encoding UTF8}
@@ -196,7 +214,7 @@ foreach($scope in @('User','Machine','Process')){foreach($name in @('HTTP_PROXY'
 $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings';Set-ItemProperty -LiteralPath $key -Name ProxyEnable -Value 0
 Remove-ItemProperty -LiteralPath $key -Name ProxyServer,AutoConfigURL -ErrorAction SilentlyContinue
 & netsh.exe winhttp reset proxy | Out-Null
-if($LASTEXITCODE -ne 0){throw 'WinHTTP proxy reset failed'}
+if($LASTEXITCODE -ne 0){throw 'WinHTTP 代理重置失败。'}
 if(Get-Command git -ErrorAction SilentlyContinue){
   $keys=& git config --global --name-only --get-regexp '(^http.*\.proxy$|^https.*\.proxy$)'
   foreach($name in $keys){& git config --global --unset-all $name}
@@ -205,13 +223,13 @@ if(Get-Command npm.cmd -ErrorAction SilentlyContinue){& npm.cmd config delete pr
 $docker=Join-Path ([Environment]::GetFolderPath('UserProfile')) '.docker\config.json'
 if(Test-Path -LiteralPath $docker){
   & $Python -c "import json,pathlib; p=pathlib.Path.home()/'.docker/config.json'; d=json.loads(p.read_text(encoding='utf-8-sig')); d.pop('proxies',None); p.write_text(json.dumps(d,indent=2),encoding='utf-8')"
-  if($LASTEXITCODE -ne 0){throw 'Docker client proxy cleanup failed'}
+  if($LASTEXITCODE -ne 0){throw 'Docker 客户端代理清理失败。'}
 }
 $plan=Get-Content -LiteralPath (Join-Path $project '.local\plan.json') -Raw | ConvertFrom-Json
 $tun=Get-NetAdapter | Where-Object {$_.Name -eq 'Meta'}
-if(@($tun).Count -ne 1){throw 'Meta TUN adapter is missing/ambiguous. Agent must inspect actual adapter before firewall changes.'}
+if(@($tun).Count -ne 1){throw '找不到 Meta TUN 网卡，或者存在多个同名网卡。改防火墙之前必须先确认实际网卡。'}
 $unknown=@(Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Where-Object {$_.Name -notlike ($prefix+'*') -and $_.Name -notin $saved.enabledOutboundRules})
-if($unknown.Count){throw 'New outbound allow rules detected since initial snapshot. Review before proceeding.'}
+if($unknown.Count){throw '自初始快照以来出现了新的出站允许规则，请先确认再继续。'}
 Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Where-Object {$_.Name -notlike ($prefix+'*')} | Disable-NetFirewallRule
 Get-NetFirewallRule -Name ($prefix+'*') -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -Name ($prefix+'Core') -DisplayName 'Claude network core outbound' -Direction Outbound -Action Allow -Program $plan.core_program -Profile Any | Out-Null

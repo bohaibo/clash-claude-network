@@ -1,4 +1,5 @@
 .local/
+.workbuddy-ai/
 __pycache__/
 *.pyc
 .venv/

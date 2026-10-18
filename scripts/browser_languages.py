@@ -42,7 +42,7 @@ def running():
     return int(subprocess.check_output(['powershell.exe','-NoProfile','-Command',command],text=True).strip())>0
 
 def update(restore=False):
-    assert not running(),'Close Chrome and Edge first. No live Preferences files were edited.'
+    assert not running(),'请先关闭 Chrome 和 Edge 再重试。没有改动任何正在使用的 Preferences 文件。'
     saved=capture();results=[]
     for browser,path in profiles():
         key=browser+'/'+path.parent.name
