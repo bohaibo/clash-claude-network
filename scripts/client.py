@@ -17,7 +17,7 @@ def write(path,data):
  path.parent.mkdir(parents=True,exist_ok=True);temp=path.with_name(path.name+'.new')
  temp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(path)
 def root_path(value=None):
- assert os.name=='nt','Bundled system adapter supports Windows only. Read references/platforms.md for other systems.'
+ assert os.name=='nt','Bundled system adapter supports Windows only. Read references/windows.md for the supported platform.'
  root=Path(value) if value else Path(os.environ['APPDATA'])/'io.github.clash-verge-rev.clash-verge-rev'
  assert (root/'profiles.yaml').is_file() and (root/'clash-verge.yaml').is_file(),'Clash Verge Rev data directory not found'
  return root.resolve()
@@ -165,9 +165,10 @@ def validate(config,original,node):
  assert sum(r.startswith('MATCH,') for r in config['rules'])==1
  assert config['rules'].index('DOMAIN-SUFFIX,claude.ai,'+GROUP)<config['rules'].index('RULE-SET,strict-cn-domain,DIRECT')
  assert config['tun']['enable'] and config['tun']['strict-route'] and not config['ipv6'] and not config['dns']['ipv6']
+ assert config['tun'].get('auto-route') and config['tun'].get('auto-detect-interface'),'TUN auto-route/auto-detect-interface disabled'
  assert config['dns']['enhanced-mode']=='fake-ip' and not config['dns'].get('fallback')
  assert set(config['tun']['dns-hijack'])=={'any:53','tcp://any:53'}
- for host in ('anthropic.com','claude.ai','claude.com','claudemcpclient.com','claudemcpcontent.com'):
+ for host in ('anthropic.com','claude.ai','claude.com','clau.de','claudeusercontent.com','claudemcpclient.com','claudemcpcontent.com'):
   assert config['rules'].index('DOMAIN-SUFFIX,'+host+','+GROUP)<config['rules'].index('RULE-SET,strict-cn-domain,DIRECT')
  for server in config['dns']['nameserver']:
   assert '#'+GROUP in server,'Foreign DNS bypasses pinned group'
@@ -177,11 +178,16 @@ def validate(config,original,node):
   for value in provider.get('payload',[]):
    parts=value.split(',');cidr=parts[1] if parts[0]=='IP-CIDR' else value if provider.get('behavior')=='ipcidr' and ':' not in value else None
    if cidr:assert not ipaddress.ip_network(cidr,strict=False).overlaps(FAKE),'DIRECT provider overlaps fake-IP pool'
+ def filtered(server):
+  # Special resolvers ("system", "dhcp://...") cannot carry query flags; the type
+  # filter only applies to real resolver URLs.
+  if not re.match(r'(?i)^(?:https?|tls|quic|h3)://',server):return True
+  return 'disable-qtype-64=true' in server and 'disable-qtype-65=true' in server
  for key in ('nameserver','default-nameserver','direct-nameserver','proxy-server-nameserver'):
-  assert all('disable-qtype-64=true' in v and 'disable-qtype-65=true' in v for v in config['dns'][key])
+  assert all(filtered(v) for v in config['dns'].get(key,[])),'DNS server path bypasses type filter'
  for value in config['dns'].get('nameserver-policy',{}).values():
   values=value if isinstance(value,list) else [value]
-  assert all('disable-qtype-64=true' in v and 'disable-qtype-65=true' in v for v in values),'DNS policy path bypasses type filter'
+  assert all(filtered(v) for v in values),'DNS policy path bypasses type filter'
 def backup(root):
  path=LOCAL/'baseline';manifest=path/'manifest.json'
  if manifest.exists():

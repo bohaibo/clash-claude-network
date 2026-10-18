@@ -1,4 +1,4 @@
-param([ValidateSet('apply','restore')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[switch]$Acknowledged,[switch]$NoPause)
+param([ValidateSet('apply','restore')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[switch]$Acknowledged,[switch]$NoPause,[switch]$SkipBrowser)
 $ErrorActionPreference='Stop'
 $project=Split-Path -Parent $PSScriptRoot
 $local=Join-Path $project '.local';New-Item -Path $local -ItemType Directory -Force | Out-Null
@@ -10,7 +10,7 @@ $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),'-Action',$Action,'-Region',$Region)
   if($Node){$arguments+=@('-Node',('"'+$Node+'"'))};if($Subscription){$arguments+=@('-Subscription',('"'+$Subscription+'"'))}
-  if($Acknowledged){$arguments+='-Acknowledged'};if($NoPause){$arguments+='-NoPause'}
+  if($Acknowledged){$arguments+='-Acknowledged'};if($NoPause){$arguments+='-NoPause'};if($SkipBrowser){$arguments+='-SkipBrowser'}
   $process=Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
   exit $process.ExitCode
 }
@@ -27,6 +27,7 @@ if(Test-Path -LiteralPath $bridge) {
 if(!$Acknowledged) {
  Write-Host 'This applies strict outbound blocking, disables IPv6, changes Singapore region/languages, clears proxy overrides, and restarts Chrome/Edge.'
  Write-Host 'If Mihomo stops, domestic public Internet is blocked too. VPN, Docker, WSL, video calls and remote access can be affected. Save browser pages first.'
+ if($SkipBrowser){Write-Host 'Browser policies and languages will be left untouched (-SkipBrowser).'}
  if((Read-Host 'Type YES to confirm these changes') -cne 'YES'){return}
 }
 $opened=@(Get-Process chrome,msedge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)
@@ -43,16 +44,20 @@ try {
   if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
   & $python @prepareArguments;if($LASTEXITCODE -ne 0){throw 'Candidate/backup preparation failed; no system settings changed.'}
   & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
-  & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser policy backup failed'}
-  & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser language backup failed'}
+  if(!$SkipBrowser){
+   & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser policy backup failed'}
+   & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser language backup failed'}
+  }
   & $python (Join-Path $PSScriptRoot 'client.py') seal;if($LASTEXITCODE -ne 0){throw 'System backup sealing failed'}
   & $python (Join-Path $PSScriptRoot 'client.py') apply-client;if($LASTEXITCODE -ne 0){throw 'Client application failed'}
   $watchToken='guard-'+[Guid]::NewGuid().ToString('N')
   $watchArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'watchdog.ps1')+'"'),'-Token',$watchToken)
   Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $watchArgs | Out-Null
   & (Join-Path $PSScriptRoot 'system.ps1') -Action apply -Python $python
-  & $python (Join-Path $PSScriptRoot 'browser_settings.py') apply;if($LASTEXITCODE -ne 0){throw 'Browser policies failed'}
-  & $python (Join-Path $PSScriptRoot 'browser_languages.py') apply;if($LASTEXITCODE -ne 0){throw 'Browser languages failed'}
+  if(!$SkipBrowser){
+   & $python (Join-Path $PSScriptRoot 'browser_settings.py') apply;if($LASTEXITCODE -ne 0){throw 'Browser policies failed'}
+   & $python (Join-Path $PSScriptRoot 'browser_languages.py') apply;if($LASTEXITCODE -ne 0){throw 'Browser languages failed'}
+  }
   & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw 'Network verification failed'}
   & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw 'Core-exit protection/restart verification failed'}
   & $python (Join-Path $PSScriptRoot 'verify.py');if($LASTEXITCODE -ne 0){throw 'Network did not recover after core-exit check'}
@@ -83,7 +88,7 @@ try {
   try{& (Join-Path $PSScriptRoot 'system.ps1') -Action rollback-firewall -Python $python;$result.firewallRollback=$true;if($watchToken){Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Rolled back'}}catch{$result.firewallRollback=$false}
  }
  Write-Error $_ -ErrorAction Continue
- Write-Host 'Configuration is incomplete. Use the restore entry for a complete return to the initial captured state.'
+ Write-Host 'Configuration is incomplete and may be partially applied: the firewall watchdog rolls back firewall rules only, not timezone, language, IPv6 or proxy changes. Run the restore entry before retrying.'
 } finally {
  $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
  if(Get-ScheduledTask -TaskName 'Clash Verge' -ErrorAction SilentlyContinue){Start-ScheduledTask -TaskName 'Clash Verge'}

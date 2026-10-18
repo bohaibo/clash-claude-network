@@ -19,6 +19,8 @@ try:
    with socket.create_connection((address,443),timeout=4):pass
   except OSError:report[label+'_public_blocked']=True
   else:raise AssertionError('Public network remained reachable while core was stopped')
+ report['domestic_also_blocked']=bool(report.get('domestic_public_blocked'))
+ report['scope']='Strict firewall blocks every public destination while the core is stopped, domestic included. Only the core, TUN, LAN and DHCP paths are allowed, so this test proves foreign blocking but not domestic availability in that state.'
  report['success']=True
 finally:
  command('Start-Service clash_verge_service -ErrorAction Stop')

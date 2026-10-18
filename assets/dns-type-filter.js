@@ -1,5 +1,7 @@
   // Block SVCB/HTTPS DNS questions in every configured resolver path.
+  // Special values ("system", "dhcp://...") cannot carry query flags.
   const blockTypes = server => {
+    if (!/^(?:https?|tls|quic|h3):\/\//i.test(server)) return server;
     let out = server;
     for (const type of [64,65]) {
       const flag = 'disable-qtype-'+type+'=true';

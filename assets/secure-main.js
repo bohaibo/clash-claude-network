@@ -2,11 +2,10 @@ function secureMain(config,data,node,group) {
 
   if (!(config.proxies || []).some(p => p.name === node)) throw new Error('Selected node missing: refuse configuration');
   config.mode = 'rule';
-  config['proxy-groups'] = (config['proxy-groups'] || []).filter(g => g.name !== group).map(g => {
-    g.proxies = (g.proxies || []).filter(p => p !== 'DIRECT');
-    if (!g.proxies.length && !g.use) g.proxies = [node];
-    return g;
-  });
+  // Keep existing groups untouched: this project only guarantees that its own pinned
+  // group has no DIRECT/REJECT. Rebuilding every subscription-owned group would
+  // rewrite structure the user did not authorize changing.
+  config['proxy-groups'] = (config['proxy-groups'] || []).filter(g => g.name !== group);
   config['proxy-groups'].push({name:group,type:'select',proxies:[node]});
   config['rule-providers'] = config['rule-providers'] || {};
   for (const provider of Object.values(config['rule-providers'])) if (provider.type === 'http') provider.proxy = group;
@@ -67,7 +66,11 @@ function secureMain(config,data,node,group) {
     'skip-domain':['+.lan','+.local']
   };
   // Block SVCB/HTTPS DNS questions in every configured resolver path.
+  // Only real resolver URLs accept query flags. Special values such as "system"
+  // or "dhcp://..." must be left untouched; appending "#disable-qtype-64=true"
+  // turns them into an invalid server string and breaks private/LAN lookups.
   const blockTypes = server => {
+    if (!/^(?:https?|tls|quic|h3):\/\//i.test(server)) return server;
     let out = server;
     for (const type of [64,65]) {
       const flag = 'disable-qtype-'+type+'=true';

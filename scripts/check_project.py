@@ -33,6 +33,8 @@ def check():
  code=script+'\nprocess.stdout.write(JSON.stringify(secureMain('+json.dumps(base)+','+json.dumps(data)+',"Chosen",'+json.dumps(GROUP)+')));'
  result=subprocess.run([shutil.which('node') or 'node','-e',code],capture_output=True,text=True,encoding='utf-8',check=True)
  candidate=json.loads(result.stdout);validate(candidate,base,'Chosen')
+ assert candidate['dns']['nameserver-policy']['+.local']==['system'],'system resolver must stay unmodified'
+ assert candidate['dns']['nameserver-policy']['+.lan']==['system'],'system resolver must stay unmodified'
  cases=[]
  def reject(name,change):
   value=copy.deepcopy(candidate);change(value)
@@ -45,7 +47,9 @@ def check():
  reject('TUN disabled',lambda c:c['tun'].__setitem__('enable',False))
  reject('IPv6 enabled',lambda c:c.__setitem__('ipv6',True))
  reject('DNS filter removed',lambda c:c['dns']['nameserver'].__setitem__(0,'https://1.1.1.1/dns-query#'+GROUP))
- reject('Private DNS filter removed',lambda c:c['dns']['nameserver-policy'].__setitem__('+.local',['system']))
+ reject('Private DNS bypasses filter',lambda c:c['dns']['nameserver-policy'].__setitem__('+.local',['https://223.5.5.5/dns-query#DIRECT']))
+ reject('TUN auto-route disabled',lambda c:c['tun'].__setitem__('auto-route',False))
+ reject('Claude domain removed',lambda c:c['rules'].remove('DOMAIN-SUFFIX,clau.de,'+GROUP))
  reject('Fake-IP marked direct',lambda c:c['rule-providers']['strict-lancidr']['payload'].append('198.18.0.0/16'))
  reject('Domestic DNS for foreign',lambda c:c['dns'].__setitem__('nameserver',['https://223.5.5.5/dns-query#DIRECT&disable-qtype-64=true&disable-qtype-65=true']))
  report={'success':True,'published_files_checked':len(files),'unsafe_mutations_rejected':cases,

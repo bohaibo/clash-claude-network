@@ -21,6 +21,8 @@
 
 两者需管理员权限。浏览器会关闭并尝试恢复原标签页，请先保存网页内容。重启 Windows 后 IPv6/语言策略才能完整生效。不要移动或删除 `.local`；它被 Git 排除，包含本机恢复所必需的原始记录。
 
+不需要处理浏览器时，给高级命令加 `-SkipBrowser`：浏览器策略和语言字段不改动，WebRTC、语言、指纹相关验证项保持“未测试”，不能声称已全面防护。本项目只处理普通 Chrome/Edge，不配置指纹浏览器。
+
 本机沿用 `.local/legacy-binding.json` 指向的最早恢复基线，不把本次较新的状态当作“最初状态”。新电脑没有这个私密桥接文件，自动建立自己的首次基线。不要把本机 `.local` 复制到另一台电脑使用。
 
 ### 恢复后 IPv6 仍未启用怎么办
@@ -83,17 +85,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/system.ps1 -Action r
 
 ## 验证与成功标准
 
-- 国内网站返回正常响应，连接记录确认 DIRECT；外国 IP 查询返回目标国家。
-- Claude/Anthropic 连接记录确认固定节点；HTTP 403、登录页面或 API 错误不视为应用可用。
-- 向本地及外部 53 端口分别发 TCP/UDP A、64、65 查询；A 必须有结果，64/65 必须为空。
-- 用 `python scripts/test_dns_filter.py` 做已知正样本实验：临时本机上游提供真实 64/65 回应，隔离内核必须拦截且不转发相应问题；避免把自然无记录误判为过滤成功。实验不会改动实际 TUN/运行配置。
-- IPv6 公网连接失败；重启后重新核查地址和默认路由。
-- 模拟选定节点失败：海外请求失败，国内网站仍可访问；始终在 finally 中恢复。
-- 停止核心：国内/国外公网都不能连接；重新启动核心后网络恢复。
-- 在实际浏览器用 browserleaks.com/webrtc 和 browserleaks.com/javascript 查看 IP、WebRTC、语言、时区。原生 STUN、文件内容或注册表值不能替代这一步。
-- Docker/WSL、Tailscale、其他 VPN及新虚拟网卡不自动算通过，必须运行真实工作负载。
+`scripts/verify.py` 自动检查以下项目，结果写入 `.local/verification.json`：
 
-脚本记录“已验证/失败/未验证”，不把未知状态写成成功。断网测试会短暂中断正在使用代理的连接。新的 Windows 适配器做了本机候选生成、Mihomo 校验和离线回归；没有在另一台全新 Windows 上完成完整往返，因此初次部署仍须 AI 按清单验收。
+- 百度、淘宝返回 200/301/302，连接记录确认 DIRECT；`ipinfo.io` 的出口国家必须等于 `-Region`。
+- `claude.ai` 有 HTTP 响应；403、登录页或 API 错误只说明传输可达，不视为应用可用。
+- 向 `8.8.8.8:53` 发 TCP/UDP 的 A、64、65 查询：A 必须有结果，64/65 必须为空；并确认 `claude.ai` 得到 `198.18.0.0/16` 的 fake-IP，证明解析确实进入 TUN，而不是直连外部解析器。
+- 原生 UDP STUN 返回映射地址；清空代理环境变量后 `git ls-remote`、`npm ping` 可用。
+- IPv6 公网地址不可达。
+- 模拟选定节点失败：海外请求失败、国内仍可访问，`finally` 中恢复节点并复测出口。
+- 停止核心：国内外公网都不可连接，重启后恢复。`verify_core_exit.py` 记录 `domestic_also_blocked`，明确这是全阻断模式，不是“国内仍可用”。
+
+以下项目脚本不代测，必须人工完成或标记为未验证：
+
+- 实际连接元数据里的每一条代理链（脚本只核对固定组与出口国家）。
+- 浏览器 WebRTC、语言、时区、指纹：在真实配置文件里用 browserleaks.com/webrtc、browserleaks.com/javascript、CreepJS 查看。
+- Docker/WSL/Tailscale 及其他虚拟网卡：必须在各自运行环境内测出口，宿主机 curl 不能代替。
+- 任意应用自带的加密 DNS（DoH/DoT/DoQ）：未解密看不到 qtype，不在过滤证明范围内。
+- `python scripts/test_dns_filter.py` 是隔离正样本实验，用于排除“域名本来没有 64/65 记录”的假阳性，不修改运行配置。
+
+脚本记录“通过/失败/未测试”，不把未知状态写成成功。断网测试会短暂中断正在使用代理的连接。新的 Windows 适配器做过本机候选生成、Mihomo 校验和离线回归，但没有在另一台全新 Windows 上完成完整往返，初次部署仍须按清单验收。
 
 ## 安全发布与引用来源
 
