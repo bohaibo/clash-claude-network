@@ -1,0 +1,12 @@
+# Routing and DNS invariants
+
+- Exactly one selected leaf node in the pinned group. No DIRECT/REJECT, fallback, url-test, round-robin or hidden alternate group.
+- Preserve original node definitions, subscription providers and actual private/LAN rules. Freeze reviewed LAN provider payloads inline; exclude any fake-IP overlap, including legacy ACL 198.18.0.0/16.
+- LAN precedes Claude; Claude precedes domestic lists. Final MATCH is the pinned group. Use no-resolve on IP CIDR/GEOIP rules to avoid an IP lookup accidentally determining domain routing.
+- Default DNS is overseas DoH through the same node. Domestic list uses domestic DoH. Node/bootstrap and private policies are explicit to avoid resolution loops.
+- Apply disable-qtype-64/65 to nameserver, default-nameserver, direct-nameserver, proxy-server-nameserver and all nameserver-policy paths including system. Validate with the installed core, not documentation alone. Filtering questions is not proof that an arbitrary encrypted DNS application is controlled.
+- Core inbound range is 160.79.104.0/23; 160.79.104.0/21 documents server-originated outbound/MCP traffic and is not automatically a required client destination rule. IPv6 stays blocked.
+- Use only specific Claude Windows process names as optional additive protection; do not broadly pin node.exe, Chrome or all terminals.
+- Shared Sentry/Intercom/Datadog domains intentionally remain broad pending actual traffic review. Do not silently remove them or automatically union unknown keywords/ASNs from third-party lists.
+- DNS source parsing, source hashes, large-delta checks and private/LAN change review precede publication. Invalid data retains the last active configuration. Controller keys, snapshots, generated full YAML and IP logs never enter Git.
+- Strict firewall permits the core itself and local/TUN paths, so trusted core configuration remains part of the boundary. New local allow rules, SharedAccess, administrator programs and virtual-network forwarding require renewed auditing.
