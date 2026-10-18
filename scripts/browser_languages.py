@@ -1,13 +1,13 @@
 """Edit only language preferences while browsers are closed; retain original fields."""
 from pathlib import Path
-from baseline import FINAL,verify
+from baseline import FINAL, snapshot, verify
 import argparse,datetime,hashlib,json,os,subprocess
 
-BACKUP=FINAL/'baseline/browser-languages-before.json'
 ROOTS={'Chrome':Path(os.environ['LOCALAPPDATA'])/'Google/Chrome/User Data',
        'Edge':Path(os.environ['LOCALAPPDATA'])/'Microsoft/Edge/User Data'}
 FIELDS=('accept_languages','selected_languages')
 TARGET='zh-SG,en-SG,zh-CN'
+def backup_path():return snapshot()/'browser-languages-before.json'
 
 def profiles():
     return [(browser,p) for browser,root in ROOTS.items() for p in root.glob('*/Preferences')
@@ -19,8 +19,8 @@ def atomic(path,value):
     temp.replace(path)
 
 def capture():
-    manifest=verify()
-    saved=json.loads(BACKUP.read_text(encoding='utf-8')) if BACKUP.exists() else {
+    manifest=verify();store=backup_path()
+    saved=json.loads(store.read_text(encoding='utf-8')) if store.exists() else {
         'captured_at':datetime.datetime.now().astimezone().isoformat(),'profiles':{}}
     changed=False
     for browser,path in profiles():
@@ -31,10 +31,10 @@ def capture():
             'fields':{name:{'exists':name in intl,'value':intl.get(name)} for name in FIELDS}}
         changed=True
     if changed:
-        atomic(BACKUP,saved)
-        manifest['sha256']['browser-languages-before.json']=hashlib.sha256(BACKUP.read_bytes()).hexdigest()
+        atomic(store,saved)
+        manifest['sha256']['browser-languages-before.json']=hashlib.sha256(store.read_bytes()).hexdigest()
         manifest['coverage']['browserLanguages']='Only original per-profile language fields, captured before first preference edit; unrelated browser data is never restored from this file.'
-        atomic(FINAL/'baseline/manifest.json',manifest)
+        atomic(snapshot()/'manifest.json',manifest)
     verify();return saved
 
 def running():

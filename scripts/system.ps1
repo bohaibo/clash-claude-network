@@ -1,7 +1,14 @@
 param([ValidateSet('snapshot','apply','restore','rollback-firewall','repair-bindings')][string]$Action,[string]$Python)
 $ErrorActionPreference='Stop'
 $project=Split-Path -Parent $PSScriptRoot
-$stateDir=Join-Path $project '.local\baseline'
+$localDir=Join-Path $project '.local'
+# CCN_SNAPSHOT pins the snapshot for this run; otherwise the newest captured snapshot wins.
+$stateDir=$env:CCN_SNAPSHOT
+if(!$stateDir){
+  $snapshotRoot=Join-Path $localDir 'snapshots'
+  $latest=@(Get-ChildItem -LiteralPath $snapshotRoot -Directory -ErrorAction SilentlyContinue | Where-Object {Test-Path -LiteralPath (Join-Path $_.FullName 'manifest.json')} | Sort-Object Name -Descending)
+  $stateDir=if($latest.Count){$latest[0].FullName}else{Join-Path $snapshotRoot 'uninitialized'}
+}
 $file=Join-Path $stateDir 'system.json'
 $prefix='CCN-Portable-'
 # Adapter identity helpers. Never resolve an adapter by Name through a cmdlet that
@@ -39,8 +46,13 @@ function Restore-Firewall($saved) {
   foreach($name in $saved.enabledOutboundRules){Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue | Enable-NetFirewallRule}
 }
 if($Action -eq 'snapshot') {
-  if(Test-Path -LiteralPath $file){Write-Output 'Existing first-change system snapshot retained.';return}
-  if(@(Get-NetFirewallRule -PolicyStore PersistentStore -Name ($prefix+'*') -ErrorAction SilentlyContinue).Count){throw 'Existing project firewall rules found without the original baseline. Locate that baseline instead of creating another one.'}
+  if(Test-Path -LiteralPath $file){Write-Output 'Existing snapshot system state retained.';return}
+  # A manual snapshot may legitimately capture an already-configured machine, so the
+  # "no project firewall rules without a baseline" guard only applies to automatic ones.
+  $manifestFile=Join-Path $stateDir 'manifest.json'
+  $kind='auto'
+  if(Test-Path -LiteralPath $manifestFile){$kind=[string](Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json).kind}
+  if($kind -ne 'manual' -and @(Get-NetFirewallRule -PolicyStore PersistentStore -Name ($prefix+'*') -ErrorAction SilentlyContinue).Count){throw 'Existing project firewall rules found without the original baseline. Capture a manual snapshot instead of creating an automatic one.'}
   $ipKey='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters'
   $ipValue=Get-ItemProperty -LiteralPath $ipKey -Name DisabledComponents -ErrorAction SilentlyContinue
   $proxyKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'

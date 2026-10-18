@@ -1,4 +1,4 @@
-param([ValidateSet('apply','restore')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[switch]$Acknowledged,[switch]$NoPause,[switch]$SkipBrowser)
+param([ValidateSet('apply','restore','snapshot','list-snapshots')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[switch]$SkipBrowser)
 $ErrorActionPreference='Stop'
 $project=Split-Path -Parent $PSScriptRoot
 $local=Join-Path $project '.local';New-Item -Path $local -ItemType Directory -Force | Out-Null
@@ -6,29 +6,72 @@ $python=(Get-Command python.exe -ErrorAction Stop).Source
 if($python -like '*\Microsoft\WindowsApps\*'){throw 'Windows Store Python alias detected. Use an installed Python runtime; no software will be installed automatically.'}
 & $python -c 'import yaml,sys;assert sys.version_info >= (3,10)'
 if($LASTEXITCODE -ne 0){throw 'Python 3.10+ and PyYAML are required. Read README.md; do not run a partial installation.'}
+
+function Get-Snapshots {
+ $root=Join-Path $local 'snapshots'
+ @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Where-Object {Test-Path -LiteralPath (Join-Path $_.FullName 'manifest.json')} | Sort-Object Name -Descending)
+}
+function Show-Snapshots {
+ $list=Get-Snapshots
+ if(!$list.Count){Write-Host 'No snapshot captured yet. Run apply once to create the first one.';return @()}
+ Write-Host 'Snapshots (newest first):'
+ for($i=0;$i -lt $list.Count;$i++){
+  $state=Get-Content -LiteralPath (Join-Path $list[$i].FullName 'manifest.json') -Raw | ConvertFrom-Json
+  $kind=if($state.kind){[string]$state.kind}else{'auto'}
+  Write-Host ('  {0}. {1}  {2}  [{3}]' -f ($i+1),$list[$i].Name,$state.time,$kind)
+ }
+ return $list
+}
+
+if($Action -eq 'list-snapshots'){Show-Snapshots | Out-Null;return}
+
+# Pick the restore target before elevation so the interactive prompt stays visible.
+if($Action -eq 'restore' -and !$Snapshot){
+ $list=Show-Snapshots
+ if(!$list.Count){throw 'No snapshot available to restore.'}
+ if($list.Count -eq 1){$Snapshot=$list[0].Name;Write-Host ('Using the only snapshot: '+$Snapshot)}
+ else{
+  $pick=Read-Host ('Select snapshot [1-'+$list.Count+']')
+  $index=0
+  if(![int]::TryParse($pick,[ref]$index) -or $index -lt 1 -or $index -gt $list.Count){throw 'Invalid snapshot selection'}
+  $Snapshot=$list[$index-1].Name
+ }
+}
+
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),'-Action',$Action,'-Region',$Region)
   if($Node){$arguments+=@('-Node',('"'+$Node+'"'))};if($Subscription){$arguments+=@('-Subscription',('"'+$Subscription+'"'))}
+  if($Snapshot){$arguments+=@('-Snapshot',('"'+$Snapshot+'"'))}
   if($Acknowledged){$arguments+='-Acknowledged'};if($NoPause){$arguments+='-NoPause'};if($SkipBrowser){$arguments+='-SkipBrowser'}
   $process=Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
   exit $process.ExitCode
 }
-# Restore always targets the baseline captured immediately before the first apply on
-# this machine. Historical packages and earlier bridges are deliberately not consulted:
-# a restore must return the computer to its own pre-apply state, not to some older one.
-if($Action -eq 'restore') {
- $manifest=Join-Path $local 'baseline\manifest.json'
- if(Test-Path -LiteralPath $manifest) {
-  $state=Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
-  Write-Host ('Restore target: baseline captured at ' + $state.time + ' (before the first apply on this machine).')
+
+if($Snapshot){$env:CCN_SNAPSHOT=Join-Path (Join-Path $local 'snapshots') $Snapshot}
+
+if($Action -eq 'snapshot'){
+ $output=& $python (Join-Path $PSScriptRoot 'client.py') create-snapshot
+ if($LASTEXITCODE -ne 0){throw 'Snapshot capture failed; nothing changed'}
+ $created=($output | Select-Object -Last 1) | ConvertFrom-Json
+ $env:CCN_SNAPSHOT=$created.snapshot
+ & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
+ if(!$SkipBrowser){
+  & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser policy capture failed'}
+  & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser language capture failed'}
  }
+ Write-Host ('Snapshot saved: '+$created.snapshot)
+ return
 }
+
 if(!$Acknowledged) {
- Write-Host 'This applies strict outbound blocking, disables IPv6, changes Singapore region/languages, clears proxy overrides, and restarts Chrome/Edge.'
- Write-Host 'If Mihomo stops, domestic public Internet is blocked too. VPN, Docker, WSL, video calls and remote access can be affected. Save browser pages first.'
- if($SkipBrowser){Write-Host 'Browser policies and languages will be left untouched (-SkipBrowser).'}
- if((Read-Host 'Type YES to confirm these changes') -cne 'YES'){return}
+ if($Action -eq 'apply'){
+  Write-Host 'This applies strict outbound blocking, disables IPv6, changes Singapore region/languages, clears proxy overrides, and restarts Chrome/Edge.'
+  Write-Host 'If Mihomo stops, domestic public Internet is blocked too. VPN, Docker, WSL, video calls and remote access can be affected. Save browser pages first.'
+  if($SkipBrowser){Write-Host 'Browser policies and languages will be left untouched (-SkipBrowser).'}
+ }
+ else{Write-Host ('This restores the snapshot: '+$Snapshot)}
+ if((Read-Host 'Type YES to confirm') -cne 'YES'){return}
 }
 $opened=@(Get-Process chrome,msedge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)
 $clashProgram=@(Get-Process clash-verge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path -Unique)
@@ -42,7 +85,10 @@ try {
   Get-Process clash-verge -ErrorAction SilentlyContinue | Stop-Process -Force
   $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region)
   if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
-  & $python @prepareArguments;if($LASTEXITCODE -ne 0){throw 'Candidate/backup preparation failed; no system settings changed.'}
+  $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw 'Candidate/backup preparation failed; no system settings changed.'}
+  $planState=($prepared | Select-Object -Last 1) | ConvertFrom-Json
+  $env:CCN_SNAPSHOT=$planState.snapshot
+  Write-Host ('Snapshot in use: '+$planState.snapshot)
   & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
   if(!$SkipBrowser){
    & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser policy backup failed'}
@@ -72,7 +118,7 @@ try {
   & (Join-Path $PSScriptRoot 'update_task.ps1') -Action install -Python $python
  } else {
   & $python -c 'from baseline import verify;verify()'
-  if($LASTEXITCODE -ne 0){throw 'Backup verification failed; no settings restored'}
+  if($LASTEXITCODE -ne 0){throw 'Snapshot verification failed; no settings restored'}
   & (Join-Path $PSScriptRoot 'update_task.ps1') -Action remove -Python $python
   & (Join-Path $PSScriptRoot 'system.ps1') -Action restore -Python $python
   & $python (Join-Path $PSScriptRoot 'browser_settings.py') restore;if($LASTEXITCODE -ne 0){throw 'Browser policy restoration failed'}
@@ -81,14 +127,15 @@ try {
   & $python (Join-Path $PSScriptRoot 'client.py') restore-client;if($LASTEXITCODE -ne 0){throw 'Client restoration failed'}
  }
  $result.success=$true
- Write-Host 'Completed. Restart Windows for IPv6/language changes. Network checks do not prove Claude account usability.'
+ Write-Host ('Completed. Restored from: '+$env:CCN_SNAPSHOT)
+ Write-Host 'Restart Windows for IPv6/language changes. Network checks do not prove Claude account usability.'
 } catch {
  $result.error=$_.Exception.Message
- if($Action -eq 'apply' -and (Test-Path -LiteralPath (Join-Path $local 'baseline\system.json'))) {
+ if($Action -eq 'apply' -and $env:CCN_SNAPSHOT -and (Test-Path -LiteralPath (Join-Path $env:CCN_SNAPSHOT 'system.json'))) {
   try{& (Join-Path $PSScriptRoot 'system.ps1') -Action rollback-firewall -Python $python;$result.firewallRollback=$true;if($watchToken){Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Rolled back'}}catch{$result.firewallRollback=$false}
  }
  Write-Error $_ -ErrorAction Continue
- Write-Host 'Configuration is incomplete and may be partially applied: the firewall watchdog rolls back firewall rules only, not timezone, language, IPv6 or proxy changes. Run the restore entry before retrying.'
+ Write-Host 'Configuration is incomplete and may be partially applied: the firewall watchdog rolls back firewall rules only, not timezone, language, IPv6 or proxy changes. Run restore before retrying.'
 } finally {
  $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
  if(Get-ScheduledTask -TaskName 'Clash Verge' -ErrorAction SilentlyContinue){Start-ScheduledTask -TaskName 'Clash Verge'}

@@ -5,6 +5,7 @@ import yaml
 
 PROJECT=Path(__file__).resolve().parent.parent
 LOCAL=PROJECT/'.local';LOCAL.mkdir(exist_ok=True)
+SNAPSHOTS=LOCAL/'snapshots'
 GROUP='Claude-Overseas-Pinned'
 SOURCES={'domains':'https://raw.githubusercontent.com/pluwen/china-domain-allowlist/main/allow-list.sorl',
  'ips':'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/cncidr.txt',
@@ -16,6 +17,51 @@ def load(path):return yaml.safe_load(path.read_text(encoding='utf-8-sig'))
 def write(path,data):
  path.parent.mkdir(parents=True,exist_ok=True);temp=path.with_name(path.name+'.new')
  temp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(path)
+def snapshot_roots():
+ return sorted([p for p in SNAPSHOTS.glob('*') if (p/'manifest.json').is_file()],key=lambda p:p.name,reverse=True)
+def migrate_legacy_baseline():
+ # A single pre-snapshot baseline from an older version becomes the first snapshot.
+ legacy=LOCAL/'baseline'
+ if not (legacy/'manifest.json').is_file():return
+ SNAPSHOTS.mkdir(exist_ok=True)
+ if any(SNAPSHOTS.iterdir()):return
+ state=json.loads((legacy/'manifest.json').read_text(encoding='utf-8'))
+ digits=''.join(c for c in str(state.get('time','')) if c.isdigit())
+ stamp=digits[:8]+'-'+digits[8:14] if len(digits)>=14 else datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+ target=SNAPSHOTS/stamp
+ shutil.move(str(legacy),str(target))
+ state.setdefault('kind','auto')
+ write(target/'manifest.json',state)
+def snapshot_kind(path):
+ try:return str(json.loads((path/'manifest.json').read_text(encoding='utf-8')).get('kind','auto'))
+ except Exception:return 'auto'
+def snapshot_dir(create=False):
+ # CCN_SNAPSHOT pins the snapshot for the current run; otherwise the automatic
+ # pre-first-apply snapshot wins, so a later manual snapshot never becomes the
+ # rollback point for a subsequent apply.
+ value=os.environ.get('CCN_SNAPSHOT')
+ if value:
+  path=Path(value)
+  if create:path.mkdir(parents=True,exist_ok=True)
+  return path
+ migrate_legacy_baseline()
+ roots=snapshot_roots()
+ if roots:
+  automatic=[p for p in roots if snapshot_kind(p)=='auto']
+  return (automatic or roots)[0]
+ assert create,'No snapshot captured yet; run apply once to create the first snapshot'
+ stamp=datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+ path=SNAPSHOTS/stamp
+ while path.exists():path=SNAPSHOTS/(stamp+'-'+uuid.uuid4().hex[:4])
+ path.mkdir(parents=True)
+ return path
+def new_snapshot():
+ migrate_legacy_baseline()
+ stamp=datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+ path=SNAPSHOTS/stamp
+ while path.exists():path=SNAPSHOTS/(stamp+'-'+uuid.uuid4().hex[:4])
+ path.mkdir(parents=True)
+ return path
 def root_path(value=None):
  assert os.name=='nt','Bundled system adapter supports Windows only. Read references/windows.md for the supported platform.'
  root=Path(value) if value else Path(os.environ['APPDATA'])/'io.github.clash-verge-rev.clash-verge-rev'
@@ -195,8 +241,8 @@ def already_configured(root):
    if 'PORTABLE-CLAUDE-NETWORK-V1' in candidate.read_text(encoding='utf-8',errors='ignore'):return True
   except OSError:pass
  return False
-def backup(root):
- path=LOCAL/'baseline';manifest=path/'manifest.json'
+def backup(root,path=None,allow_configured=False):
+ path=path or snapshot_dir(create=True);manifest=path/'manifest.json'
  if manifest.exists():
   state=json.loads(manifest.read_text());assert state['computer']==socket.gethostname(),'Backup belongs to another computer'
   assert state.get('user_sid')==user_sid(),'Backup belongs to another Windows user'
@@ -204,17 +250,17 @@ def backup(root):
   for name,digest in state['sha256'].items():assert hashlib.sha256(((path/'client'/name) if (path/'client'/name).exists() else path/name).read_bytes()).hexdigest()==digest,'Backup integrity failure'
   for name,digest in state.get('extra_sha256',{}).items():assert hashlib.sha256((path/name).read_bytes()).hexdigest()==digest,'System backup integrity failure'
   return
- assert not path.exists(),'Incomplete first backup; inspect before retrying'
- assert not already_configured(root),'Client already carries this project enhancement. Capture the baseline before the first apply instead of snapshotting an already-configured state.'
- path.mkdir();shutil.copytree(root,path/'client')
+ if not allow_configured:
+  assert not already_configured(root),'Client already carries this project enhancement. Capture the baseline before the first apply instead of snapshotting an already-configured state.'
+ path.mkdir(parents=True,exist_ok=True);shutil.copytree(root,path/'client',dirs_exist_ok=True)
  write(manifest,{'computer':socket.gethostname(),'user_sid':user_sid(),'client_root':str(root),'time':datetime.datetime.now().astimezone().isoformat(),
-  'coverage':{},'sha256':{str(p.relative_to(path/'client')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (path/'client').rglob('*') if p.is_file()}})
+  'kind':'auto','coverage':{},'sha256':{str(p.relative_to(path/'client')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (path/'client').rglob('*') if p.is_file()}})
 def user_sid():
  value=subprocess.check_output(['whoami','/user','/fo','csv','/nh'],text=True)
  return re.search(r'S-1-\d+(?:-\d+)+',value).group(0)
 def seal():
- path=LOCAL/'baseline';manifest=path/'manifest.json';state=json.loads(manifest.read_text(encoding='utf-8'))
- backup(Path(state['client_root']));extras=state.setdefault('extra_sha256',{})
+ path=snapshot_dir();manifest=path/'manifest.json';state=json.loads(manifest.read_text(encoding='utf-8'))
+ backup(Path(state['client_root']),path);extras=state.setdefault('extra_sha256',{})
  for file in path.iterdir():
   if not file.is_file() or file==manifest:continue
   digest=hashlib.sha256(file.read_bytes()).hexdigest()
@@ -222,24 +268,25 @@ def seal():
   extras[file.name]=digest
  write(manifest,state);return {'system_backup_sealed':True}
 def prepare(root,node,subscription,region):
- item=select(root,node,subscription);backup(root);wrapper,text,candidate,entry=build(root,item,node)
+ item=select(root,node,subscription)
+ path=snapshot_dir(create=True);backup(root,path);wrapper,text,candidate,entry=build(root,item,node)
  uid=entry['uid'] if entry else 'PortableClaude'+uuid.uuid4().hex[:12]
  file=entry['file'] if entry else uid+'.js'
  plan={'root':str(root),'node':node,'subscription_uid':item['uid'],'script_uid':uid,'script_file':file,
-  'script_existed':entry is not None,'region':region,'core_program':actual_core(), 'generated_files':[] if entry else ['profiles/'+file]}
+  'script_existed':entry is not None,'region':region,'core_program':actual_core(),'snapshot':str(path),'generated_files':[] if entry else ['profiles/'+file]}
  if (LOCAL/'plan.json').exists():
   earlier=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'))
   assert Path(earlier['root']).resolve()==root.resolve(),'Previous plan targets another client directory'
   plan['generated_files']=list(dict.fromkeys(earlier.get('generated_files',[])+plan['generated_files']))
  write(LOCAL/'plan.json',plan);write(LOCAL/'settings.json',{'node':node,'subscription':item['uid'],'region':region})
- return {'prepared':True,'node':node,'backup':str(LOCAL/'baseline'),'rule_count':len(candidate['rules'])}
+ return {'prepared':True,'node':node,'snapshot':str(path),'rule_count':len(candidate['rules'])}
 def actual_core():
  command="Get-CimInstance Win32_Process | Where-Object {$_.Name -eq 'verge-mihomo.exe'} | Select-Object -ExpandProperty ExecutablePath"
  result=subprocess.check_output(['powershell.exe','-NoProfile','-Command',command],text=True).strip().splitlines()
  assert len(result)==1 and Path(result[0]).is_file(),'Cannot identify unique actual core executable for firewall rule'
  return result[0]
 def apply_client():
- plan=json.loads((LOCAL/'plan.json').read_text());root=root_path(plan['root']);backup(root)
+ plan=json.loads((LOCAL/'plan.json').read_text());root=root_path(plan['root']);backup(root,Path(plan['snapshot']) if plan.get('snapshot') else None)
  text=(LOCAL/'candidate.yaml').read_text(encoding='utf-8');current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
  profiles=load(root/'profiles.yaml');item=next(x for x in profiles['items'] if x['uid']==plan['subscription_uid'])
  if not plan['script_existed']:profiles['items'].append({'uid':plan['script_uid'],'type':'script','file':plan['script_file'],'desc':'Portable Claude network enhancement','updated':int(__import__('time').time())})
@@ -259,8 +306,9 @@ def apply_client():
   api(root,'PUT','/configs?force=true',{'payload':current});raise
  return {'client_applied':True,'node':plan['node']}
 def restore_client():
- plan=json.loads((LOCAL/'plan.json').read_text());root=root_path(plan['root']);backup(root)
- original=LOCAL/'baseline/client'
+ plan=json.loads((LOCAL/'plan.json').read_text());root=root_path(plan['root'])
+ path=snapshot_dir();backup(root,path)
+ original=path/'client'
  for p in original.rglob('*'):
   if p.is_file():dest=safe_file(root,str(p.relative_to(original)));dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,dest)
  for relative in plan['generated_files']:
@@ -268,14 +316,23 @@ def restore_client():
   if p.exists() and not (original/relative).exists():p.unlink()
  api(root,'PUT','/configs?force=true',{'payload':(root/'clash-verge.yaml').read_text(encoding='utf-8')})
  return {'client_restored':True}
+def create_snapshot(root=None,node=None):
+ # Manual snapshot: capture whatever the machine looks like now, configured or not.
+ root=root_path(root);path=new_snapshot();backup(root,path,allow_configured=True)
+ state=json.loads((path/'manifest.json').read_text(encoding='utf-8'))
+ state['kind']='manual'
+ if node:state['node']=node
+ write(path/'manifest.json',state)
+ return {'snapshot':str(path),'time':state['time'],'kind':'manual'}
 
 if __name__=='__main__':
- parser=argparse.ArgumentParser();parser.add_argument('action',choices=['discover','prepare','seal','apply-client','restore-client'])
+ parser=argparse.ArgumentParser();parser.add_argument('action',choices=['discover','prepare','seal','apply-client','restore-client','create-snapshot'])
  parser.add_argument('--root');parser.add_argument('--node');parser.add_argument('--subscription');parser.add_argument('--region',default='SG');args=parser.parse_args()
  if args.action=='discover':result=discover(root_path(args.root))
  elif args.action=='prepare':
   assert args.node,'Exact node name is required';result=prepare(root_path(args.root),args.node,args.subscription,args.region)
  elif args.action=='seal':result=seal()
+ elif args.action=='create-snapshot':result=create_snapshot(args.root,args.node)
  elif args.action=='apply-client':result=apply_client()
  else:result=restore_client()
  print(json.dumps(result,ensure_ascii=False))

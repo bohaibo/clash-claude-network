@@ -1,13 +1,13 @@
 """Current-user browser policies, with a first-change backup in the original baseline."""
 import argparse, datetime, hashlib, json, winreg
 from pathlib import Path
-from baseline import FINAL, verify
+from baseline import FINAL, snapshot, verify
 
 ROOTS={'Chrome':r'Software\Policies\Google\Chrome','Edge':r'Software\Policies\Microsoft\Edge'}
 VALUES={'Chrome':{'WebRtcIPHandling':'disable_non_proxied_udp','DnsOverHttpsMode':'off','ProxyMode':'direct'},
         'Edge':{'WebRtcLocalhostIpHandling':'disable_non_proxied_udp','DnsOverHttpsMode':'off',
                 'ProxyMode':'direct','DefinePreferredLanguages':'zh-SG,en-SG,zh-CN'}}
-BACKUP=FINAL/'baseline/browser-policies-before.json'
+def backup_path():return snapshot()/'browser-policies-before.json'
 
 def read(path,name,hive=winreg.HKEY_CURRENT_USER):
     try:
@@ -25,15 +25,15 @@ def list_values(path):
     return result
 
 def capture():
-    manifest=verify()
-    if BACKUP.exists():return json.loads(BACKUP.read_text(encoding='utf-8'))
+    manifest=verify();store=backup_path()
+    if store.exists():return json.loads(store.read_text(encoding='utf-8'))
     state={'captured_at':datetime.datetime.now().astimezone().isoformat(),'scope':'Current Windows user; first browser change in this task series',
            'values':{label:{name:read(path,name) for name in VALUES[label]} for label,path in ROOTS.items()},
            'chrome_languages':list_values(ROOTS['Chrome']+r'\ForcedLanguages')}
-    BACKUP.write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8')
-    manifest['sha256']['browser-policies-before.json']=hashlib.sha256(BACKUP.read_bytes()).hexdigest()
+    store.write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8')
+    manifest['sha256']['browser-policies-before.json']=hashlib.sha256(store.read_bytes()).hexdigest()
     manifest['coverage']['browserPolicies']='Values captured before the first browser policy changes on this machine.'
-    target=FINAL/'baseline/manifest.json';temp=target.with_suffix('.new')
+    target=snapshot()/'manifest.json';temp=target.with_suffix('.new')
     temp.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(target)
     verify();return state
 
@@ -60,8 +60,9 @@ def apply():
     return status()
 
 def restore():
-    if not BACKUP.exists():return {'restored':False,'reason':'No browser changes captured'}
-    verify();state=json.loads(BACKUP.read_text(encoding='utf-8'))
+    store=backup_path()
+    if not store.exists():return {'restored':False,'reason':'No browser changes captured'}
+    verify();state=json.loads(store.read_text(encoding='utf-8'))
     for label,path in ROOTS.items():
         for name,value in state['values'][label].items():
             if value['exists']:put(path,name,value['value'],value['kind'])
