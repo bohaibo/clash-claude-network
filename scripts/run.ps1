@@ -28,6 +28,36 @@ function Show-Snapshots {
  return $list
 }
 
+# ---- 进度显示 ----------------------------------------------------------
+# 每一步开始前打印一次：进度条 + 第几步/共几步 + 这一步在做什么。
+# 步骤标题统一放在 $stepTitles 里，Write-Step 只接收「这一步的说明」，
+# 序号自动递增并从标题表取标题，避免标题表和调用点写歪、对不上号。
+$stepTitles=@()
+$stepNo=0
+function Set-StepPlan([string[]]$titles){$script:stepTitles=@($titles);$script:stepNo=0}
+function Write-Step([string]$note){
+ $script:stepNo++
+ $n=$script:stepNo
+ $list=@($script:stepTitles)
+ $total=$list.Count
+ if($total -lt 1){$total=1}
+ $title=if($n -le $list.Count){[string]$list[$n-1]}else{'处理中'}
+ $filled=[int]((20*($n-1))/$total)
+ $bar=('='*$filled).PadRight(20,'.')
+ Write-Host ''
+ Write-Host ('  ['+$bar+']  第 '+$n+'/'+$total+' 步  '+$title) -ForegroundColor Cyan
+ if($note){Write-Host ('             '+$note) -ForegroundColor DarkGray}
+}
+function Write-Done([string]$text){
+ Write-Host ''
+ Write-Host ('  ['+('='*20)+']  '+$text) -ForegroundColor Green
+}
+# 配置前的清单：一项一行，下面缩进写这一项可能造成的影响。
+function Write-PlanItem([int]$index,[string]$item,[string]$impact){
+ Write-Host ('  {0}) {1}' -f $index,$item)
+ if($impact){Write-Host ('     影响：'+$impact) -ForegroundColor DarkGray}
+}
+
 if($Action -eq 'list-snapshots'){Show-Snapshots | Out-Null;return}
 
 # Pick the restore target before elevation so the interactive prompt stays visible.
@@ -71,12 +101,30 @@ if($Action -eq 'snapshot'){
 
 if(!$Acknowledged) {
  if($Action -eq 'apply'){
-  Write-Host '即将执行：严格出站防火墙、关闭系统 IPv6、把区域/语言改成新加坡、清理代理环境变量。'
-  Write-Host '注意：Mihomo 停止运行时，国内公网也会一起断。VPN、Docker、WSL、视频通话、远程控制都可能受影响。'
-  if($SkipBrowser){Write-Host '浏览器：本次完全不碰，不会关闭 Chrome/Edge，也不改 WebRTC 和语言。'}
-  else{Write-Host '浏览器：会强制关闭 Chrome/Edge 来改 WebRTC 与语言设置，结束后自动帮你恢复上次的标签页。请先保存网页内容。'}
+  Write-Host ''
+  Write-Host '本次会改动下面 6 项，每项后面是它可能造成的影响：' -ForegroundColor Yellow
+  Write-PlanItem 1 'Clash 客户端：只给订阅「bo」写入固定节点组 Claude-Overseas-Pinned' '该订阅里原有的自定义脚本会被替换（已自动备份，可随时恢复）'
+  Write-PlanItem 2 '严格出站防火墙：只放行 Mihomo 和本项目的规则' 'Mihomo 一停，国内网站也一起断；VPN、Docker、WSL、视频通话、远程控制可能失效'
+  Write-PlanItem 3 '系统 IPv6：全局关闭' '依赖 IPv6 的内网或校园网资源不可用，要重启 Windows 才完全生效'
+  Write-PlanItem 4 '区域与语言：改成新加坡（en-SG）' '部分软件界面会变成英文，要重启 Windows 才完全生效'
+  Write-PlanItem 5 '代理环境变量：清空 HTTP_PROXY / HTTPS_PROXY 等' '依赖这些变量的命令行工具将不再走代理'
+  if($SkipBrowser){
+   Write-PlanItem 6 'Chrome / Edge：本次完全不碰' '不改 WebRTC 和语言，也不关闭浏览器；浏览器相关步骤整段跳过'
+  } else {
+   Write-PlanItem 6 'Chrome / Edge：强制关闭后修改 WebRTC 与语言' '未保存的网页内容会丢失，请先保存；结束后不会自动打开浏览器'
+  }
+  Write-Host ''
+  Write-Host '执行时会逐条显示进度。中途失败可以运行菜单 3「恢复」回到现在的状态。' -ForegroundColor DarkGray
  }
- else{Write-Host ('即将恢复到这份快照：'+$Snapshot)}
+ else{
+  Write-Host ''
+  Write-Host ('即将把本机还原到这份快照：'+$Snapshot) -ForegroundColor Yellow
+  Write-PlanItem 1 'Clash 客户端：还原订阅、增强脚本与配置目录' 'Clash Verge 会被关闭，完成后重新启动'
+  Write-PlanItem 2 '系统状态：防火墙、IPv6、区域/语言、代理环境变量' 'IPv6 与语言改动要重启 Windows 才完全生效'
+  Write-PlanItem 3 '浏览器：还原 WebRTC 策略与语言偏好' '正在运行的 Chrome/Edge 会被强制关闭'
+  Write-PlanItem 4 '计划任务：移除本项目注册的自动更新任务'
+ }
+ Write-Host ''
  $answer=Read-Host '确认执行请输入 1（直接回车 = 取消）'
  if($answer -ne '1' -and $answer -cne '是' -and $answer -ine 'YES'){Write-Host '已取消，没有做任何改动。';return}
 }
@@ -85,11 +133,29 @@ $opened=@()
 if(!$SkipBrowser){$opened=@(Get-Process chrome,msedge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)}
 $clashProgram=@(Get-Process clash-verge -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path -Unique)
 $result=[ordered]@{success=$false;action=$Action}
+# 先按本次实际会跑的分支确定步骤总数，进度条才能显示「第几步/共几步」。
+if($Action -eq 'apply'){
+ $plan=@('检查运行环境','选择节点','生成候选配置与备份','备份系统状态')
+ if(!$SkipBrowser){$plan+='备份浏览器设置'}
+ $plan+=@('封存快照','写入 Clash 客户端配置','启动防火墙看门狗','应用系统设置')
+ if(!$SkipBrowser){$plan+='写入浏览器设置'}
+ $plan+=@('网络验证','注册自动更新任务')
+} else {
+ $plan=@('校验快照','移除自动更新任务','还原系统设置','还原浏览器策略与语言','还原 Clash 客户端')
+}
+Set-StepPlan $plan
+$planCount=@($plan).Count
+$planWord=if($Action -eq 'apply'){'配置'}else{'恢复'}
+Write-Host ''
+Write-Host ('开始'+$planWord+'，共 '+$planCount+' 步，每一步都会打印进度。') -ForegroundColor Yellow
 try {
  if($opened.Count){Stop-Process -Name $opened -Force}
  if($Action -eq 'apply') {
+  Write-Step '确认 Clash Verge 后台服务在运行，并自检内核的 DNS 类型过滤'
   Get-Service -Name clash_verge_service -ErrorAction Stop | Out-Null
   & $python (Join-Path $PSScriptRoot 'test_dns_filter.py');if($LASTEXITCODE -ne 0){throw '内核 DNS 类型过滤自检未通过，未改动任何系统设置。'}
+  $nodeNote=if($Node){'使用命令行指定的节点：'+$Node}else{'优先沿用上次用过的节点，也可以按编号重新选'}
+  Write-Step $nodeNote
   if(!$Node){
    # 优先沿用上次的节点，避免每次手打完整节点名；没有历史时按编号选择。
    $lastNode=$null
@@ -126,28 +192,36 @@ try {
    }
    Write-Host ('将使用节点：'+$Node)
   }
+  Write-Step '关闭 Clash Verge，生成候选配置并用内核自带的检查验证能加载'
   Get-Process clash-verge -ErrorAction SilentlyContinue | Stop-Process -Force
   $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region)
   if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
   $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw '候选配置/备份生成失败，未改动任何系统设置。'}
   $planState=($prepared | Select-Object -Last 1) | ConvertFrom-Json
   $env:CCN_SNAPSHOT=$planState.snapshot
-  Write-Host ('本次的回滚点（快照）：'+$planState.snapshot)
+  Write-Step ('把当前系统状态存进快照 '+$planState.snapshot+'，这是本次的回滚点')
   & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
   if(!$SkipBrowser){
+   Write-Step '备份 Chrome/Edge 的策略与语言偏好'
    & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw '浏览器策略备份失败。'}
    & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw '浏览器语言备份失败。'}
   }
+  Write-Step '封存快照，确认备份完整可恢复'
   & $python (Join-Path $PSScriptRoot 'client.py') seal;if($LASTEXITCODE -ne 0){throw '系统备份封存失败。'}
+  Write-Step '写入 Clash 客户端配置：增强脚本、固定节点组、分流规则'
   & $python (Join-Path $PSScriptRoot 'client.py') apply-client;if($LASTEXITCODE -ne 0){throw '客户端配置写入失败。'}
+  Write-Step '启动防火墙看门狗（180 秒内没有提交就自动回滚防火墙）'
   $watchToken='guard-'+[Guid]::NewGuid().ToString('N')
   $watchArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'watchdog.ps1')+'"'),'-Token',$watchToken)
   Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $watchArgs | Out-Null
+  Write-Step '应用系统设置：严格防火墙、关闭 IPv6、区域/语言、代理环境变量'
   & (Join-Path $PSScriptRoot 'system.ps1') -Action apply -Python $python
   if(!$SkipBrowser){
+   Write-Step '写入浏览器设置：WebRTC 策略与语言偏好'
    & $python (Join-Path $PSScriptRoot 'browser_settings.py') apply;if($LASTEXITCODE -ne 0){throw '浏览器策略写入失败。'}
    & $python (Join-Path $PSScriptRoot 'browser_languages.py') apply;if($LASTEXITCODE -ne 0){throw '浏览器语言写入失败。'}
   }
+  Write-Step '网络验证：节点中断、内核退出后能否自动恢复（需要 1-2 分钟）'
   & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw '网络验证未通过。'}
   & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw '内核退出保护/重启验证未通过。'}
   & $python (Join-Path $PSScriptRoot 'verify.py');if($LASTEXITCODE -ne 0){throw '内核退出测试之后网络没有恢复。'}
@@ -159,8 +233,10 @@ try {
    if(@(Get-NetFirewallRule -PolicyStore PersistentStore -Name 'CCN-Portable-*' -ErrorAction SilentlyContinue).Count -ne 4){throw '严格防火墙规则不完整。'}
    Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Verified'
   } finally {$guardMutex.ReleaseMutex();$guardMutex.Dispose()}
+  Write-Step '注册自动更新任务，之后内核和规则会定时刷新'
   & (Join-Path $PSScriptRoot 'update_task.ps1') -Action install -Python $python
  } else {
+  Write-Step '校验快照与本机是否匹配，不匹配就不动任何设置'
   # `python -c` only puts the current directory on sys.path, and the menu entry
   # starts this script from the project root, so baseline.py was never importable.
   # Do not build a quoted path into the -c string: PowerShell 5.1 strips embedded
@@ -168,7 +244,9 @@ try {
   Push-Location $PSScriptRoot
   try{& $python -c 'from baseline import verify;verify()'}finally{Pop-Location}
   if($LASTEXITCODE -ne 0){throw '快照校验失败，未恢复任何设置。'}
+  Write-Step '移除本项目的自动更新任务'
   & (Join-Path $PSScriptRoot 'update_task.ps1') -Action remove -Python $python
+  Write-Step '还原系统设置：防火墙、IPv6、区域/语言、代理环境变量'
   # A snapshot captured without elevation has no system.json: system.ps1 would
   # throw on the missing file even though nothing system-level was ever changed.
   if(Test-Path -LiteralPath (Join-Path $env:CCN_SNAPSHOT 'system.json')){
@@ -176,21 +254,28 @@ try {
   } else {
    Write-Warning '这份快照只记录了客户端状态（没有 system.json）。本机从未被本项目改过防火墙、IPv6、区域和语言，所以只还原客户端与浏览器设置。'
   }
+  Write-Step '还原浏览器策略与语言偏好'
   & $python (Join-Path $PSScriptRoot 'browser_settings.py') restore;if($LASTEXITCODE -ne 0){throw '浏览器策略还原失败。'}
   & $python (Join-Path $PSScriptRoot 'browser_languages.py') restore;if($LASTEXITCODE -ne 0){throw '浏览器语言还原失败。'}
+  Write-Step '还原 Clash 客户端文件（订阅、增强脚本、配置目录）'
   Get-Process clash-verge -ErrorAction SilentlyContinue | Stop-Process -Force
   & $python (Join-Path $PSScriptRoot 'client.py') restore-client;if($LASTEXITCODE -ne 0){throw '客户端还原失败。'}
  }
  $result.success=$true
  if($Action -eq 'apply'){
-  Write-Host ('配置已完成并生效。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT)
-  Write-Host '固定节点组 Claude-Overseas-Pinned 只包含你指定的节点。要撤销请运行菜单 3「恢复」。'
+  Write-Done ('配置已完成并生效（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT)
+  Write-Host '  固定节点组 Claude-Overseas-Pinned 只包含你指定的节点。要撤销请运行菜单 3「恢复」。'
  } else {
-  Write-Host ('恢复已完成。使用的快照：'+$env:CCN_SNAPSHOT)
+  Write-Done ('恢复已完成（共 '+$planCount+' 步）。使用的快照：'+$env:CCN_SNAPSHOT)
  }
- Write-Host 'IPv6 和语言改动要重启 Windows 才完全生效。网络测试不能证明 Claude 账号本身可用。'
+ Write-Host '  IPv6 和语言改动要重启 Windows 才完全生效。网络测试不能证明 Claude 账号本身可用。' -ForegroundColor DarkGray
 } catch {
  $result.error=$_.Exception.Message
+ $brokenStep=@($script:stepTitles)
+ if($script:stepNo -gt 0 -and $script:stepNo -le $brokenStep.Count){
+  Write-Host ''
+  Write-Host ('  中断在第 '+$script:stepNo+'/'+$brokenStep.Count+' 步：'+[string]$brokenStep[$script:stepNo-1]) -ForegroundColor Red
+ }
  if($Action -eq 'apply' -and $env:CCN_SNAPSHOT -and (Test-Path -LiteralPath (Join-Path $env:CCN_SNAPSHOT 'system.json'))) {
   try{& (Join-Path $PSScriptRoot 'system.ps1') -Action rollback-firewall -Python $python;$result.firewallRollback=$true;if($watchToken){Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Rolled back'}}catch{$result.firewallRollback=$false}
  }
