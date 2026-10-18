@@ -11,6 +11,15 @@ if(!$stateDir){
 }
 $file=Join-Path $stateDir 'system.json'
 $prefix='CCN-Portable-'
+$displayPrefix='Claude network '
+# 本项目的 4 条出站放行规则用 Name 前缀 CCN-Portable-* 或 DisplayName 前缀
+# "Claude network " 识别。2026-10-18 实测有外部因素把规则的 Name 改写成了
+# DisplayName 文本，只认 CCN-Portable-* 的旧逻辑会把自己的规则判成"未知新
+# 规则"而中止配置，恢复时也删不掉，看门狗回滚同样受影响。
+function Get-ProjectFirewallRules {
+ param([string]$PolicyStore='PersistentStore')
+ return @(Get-NetFirewallRule -PolicyStore $PolicyStore -ErrorAction SilentlyContinue | Where-Object {$_.Name -like ($prefix+'*') -or $_.DisplayName -like ($displayPrefix+'*')})
+}
 # Adapter identity helpers. Never resolve an adapter by Name through a cmdlet that
 # accepts wildcards: Windows names virtual adapters "Local Area Connection* 1",
 # so -Name matching silently hits the wrong adapter or nothing at all.
@@ -42,7 +51,7 @@ function Repair-Tcpip6Service {
 }
 function Restore-Firewall($saved) {
   foreach($firewallProfile in $saved.firewallProfiles){Set-NetFirewallProfile -Name $firewallProfile.Name -DefaultOutboundAction ([int]$firewallProfile.DefaultOutboundAction)}
-  Get-NetFirewallRule -PolicyStore PersistentStore -Name ($prefix+'*') -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+  Get-ProjectFirewallRules | Remove-NetFirewallRule
   foreach($name in $saved.enabledOutboundRules){Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue | Enable-NetFirewallRule}
 }
 if($Action -eq 'snapshot') {
@@ -52,7 +61,7 @@ if($Action -eq 'snapshot') {
   $manifestFile=Join-Path $stateDir 'manifest.json'
   $kind='auto'
   if(Test-Path -LiteralPath $manifestFile){$kind=[string](Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json).kind}
-  if($kind -ne 'manual' -and @(Get-NetFirewallRule -PolicyStore PersistentStore -Name ($prefix+'*') -ErrorAction SilentlyContinue).Count){throw '发现本项目残留的防火墙规则，但没有原始基线。请改为「保存当前快照」，不要新建自动快照。'}
+  if($kind -ne 'manual' -and @(Get-ProjectFirewallRules).Count){throw '发现本项目残留的防火墙规则，但没有原始基线。请改为「保存当前快照」，不要新建自动快照。'}
   $ipKey='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters'
   $ipValue=Get-ItemProperty -LiteralPath $ipKey -Name DisabledComponents -ErrorAction SilentlyContinue
   $proxyKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -228,10 +237,10 @@ if(Test-Path -LiteralPath $docker){
 $plan=Get-Content -LiteralPath (Join-Path $project '.local\plan.json') -Raw | ConvertFrom-Json
 $tun=Get-NetAdapter | Where-Object {$_.Name -eq 'Meta'}
 if(@($tun).Count -ne 1){throw '找不到 Meta TUN 网卡，或者存在多个同名网卡。改防火墙之前必须先确认实际网卡。'}
-$unknown=@(Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Where-Object {$_.Name -notlike ($prefix+'*') -and $_.Name -notin $saved.enabledOutboundRules})
+$unknown=@(Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Where-Object {$_.Name -notlike ($prefix+'*') -and $_.DisplayName -notlike ($displayPrefix+'*') -and $_.Name -notin $saved.enabledOutboundRules})
 if($unknown.Count){throw '自初始快照以来出现了新的出站允许规则，请先确认再继续。'}
-Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Where-Object {$_.Name -notlike ($prefix+'*')} | Disable-NetFirewallRule
-Get-NetFirewallRule -Name ($prefix+'*') -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Where-Object {$_.Name -notlike ($prefix+'*') -and $_.DisplayName -notlike ($displayPrefix+'*')} | Disable-NetFirewallRule
+Get-ProjectFirewallRules | Remove-NetFirewallRule
 New-NetFirewallRule -Name ($prefix+'Core') -DisplayName 'Claude network core outbound' -Direction Outbound -Action Allow -Program $plan.core_program -Profile Any | Out-Null
 New-NetFirewallRule -Name ($prefix+'TUN') -DisplayName 'Claude network TUN outbound' -Direction Outbound -Action Allow -InterfaceAlias $tun.Name -Profile Any | Out-Null
 New-NetFirewallRule -Name ($prefix+'LAN') -DisplayName 'Claude network LAN outbound' -Direction Outbound -Action Allow -RemoteAddress @('10.0.0.0/8','100.64.0.0/10','127.0.0.0/8','169.254.0.0/16','172.16.0.0/12','192.168.0.0/16','224.0.0.0/4') -Profile Any | Out-Null

@@ -230,7 +230,15 @@ try {
   try {
    if(Test-Path -LiteralPath (Join-Path $local ($watchToken+'.rollback'))){throw '防火墙看门狗已回滚，本次部署不算成功。'}
    if(@(Get-NetFirewallProfile | Where-Object {$_.DefaultOutboundAction.ToString() -ne 'Block'}).Count){throw '严格防火墙已经不再生效。'}
-   if(@(Get-NetFirewallRule -PolicyStore PersistentStore -Name 'CCN-Portable-*' -ErrorAction SilentlyContinue).Count -ne 4){throw '严格防火墙规则不完整。'}
+   # 4 条出站白名单规则的身份按 Name 或 DisplayName 前缀识别：外部因素曾把
+   # 规则 Name 改写成 DisplayName 文本，只认 CCN-Portable-* 会把有效部署判成
+   # "规则不完整"并触发回滚。除数量外再核对 core/TUN/LAN/DHCP 四条角色齐全。
+   $ccnRules=@(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction SilentlyContinue | Where-Object {$_.Name -like 'CCN-Portable-*' -or $_.DisplayName -like 'Claude network *'})
+   if($ccnRules.Count -ne 4){throw '严格防火墙规则不完整。'}
+   $ccnText=($ccnRules | ForEach-Object {[string]$_.Name+' '+[string]$_.DisplayName}) -join ' '
+   foreach($role in @('core','TUN','LAN','DHCP')){
+    if($ccnText -notmatch ('(?i)'+$role)){throw ('严格防火墙规则不完整：缺少 '+$role+'。')}
+   }
    Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Verified'
   } finally {$guardMutex.ReleaseMutex();$guardMutex.Dispose()}
   Write-Step '注册自动更新任务，之后内核和规则会定时刷新'
