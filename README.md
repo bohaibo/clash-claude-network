@@ -1,6 +1,6 @@
 # Windows Claude 网络环境配置与恢复
 
-本项目用于 Windows 11 + Clash Verge Rev / Mihomo：国内域名/IP 直连，Claude/Anthropic 优先固定代理，其余流量进入用户指定的唯一海外节点；节点故障不回落直连。它包含 AI 智能体 skill、可审核的配置生成器、详细说明及两个一键入口。
+本项目用于 Windows 11 + Clash Verge Rev / Mihomo：国内域名/IP 直连，Claude/Anthropic 优先固定代理，其余流量进入用户指定的唯一海外节点；节点故障不回落直连。它包含 AI 智能体 skill、可审核的配置生成器、详细说明及一个带配置/恢复菜单的一键入口。
 
 **不安装 Claude、不处理账号、不承诺不封号、不伪造浏览器指纹。** 仅 Windows 适配器在支持范围内。默认要求出口为 SG；节点名、旗帜、ASN 或第三方评分不能代替实际出口验证，也不能证明账号符合服务地区政策。
 
@@ -8,22 +8,25 @@
 
 把私有仓库授权给你的 AI 智能体，然后发送：
 
-> 阅读 https://github.com/bohaibo/clash-claude-network 中的 SKILL.md 和 README.md，根据其中流程配置这台 Windows 电脑。使用我已有订阅中的节点「填写完整节点名」，出口要求新加坡。保留全部原节点、订阅、局域网规则和浏览器数据。先发现实际配置并备份，生成候选再应用，完成验证，留下完整记录和两个一键入口。遇到节点歧义或缺少必要依赖时向我确认，不要猜测。不要安装或登录 Claude。
+> 阅读 https://github.com/bohaibo/clash-claude-network 中的 SKILL.md 和 README.md，根据其中流程配置这台 Windows 电脑。使用我已有订阅中的节点「填写完整节点名」，出口要求新加坡。保留全部原节点、订阅、局域网规则和浏览器数据。先发现实际配置并备份，生成候选再应用，完成验证，留下完整记录和一个带菜单的一键入口。遇到节点歧义或缺少必要依赖时向我确认，不要猜测。不要安装或登录 Claude。
 
 第一次执行仍可能需要你提供订阅归属、允许管理员授权、确认严格防火墙影响及保存浏览器网页。项目地址和节点名不能替代缺失的订阅凭据、管理员权限或客户端安装。**私有仓库需要相应 GitHub 访问权限**，不是公开下载链接。
 
 前置依赖：已安装并正常运行 Clash Verge Rev、Mihomo 服务、Node.js、Python 3.10+ 与 PyYAML。可在审阅后通过 `python -m pip install -r requirements.txt` 安装 Python 依赖。脚本不会自动下载未知软件，也不会替你添加一个不存在的节点。
 
-## 两个一键入口
+## 一键入口
 
-- **一键配置.cmd**：新电脑询问精确节点名，生成、校验、备份并应用配置；之后执行网络/断网测试。高级用法：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run.ps1 -Action apply -Node "节点完整名称" -Region SG`。同名节点可加 `-Subscription "订阅名称或UID"`。
-- **一键恢复.cmd**：校验备份，恢复本项目修改前记录的客户端、系统、浏览器设置，并移除本项目更新任务与防火墙规则。
+根目录只有 **一键网络.cmd**，运行后按菜单选择：
 
-两者需管理员权限。浏览器会关闭并尝试恢复原标签页，请先保存网页内容。重启 Windows 后 IPv6/语言策略才能完整生效。不要移动或删除 `.local`；它被 Git 排除，包含本机恢复所必需的原始记录。
+- **1. 配置**：新电脑询问精确节点名，生成、校验、备份并应用配置；之后执行网络/断网测试。高级用法：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run.ps1 -Action apply -Node "节点完整名称" -Region SG`。同名节点可加 `-Subscription "订阅名称或UID"`。
+- **2. 恢复**：校验备份，恢复到本机第一次配置前的客户端、系统、浏览器设置，并移除本项目更新任务与防火墙规则。
+- **0. 退出**。
+
+两个操作都需要管理员权限。浏览器会关闭并尝试恢复原标签页，请先保存网页内容。重启 Windows 后 IPv6/语言策略才能完整生效。不要移动或删除 `.local`；它被 Git 排除，包含本机恢复所必需的原始记录。
 
 不需要处理浏览器时，给高级命令加 `-SkipBrowser`：浏览器策略和语言字段不改动，WebRTC、语言、指纹相关验证项保持“未测试”，不能声称已全面防护。本项目只处理普通 Chrome/Edge，不配置指纹浏览器。
 
-本机沿用 `.local/legacy-binding.json` 指向的最早恢复基线，不把本次较新的状态当作“最初状态”。新电脑没有这个私密桥接文件，自动建立自己的首次基线。不要把本机 `.local` 复制到另一台电脑使用。
+恢复目标固定为**本机第一次执行 apply 之前**自动拍下的基线：`.local/baseline` 里包含客户端目录、系统设置原值、防火墙导出和哈希清单。这份基线只建立一次，之后只读不覆盖；恢复时也只使用它，不会去找更早的历史包、别处的快照或“上一次配置前”的状态。不要把 `.local` 复制到另一台电脑使用。
 
 ### 恢复后 IPv6 仍未启用怎么办
 
@@ -122,4 +125,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/system.ps1 -Action r
 下载来源按各自许可证使用。本项目不把第三方完整规则数据纳入 Git；生成时记录来源及 SHA-256，随配置保存在本机。
 
 
-本次实测与未验证项见 [VALIDATION.md](VALIDATION.md)。本机最初备份现位于 `.local/legacy-package/Final/backup`，不会上传 GitHub。
+本次实测与未验证项见 [VALIDATION.md](VALIDATION.md)。本机基线位于 `.local/baseline`，不会上传 GitHub。

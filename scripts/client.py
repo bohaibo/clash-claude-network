@@ -188,6 +188,13 @@ def validate(config,original,node):
  for value in config['dns'].get('nameserver-policy',{}).values():
   values=value if isinstance(value,list) else [value]
   assert all(filtered(v) for v in values),'DNS policy path bypasses type filter'
+def already_configured(root):
+ for candidate in (root/'profiles').glob('*'):
+  if candidate.suffix not in ('.js','.yaml','.yml'):continue
+  try:
+   if 'PORTABLE-CLAUDE-NETWORK-V1' in candidate.read_text(encoding='utf-8',errors='ignore'):return True
+  except OSError:pass
+ return False
 def backup(root):
  path=LOCAL/'baseline';manifest=path/'manifest.json'
  if manifest.exists():
@@ -198,6 +205,7 @@ def backup(root):
   for name,digest in state.get('extra_sha256',{}).items():assert hashlib.sha256((path/name).read_bytes()).hexdigest()==digest,'System backup integrity failure'
   return
  assert not path.exists(),'Incomplete first backup; inspect before retrying'
+ assert not already_configured(root),'Client already carries this project enhancement. Capture the baseline before the first apply instead of snapshotting an already-configured state.'
  path.mkdir();shutil.copytree(root,path/'client')
  write(manifest,{'computer':socket.gethostname(),'user_sid':user_sid(),'client_root':str(root),'time':datetime.datetime.now().astimezone().isoformat(),
   'coverage':{},'sha256':{str(p.relative_to(path/'client')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (path/'client').rglob('*') if p.is_file()}})

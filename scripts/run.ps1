@@ -14,15 +14,15 @@ if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principa
   $process=Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
   exit $process.ExitCode
 }
-$bridge=Join-Path $local 'legacy-binding.json'
-if(Test-Path -LiteralPath $bridge) {
-  $binding=Get-Content -LiteralPath $bridge -Raw | ConvertFrom-Json
-  if($binding.computer -ne $env:COMPUTERNAME){throw 'Local original-baseline bridge belongs to another computer'}
-  if($Action -eq 'apply' -and $Node -and $Node -ne 'bo-Reality'){throw 'This computer has an existing original baseline. Ask the agent to adapt its current package to the new node; do not create a replacement baseline.'}
-  $script=if($Action -eq 'apply'){'Apply-Current.ps1'}else{'Restore-Initial.ps1'}
-  if($Action -eq 'apply'){& $python (Join-Path $PSScriptRoot 'test_dns_filter.py');if($LASTEXITCODE -ne 0){throw 'Installed core DNS type-filter control test failed; existing settings retained.'}}
-  & (Join-Path $binding.package $script) -NoPause:$NoPause
-  exit $LASTEXITCODE
+# Restore always targets the baseline captured immediately before the first apply on
+# this machine. Historical packages and earlier bridges are deliberately not consulted:
+# a restore must return the computer to its own pre-apply state, not to some older one.
+if($Action -eq 'restore') {
+ $manifest=Join-Path $local 'baseline\manifest.json'
+ if(Test-Path -LiteralPath $manifest) {
+  $state=Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+  Write-Host ('Restore target: baseline captured at ' + $state.time + ' (before the first apply on this machine).')
+ }
 }
 if(!$Acknowledged) {
  Write-Host 'This applies strict outbound blocking, disables IPv6, changes Singapore region/languages, clears proxy overrides, and restarts Chrome/Edge.'

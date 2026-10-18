@@ -21,7 +21,7 @@ def check():
   assert not re.search(r'(?:gh[pousr]_[A-Za-z0-9]{25,}|github_pat_[A-Za-z0-9_]{35,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----)',text),'Credential-like material found in '+str(relative)
   assert not any(value in text for value in banned),'Original machine data found in '+str(relative)
   assert not re.search(r'S-1-5-21-\d+-\d+-\d+-\d+',text),'Machine SID found'
- assert len(list(PROJECT.glob('*.cmd')))==2,'Expected exactly two public one-click entries'
+ assert {p.name for p in PROJECT.glob('*.cmd')}=={'一键网络.cmd'},'Expected exactly one public entry: 一键网络.cmd'
  policy=json.loads((PROJECT/'assets/claude-policy.json').read_text(encoding='utf-8'))
  data={**policy,'domains':['+.cn'],'ips':['1.0.1.0/24'],'privateDomains':['+.lan'],
        'lanCidrs':['10.0.0.0/8'],'lan':['IP-CIDR,127.0.0.0/8,DIRECT,no-resolve']}
