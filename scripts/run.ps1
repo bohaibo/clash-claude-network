@@ -20,6 +20,7 @@ if(Test-Path -LiteralPath $bridge) {
   if($binding.computer -ne $env:COMPUTERNAME){throw 'Local original-baseline bridge belongs to another computer'}
   if($Action -eq 'apply' -and $Node -and $Node -ne 'bo-Reality'){throw 'This computer has an existing original baseline. Ask the agent to adapt its current package to the new node; do not create a replacement baseline.'}
   $script=if($Action -eq 'apply'){'Apply-Current.ps1'}else{'Restore-Initial.ps1'}
+  if($Action -eq 'apply'){& $python (Join-Path $PSScriptRoot 'test_dns_filter.py');if($LASTEXITCODE -ne 0){throw 'Installed core DNS type-filter control test failed; existing settings retained.'}}
   & (Join-Path $binding.package $script) -NoPause:$NoPause
   exit $LASTEXITCODE
 }
@@ -35,11 +36,12 @@ try {
  if($opened.Count){Stop-Process -Name $opened -Force}
  if($Action -eq 'apply') {
   Get-Service -Name clash_verge_service -ErrorAction Stop | Out-Null
+  & $python (Join-Path $PSScriptRoot 'test_dns_filter.py');if($LASTEXITCODE -ne 0){throw 'Installed core DNS type-filter control test failed; no system settings changed.'}
   if(!$Node){$Node=Read-Host 'Exact existing node name (no automatic node replacement)'}
   Get-Process clash-verge -ErrorAction SilentlyContinue | Stop-Process -Force
-  $args=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region)
-  if($Subscription){$args+=@('--subscription',$Subscription)}
-  & $python @args;if($LASTEXITCODE -ne 0){throw 'Candidate/backup preparation failed; no system settings changed.'}
+  $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region)
+  if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
+  & $python @prepareArguments;if($LASTEXITCODE -ne 0){throw 'Candidate/backup preparation failed; no system settings changed.'}
   & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
   & $python (Join-Path $PSScriptRoot 'browser_settings.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser policy backup failed'}
   & $python (Join-Path $PSScriptRoot 'browser_languages.py') capture;if($LASTEXITCODE -ne 0){throw 'Browser language backup failed'}
@@ -54,7 +56,14 @@ try {
   & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw 'Network verification failed'}
   & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw 'Core-exit protection/restart verification failed'}
   & $python (Join-Path $PSScriptRoot 'verify.py');if($LASTEXITCODE -ne 0){throw 'Network did not recover after core-exit check'}
-  Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Verified'
+  $guardMutex=New-Object Threading.Mutex($false,('Local\CCN-'+$watchToken))
+  [void]$guardMutex.WaitOne()
+  try {
+   if(Test-Path -LiteralPath (Join-Path $local ($watchToken+'.rollback'))){throw 'Firewall watchdog rolled back before completion; not a successful deployment.'}
+   if(@(Get-NetFirewallProfile | Where-Object {$_.DefaultOutboundAction.ToString() -ne 'Block'}).Count){throw 'Strict firewall is no longer active.'}
+   if(@(Get-NetFirewallRule -PolicyStore PersistentStore -Name 'CCN-Portable-*' -ErrorAction SilentlyContinue).Count -ne 4){throw 'Strict firewall rules are incomplete.'}
+   Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Verified'
+  } finally {$guardMutex.ReleaseMutex();$guardMutex.Dispose()}
   & (Join-Path $PSScriptRoot 'update_task.ps1') -Action install -Python $python
  } else {
   & $python -c 'from baseline import verify;verify()'

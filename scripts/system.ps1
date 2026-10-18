@@ -5,12 +5,13 @@ $stateDir=Join-Path $project '.local\baseline'
 $file=Join-Path $stateDir 'system.json'
 $prefix='CCN-Portable-'
 function Restore-Firewall($saved) {
-  foreach($profile in $saved.firewallProfiles){Set-NetFirewallProfile -Name $profile.Name -DefaultOutboundAction ([int]$profile.DefaultOutboundAction)}
+  foreach($firewallProfile in $saved.firewallProfiles){Set-NetFirewallProfile -Name $firewallProfile.Name -DefaultOutboundAction ([int]$firewallProfile.DefaultOutboundAction)}
   Get-NetFirewallRule -PolicyStore PersistentStore -Name ($prefix+'*') -ErrorAction SilentlyContinue | Remove-NetFirewallRule
   foreach($name in $saved.enabledOutboundRules){Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue | Enable-NetFirewallRule}
 }
 if($Action -eq 'snapshot') {
   if(Test-Path -LiteralPath $file){Write-Output 'Existing first-change system snapshot retained.';return}
+  if(@(Get-NetFirewallRule -PolicyStore PersistentStore -Name ($prefix+'*') -ErrorAction SilentlyContinue).Count){throw 'Existing project firewall rules found without the original baseline. Locate that baseline instead of creating another one.'}
   $ipKey='HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters'
   $ipValue=Get-ItemProperty -LiteralPath $ipKey -Name DisabledComponents -ErrorAction SilentlyContinue
   $proxyKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -55,7 +56,7 @@ if($Action -eq 'restore') {
   }
   Set-TimeZone -Id $saved.timezone;Set-Culture -CultureInfo $saved.culture
   $languages=New-WinUserLanguageList $saved.languages[0].LanguageTag;$languages.Clear()
-  foreach($entry in $saved.languages){$item=(New-WinUserLanguageList $entry.LanguageTag)[0];$item.InputMethodTips.Clear();foreach($tip in $entry.InputMethodTips){$item.InputMethodTips.Add([string]$tip)};$languages.Add($item)}
+  foreach($entry in $saved.languages){$item=(New-WinUserLanguageList $entry.LanguageTag)[0];$item.InputMethodTips.Clear();foreach($tip in $entry.InputMethodTips){$item.InputMethodTips.Add([string]$tip)};$item.Spellchecking=[bool]$entry.Spellchecking;$item.Handwriting=[bool]$entry.Handwriting;$languages.Add($item)}
   Set-WinUserLanguageList -LanguageList $languages -Force
   foreach($scope in @('User','Machine')){foreach($property in $saved.environment.$scope.PSObject.Properties){[Environment]::SetEnvironmentVariable($property.Name,$property.Value,$scope)}}
   $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
