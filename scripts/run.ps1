@@ -282,16 +282,23 @@ try {
  }
  Write-Host '  IPv6 和语言改动要重启 Windows 才完全生效。网络测试不能证明 Claude 账号本身可用。' -ForegroundColor DarkGray
 } catch {
+ $runError=$_
  $result.error=$_.Exception.Message
+ $result.failedStep=$script:stepNo
+ $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
+ $runError | Format-List * -Force | Out-String | Set-Content -LiteralPath (Join-Path $local 'last-error.log') -Encoding UTF8
  $brokenStep=@($script:stepTitles)
  if($script:stepNo -gt 0 -and $script:stepNo -le $brokenStep.Count){
   Write-Host ''
   Write-Host ('  中断在第 '+$script:stepNo+'/'+$brokenStep.Count+' 步：'+[string]$brokenStep[$script:stepNo-1]) -ForegroundColor Red
  }
+ Write-Host ('  原因：'+$runError.Exception.Message) -ForegroundColor Red
+ Write-Host '  错误已保存到 .local/last-error.log。' -ForegroundColor DarkGray
  if($Action -eq 'apply' -and $env:CCN_SNAPSHOT -and (Test-Path -LiteralPath (Join-Path $env:CCN_SNAPSHOT 'system.json'))) {
+  Write-Host '  正在回滚防火墙，原有规则较多时可能需要等待。' -ForegroundColor Yellow
   try{& (Join-Path $PSScriptRoot 'system.ps1') -Action rollback-firewall -Python $python;$result.firewallRollback=$true;if($watchToken){Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Rolled back'}}catch{$result.firewallRollback=$false}
  }
- Write-Error $_ -ErrorAction Continue
+ Write-Error $runError -ErrorAction Continue
  if($Action -eq 'apply'){
   Write-Host '配置没有完成，可能只改了一部分：看门狗只回滚防火墙规则，时区、语言、IPv6 和代理设置不会自动还原。重试之前请先执行「恢复」。'
  } else {

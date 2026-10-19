@@ -1,5 +1,6 @@
 ﻿param([ValidateSet('snapshot','apply','restore','rollback-firewall','repair-bindings')][string]$Action,[string]$Python)
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'firewall_rules.ps1')
 $project=Split-Path -Parent $PSScriptRoot
 $localDir=Join-Path $project '.local'
 # CCN_SNAPSHOT pins the snapshot for this run; otherwise the newest captured snapshot wins.
@@ -53,6 +54,7 @@ function Restore-Firewall($saved) {
   foreach($firewallProfile in $saved.firewallProfiles){Set-NetFirewallProfile -Name $firewallProfile.Name -DefaultOutboundAction ([int]$firewallProfile.DefaultOutboundAction)}
   Get-ProjectFirewallRules | Remove-NetFirewallRule
   foreach($name in $saved.enabledOutboundRules){Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue | Enable-NetFirewallRule}
+  Restore-AdditionalOutboundRules $stateDir
 }
 if($Action -eq 'snapshot') {
   if(Test-Path -LiteralPath $file){Write-Output '已有系统状态快照，保留原文件不覆盖。';return}
@@ -89,7 +91,7 @@ if($Action -eq 'snapshot') {
       $adapter=$_
       [ordered]@{name=[string]$adapter.Name;guid=[string]$adapter.InterfaceGuid;description=[string]$adapter.InterfaceDescription;enabled=(Get-AdapterIpv6Enabled $adapter)}});
     firewallProfiles=@(Get-NetFirewallProfile | Select-Object Name,DefaultOutboundAction);
-    enabledOutboundRules=@(Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Select-Object -ExpandProperty Name);
+    enabledOutboundRules=@(Get-EnabledOutboundAllowRules | Select-Object -ExpandProperty Name);
     proxy=$proxy;environment=$environment;appFiles=$appFiles} | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $file -Encoding UTF8
   return
 }
@@ -237,9 +239,7 @@ if(Test-Path -LiteralPath $docker){
 $plan=Get-Content -LiteralPath (Join-Path $project '.local\plan.json') -Raw | ConvertFrom-Json
 $tun=Get-NetAdapter | Where-Object {$_.Name -eq 'Meta'}
 if(@($tun).Count -ne 1){throw '找不到 Meta TUN 网卡，或者存在多个同名网卡。改防火墙之前必须先确认实际网卡。'}
-$unknown=@(Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Where-Object {$_.Name -notlike ($prefix+'*') -and $_.DisplayName -notlike ($displayPrefix+'*') -and $_.Name -notin $saved.enabledOutboundRules})
-if($unknown.Count){throw '自初始快照以来出现了新的出站允许规则，请先确认再继续。'}
-Get-NetFirewallRule -PolicyStore PersistentStore -Direction Outbound -Action Allow -Enabled True | Where-Object {$_.Name -notlike ($prefix+'*') -and $_.DisplayName -notlike ($displayPrefix+'*')} | Disable-NetFirewallRule
+Disable-NonProjectOutboundRules $saved $stateDir
 Get-ProjectFirewallRules | Remove-NetFirewallRule
 New-NetFirewallRule -Name ($prefix+'Core') -DisplayName 'Claude network core outbound' -Direction Outbound -Action Allow -Program $plan.core_program -Profile Any | Out-Null
 New-NetFirewallRule -Name ($prefix+'TUN') -DisplayName 'Claude network TUN outbound' -Direction Outbound -Action Allow -InterfaceAlias $tun.Name -Profile Any | Out-Null

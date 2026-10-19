@@ -5,7 +5,7 @@ FINAL=Path(__file__).resolve().parent.parent/'.local'
 # still had IPv6 enabled in that run, so its content legitimately changes after the
 # snapshot is sealed. It is a runtime record consumed by restore, not a restorable
 # part of the baseline: never seal or integrity-check it.
-RUNTIME_SNAPSHOT_FILES={'disabled-by-apply.json'}
+RUNTIME_SNAPSHOT_FILES={'disabled-by-apply.json','firewall-disabled-by-apply.json'}
 def snapshot():
  value=os.environ.get('CCN_SNAPSHOT')
  if value:return Path(value)
