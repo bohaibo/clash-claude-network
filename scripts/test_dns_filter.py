@@ -1,4 +1,5 @@
 """Positive-control test against the installed Mihomo; no TUN or live config changes."""
+from checks import require
 from pathlib import Path
 import json,os,socket,struct,subprocess,threading,time
 import yaml
@@ -39,21 +40,21 @@ def main():
   controls=[]
   for kind in (64,65):
    result=query('127.0.0.1',upstream_port,kind,host='type-check.example.com')
-   assert result['rcode']==0 and result['answer_count']==1,'Synthetic positive control failed'
+   require(result['rcode']==0 and result['answer_count']==1,'Synthetic positive control failed')
    controls.append({'qtype':kind,'unfiltered_answer_count':result['answer_count']})
   process=subprocess.Popen([core,'-d',str(work),'-f',str(path)],stdout=stdout,stderr=subprocess.STDOUT)
   deadline=time.monotonic()+15
   while True:
    try:
     value=query('127.0.0.1',port,1,host='type-check.example.com')
-    assert value['answer_count']==1;break
+    require(value['answer_count']==1,'检查未通过');break
    except Exception:
     if process.poll() is not None or time.monotonic()>deadline:raise RuntimeError('Isolated DNS listener did not become ready; see local output')
     time.sleep(.1)
   before=len([t for t in seen if t in (64,65)])
   filtered=[query('127.0.0.1',port,kind,tcp,host='type-check.example.com') for kind in (64,65) for tcp in (False,True)]
-  assert all(r['passed'] for r in filtered),'Installed core did not filter a known-positive SVCB/HTTPS response'
-  assert len([t for t in seen if t in (64,65)])==before,'Blocked qtype unexpectedly reached upstream'
+  require(all(r['passed'] for r in filtered),'Installed core did not filter a known-positive SVCB/HTTPS response')
+  require(len([t for t in seen if t in (64,65)])==before,'Blocked qtype unexpectedly reached upstream')
   report.update({'success':True,'positive_controls':controls,'filtered_results':filtered,'blocked_questions_reached_upstream':False})
  finally:
   if process is not None:

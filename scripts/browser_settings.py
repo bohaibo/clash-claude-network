@@ -1,4 +1,5 @@
 """Current-user browser policies, with a first-change backup in the original baseline."""
+from checks import require
 import argparse, datetime, hashlib, json, winreg
 from pathlib import Path
 from baseline import FINAL, snapshot, verify
@@ -51,7 +52,7 @@ def apply():
     for label,path in ROOTS.items():
         for name,value in VALUES[label].items():
             machine=read(path,name,winreg.HKEY_LOCAL_MACHINE)
-            assert not machine['exists'] or machine['value']==value,'Conflicting machine browser policy; manual review required'
+            require(not machine['exists'] or machine['value']==value,'Conflicting machine browser policy; manual review required')
     for label,path in ROOTS.items():
         for name,value in VALUES[label].items():put(path,name,value)
     path=ROOTS['Chrome']+r'\ForcedLanguages'

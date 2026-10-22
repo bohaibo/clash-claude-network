@@ -1,4 +1,5 @@
 """Network verification only: never logs in or invokes a Claude conversation."""
+from checks import require
 from pathlib import Path
 import argparse,datetime,ipaddress,json,os,shutil,socket,struct,subprocess,sys,time
 from client import PROJECT,LOCAL,api,root_path,GROUP,load
@@ -43,7 +44,7 @@ def query(server,port,kind,tcp=False,source=None,host='cloudflare.com'):
   if tcp:
    sock.connect((server,port));sock.sendall(struct.pack('!H',len(packet))+packet);data=receive(struct.unpack('!H',receive(2))[0])
   else:sock.sendto(packet,(server,port));data=sock.recv(4096)
- assert data[:2]==token,'Mismatched DNS response'
+ require(data[:2]==token,'Mismatched DNS response')
  _,flags,_,answers,_,_=struct.unpack('!HHHHHH',data[:12]);rcode=flags&15
  return {'transport':'TCP' if tcp else 'UDP','qtype':kind,'host':host,'rcode':rcode,'answer_count':answers,
          'ips':answer_ips(data) if kind==1 else [],
@@ -91,20 +92,20 @@ def verify(outage=False):
  report={'success':False,'account_tested':False,'application_usability_verified':False,
          'not_tested':['browser_webrtc','browser_fingerprint']}
  try:
-  group=api(root,'GET','/proxies')['proxies'][GROUP];assert group['all']==[node] and group['now']==node
-  cn=curl('https://www.baidu.com',True);assert cn['exit']==0 and cn['http']==200
-  taobao=curl('https://www.taobao.com',True);assert taobao['exit']==0 and taobao['http'] in (200,301,302)
+  group=api(root,'GET','/proxies')['proxies'][GROUP];require(group['all']==[node] and group['now']==node,'配置检查未通过，请查看本地记录。')
+  cn=curl('https://www.baidu.com',True);require(cn['exit']==0 and cn['http']==200,'配置检查未通过，请查看本地记录。')
+  taobao=curl('https://www.taobao.com',True);require(taobao['exit']==0 and taobao['http'] in (200,301,302),'配置检查未通过，请查看本地记录。')
   report['domestic']={'baidu':cn['http'],'taobao':taobao['http']}
-  egress=curl('https://ipinfo.io/json');assert egress['exit']==0
-  address=json.loads(egress['body']);assert address.get('country')==plan['region'],'Exit country differs from required region'
+  egress=curl('https://ipinfo.io/json');require(egress['exit']==0,'配置检查未通过，请查看本地记录。')
+  address=json.loads(egress['body']);require(address.get('country')==plan['region'],'Exit country differs from required region')
   report['egress']={k:address.get(k) for k in ('ip','country','city')}
-  claude=curl('https://claude.ai',True);report['claude_http']=claude['http'];assert claude['exit']==0 and claude['http']>0
+  claude=curl('https://claude.ai',True);report['claude_http']=claude['http'];require(claude['exit']==0 and claude['http']>0,'配置检查未通过，请查看本地记录。')
   report['dns']=[query('8.8.8.8',53,t,tcp) for t in (1,64,65) for tcp in (False,True)]
-  assert all(x['passed'] for x in report['dns'])
+  require(all(x['passed'] for x in report['dns']),'配置检查未通过，请查看本地记录。')
   fake=query('8.8.8.8',53,1,False,host='claude.ai')
-  assert any(ipaddress.ip_address(ip) in FAKE for ip in fake['ips']),'fake-IP not observed; TUN DNS hijack may be bypassed'
+  require(any(ipaddress.ip_address(ip) in FAKE for ip in fake['ips']),'fake-IP not observed; TUN DNS hijack may be bypassed')
   report['fake_ip_hijack']=fake['ips']
-  assert curl('https://[2606:4700:4700::1111]/cdn-cgi/trace')['exit']!=0
+  require(curl('https://[2606:4700:4700::1111]/cdn-cgi/trace')['exit']!=0,'配置检查未通过，请查看本地记录。')
   report['ipv6_public_blocked']=True
   report['stun']=stun()
   report['git']=git_egress()
@@ -122,11 +123,11 @@ def verify(outage=False):
      if node in connection.get('chains',[]):
       try:api(root,'DELETE','/connections/'+connection['id'])
       except Exception:pass
-    assert curl('https://claude.ai')['exit']!=0
-    assert curl('https://www.baidu.com',True)['http']==200
+    require(curl('https://claude.ai')['exit']!=0,'配置检查未通过，请查看本地记录。')
+    require(curl('https://www.baidu.com',True)['http']==200,'配置检查未通过，请查看本地记录。')
     report['node_failure_blocks_foreign_preserves_domestic']=True
    finally:api(root,'PUT','/configs?force=true',{'payload':current})
-   recovered=curl('https://ipinfo.io/json');assert recovered['exit']==0 and json.loads(recovered['body']).get('country')==plan['region']
+   recovered=curl('https://ipinfo.io/json');require(recovered['exit']==0 and json.loads(recovered['body']).get('country')==plan['region'],'配置检查未通过，请查看本地记录。')
    report['recovered']=True
   report['success']=True;return report
  except Exception as exc:report['error']=str(exc);raise

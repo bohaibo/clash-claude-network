@@ -1,18 +1,19 @@
 """Administrator-only test for the Windows service deployment; always restarts service."""
+from checks import require
 import json,socket,subprocess,time
 from client import LOCAL,root_path,api
 
-plan=json.loads((LOCAL/'plan.json').read_text());root=root_path(plan['root'])
+plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root'])
 def command(text):
  result=subprocess.run(['powershell.exe','-NoProfile','-Command',text],capture_output=True,text=True)
- assert result.returncode==0,'Core service control failed'
+ require(result.returncode==0,'Core service control failed')
  return result.stdout.strip()
 command("$s=Get-Service -Name clash_verge_service -ErrorAction Stop; if($s.Status -ne 'Running'){throw 'Expected running Clash Verge service'}")
 report={'success':False}
 current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
 try:
  command('Stop-Service clash_verge_service -Force -ErrorAction Stop')
- assert command('@(Get-Process verge-mihomo -ErrorAction SilentlyContinue).Count')=='0','Core remained alive; protection test is inconclusive'
+ require(command('@(Get-Process verge-mihomo -ErrorAction SilentlyContinue).Count')=='0','Core remained alive; protection test is inconclusive')
  report['core_stopped']=True
  for label,address in [('foreign','1.1.1.1'),('domestic','223.5.5.5')]:
   try:
