@@ -1,5 +1,5 @@
 """Offline verification regressions. All network/process I/O is mocked."""
-import contextlib,io,json,os,socket,struct,tempfile,unittest
+import contextlib,io,json,os,socket,struct,subprocess,sys,tempfile,time,unittest
 from pathlib import Path
 from unittest.mock import patch
 import client,verify,verify_core_exit as core,verification_reports
@@ -17,6 +17,7 @@ class Verification(unittest.TestCase):
   self.enterContext(patch.object(verify,'curl',side_effect=self.fake_curl))
   self.enterContext(patch.object(verify,'query',return_value={'passed':True,'ips':['198.18.0.1']}))
   self.stun=self.enterContext(patch.object(verify,'stun',return_value={'ok':True,'mapped':'8.8.8.8:1234','route':{'verified':True}}))
+  self.real_git=verify.git_egress
   self.git=self.enterContext(patch.object(verify,'git_egress',return_value={'tested':True,'ok':True}))
   self.npm=self.enterContext(patch.object(verify,'npm_egress',return_value={'tested':True,'ok':True}))
   self.enterContext(patch.object(verify,'workload_scope',return_value={'docker_installed':False,'wsl_installed':False}))
@@ -27,7 +28,7 @@ class Verification(unittest.TestCase):
   if path=='/connections':return {'connections':[]}
   return {'proxies':{client.GROUP:{'all':['Chosen'],'now':'Chosen'}}}
  def fake_curl(self,url,head=False):
-  if '[' in url or (self.broken and url=='https://claude.ai'):return {'exit':7,'http':0,'body':''}
+  if '[' in url or (self.broken and url=='https://ipinfo.io/json'):return {'exit':7,'http':0,'body':''}
   return {'exit':0,'http':200,'body':json.dumps({'country':'SG','ip':'8.8.8.8'})}
  def test_failed_required_checks_cannot_pass(self):
   for name in ('stun','git','npm'):
@@ -38,6 +39,65 @@ class Verification(unittest.TestCase):
      report=json.loads((self.local/'verification.json').read_text())
      self.assertFalse(report['success']);self.assertEqual(report[name]['status'],'failed')
     finally:mock.return_value=old
+ def test_tool_timeout_is_saved_and_other_checks_still_run(self):
+  with patch.object(verify,'run_tool_attempt',return_value={'ok':False,'error':'timeout','process_tree_stopped':True}) as run:
+   result=verify.tool_egress(['fixture'],20,{})
+  self.assertFalse(result['ok']);self.assertEqual(result['error'],'timeout');self.assertEqual(run.call_count,2)
+  self.git.return_value=result
+  with self.assertRaisesRegex(AssertionError,'git'):verify.verify()
+  report=json.loads((self.local/'verification.json').read_text())
+  self.assertEqual(report['git']['status'],'failed');self.assertEqual(len(report['git']['attempts']),2)
+  self.assertEqual(report['npm']['status'],'passed');self.assertFalse(report['success'])
+ def test_tool_retry_can_recover_without_hiding_first_failure(self):
+  with patch.object(verify,'run_tool_attempt',side_effect=[{'ok':False,'error':'timeout','process_tree_stopped':True},{'ok':True,'exit':0}]):
+   result=verify.tool_egress(['fixture'],20,{})
+  self.assertTrue(result['ok']);self.assertEqual(result['attempts'][0]['error'],'timeout');self.assertEqual(len(result['attempts']),2)
+ def test_tool_start_failure_does_not_retry(self):
+  with patch.object(verify,'run_tool_attempt',side_effect=OSError) as run:
+   result=verify.tool_egress(['fixture'],20,{})
+  self.assertFalse(result['ok']);self.assertEqual(run.call_count,1)
+ def test_git_probe_cannot_open_authentication_prompts(self):
+  with patch.object(verify.shutil,'which',return_value='git'),patch.object(verify,'run_tool_attempt',return_value={'ok':True,'exit':0}) as run:
+   result=self.real_git()
+  self.assertTrue(result['ok']);self.assertEqual(run.call_count,1)
+  args=run.call_args.args[0];env=run.call_args.args[2]
+  self.assertIn('credential.helper=',args);self.assertIn('core.askPass=',args)
+  self.assertEqual(env['GIT_TERMINAL_PROMPT'],'0');self.assertEqual(env['GCM_INTERACTIVE'],'Never')
+  self.assertFalse(any(key.lower() in ('http_proxy','https_proxy','all_proxy','no_proxy') for key in env))
+ def test_uncertain_timeout_cleanup_does_not_spawn_more_processes(self):
+  with patch.object(verify,'run_tool_attempt',return_value={'ok':False,'error':'timeout','process_tree_stopped':False}) as run:
+   result=verify.tool_egress(['fixture'],20,{})
+  self.assertFalse(result['ok']);self.assertEqual(run.call_count,1)
+ @unittest.skipUnless(os.name=='nt','Windows process tree cleanup')
+ def test_real_windows_timeout_stops_inherited_child_process(self):
+  import ctypes
+  from ctypes import wintypes
+  pidfile=self.local/'child-pid.json'
+  code='import subprocess,sys,time,json,pathlib; print("fixture-output",flush=True); print("fixture-error",file=sys.stderr,flush=True); p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(60)"]); pathlib.Path('+repr(str(pidfile))+').write_text(json.dumps(p.pid)); time.sleep(60)'
+  started=time.monotonic()
+  logs=self.local/'process-logs'
+  result=verify.run_tool_attempt([sys.executable,'-c',code],2,verify.clean_env(),logs)
+  self.assertFalse(result['ok']);self.assertEqual(result['error'],'timeout')
+  self.assertTrue(result['process_tree_stopped']);self.assertLess(time.monotonic()-started,12)
+  self.assertIn('fixture-output',(logs/'stdout.log').read_text())
+  self.assertIn('fixture-error',(logs/'stderr.log').read_text())
+  child=json.loads(pidfile.read_text())
+  kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+  kernel.OpenProcess.restype=wintypes.HANDLE
+  kernel.GetExitCodeProcess.argtypes=[wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)]
+  kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+  handle=kernel.OpenProcess(0x1000,False,child)
+  if handle:
+   try:
+    status=wintypes.DWORD()
+    self.assertTrue(kernel.GetExitCodeProcess(handle,ctypes.byref(status)))
+    self.assertNotEqual(status.value,259,'Timed-out command left its helper alive')
+   finally:kernel.CloseHandle(handle)
+ def test_configuration_never_requests_claude_http(self):
+  with patch.object(verify,'curl',side_effect=self.fake_curl) as curl:
+   report=verify.verify(True)
+  self.assertTrue(report['success']);self.assertIn('claude_http',report['not_tested'])
+  self.assertFalse(any('claude' in call.args[0] or 'anthropic' in call.args[0] for call in curl.call_args_list))
  def test_missing_tools_are_explicitly_untested(self):
   self.git.return_value={'tested':False,'reason':'git not installed'}
   report=verify.verify();self.assertTrue(report['success'])

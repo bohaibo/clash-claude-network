@@ -19,7 +19,7 @@ if(!$stateDir){
 $file=Join-Path $stateDir 'system.json'
 $prefix='CCN-Portable-'
 $displayPrefix='Claude network '
-# 本项目的 4 条出站放行规则用 Name 前缀 CCN-Portable-* 或 DisplayName 前缀
+# 本项目的四条放行和 SharedAccess 阻断规则用 Name 前缀 CCN-Portable-* 或 DisplayName 前缀
 # "Claude network " 识别。2026-10-18 实测有外部因素把规则的 Name 改写成了
 # DisplayName 文本，只认 CCN-Portable-* 的旧逻辑会把自己的规则判成"未知新
 # 规则"而中止配置，恢复时也删不掉，看门狗回滚同样受影响。
@@ -202,6 +202,10 @@ if($Action -eq 'repair-bindings') {
   return
 }
 $saved=Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+# Validate legacy journals before touching firewall, IPv6, language or proxies.
+# In particular, a failed rollback must not change more state before discovering
+# that its additional-rule journal is unreadable.
+$null=@(Read-FirewallRuleJournal $stateDir)
 if($Action -eq 'supplement'){
   # Require an existing deployment; never capture a replacement baseline.
   $plan=Get-Content -LiteralPath (Join-Path $localDir 'plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -298,6 +302,7 @@ $tun=Get-NetAdapter | Where-Object {$_.Name -eq 'Meta'}
 if(@($tun).Count -ne 1){throw '找不到 Meta TUN 网卡，或者存在多个同名网卡。改防火墙之前必须先确认实际网卡。'}
 Disable-NonProjectOutboundRules $saved $stateDir
 Get-ProjectFirewallRules | Remove-NetFirewallRule
+New-NetFirewallRule -Name ($prefix+'SharedAccess-Block') -DisplayName 'Claude network SharedAccess-Block outbound' -Direction Outbound -Action Block -Service SharedAccess -Profile Any | Out-Null
 New-NetFirewallRule -Name ($prefix+'Core') -DisplayName 'Claude network core outbound' -Direction Outbound -Action Allow -Program $plan.core_program -Profile Any | Out-Null
 New-NetFirewallRule -Name ($prefix+'TUN') -DisplayName 'Claude network TUN outbound' -Direction Outbound -Action Allow -InterfaceAlias $tun.Name -Profile Any | Out-Null
 New-NetFirewallRule -Name ($prefix+'LAN') -DisplayName 'Claude network LAN outbound' -Direction Outbound -Action Allow -RemoteAddress @('10.0.0.0/8','100.64.0.0/10','127.0.0.0/8','169.254.0.0/16','172.16.0.0/12','192.168.0.0/16','224.0.0.0/4') -Profile Any | Out-Null

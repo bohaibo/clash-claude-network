@@ -1,7 +1,7 @@
 """Network verification only: never logs in or invokes a Claude conversation."""
 from checks import require
 from pathlib import Path
-import argparse,datetime,ipaddress,json,os,shutil,socket,struct,subprocess,sys,time
+import argparse,contextlib,datetime,ipaddress,json,os,shutil,socket,struct,subprocess,sys,time,uuid
 from client import PROJECT,LOCAL,api,root_path,GROUP,load
 from verification_reports import save_report
 
@@ -123,16 +123,60 @@ def udp_egress(result,tcp,region):
  except (AssertionError,ValueError,KeyError,OSError,subprocess.SubprocessError) as exc:
   report['error']=type(exc).__name__
  return report
+def run_tool_attempt(command,timeout,env,log_dir=None):
+ # Do not capture pipes: on Windows a Git helper can keep inherited pipes open
+ # even after subprocess.run kills the parent, defeating its timeout.
+ with contextlib.ExitStack() as files:
+  output=errors=subprocess.DEVNULL
+  if log_dir is not None:
+   log_dir.mkdir(parents=True,exist_ok=True)
+   output=files.enter_context((log_dir/'stdout.log').open('wb'))
+   errors=files.enter_context((log_dir/'stderr.log').open('wb'))
+  process=subprocess.Popen(command,stdout=output,stderr=errors,env=env)
+  try:
+   code=process.wait(timeout=timeout)
+   return {'exit':code,'ok':code==0}
+  except subprocess.TimeoutExpired:
+   tree_stopped=False
+   if os.name=='nt':
+    try:
+     cleanup=subprocess.run(['taskkill.exe','/PID',str(process.pid),'/T','/F'],
+                            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
+     tree_stopped=cleanup.returncode==0
+    except (OSError,subprocess.TimeoutExpired):pass
+   try:process.kill()
+   except OSError:pass
+   try:process.wait(timeout=3)
+   except subprocess.TimeoutExpired:pass
+   return {'ok':False,'error':'timeout','timeout_seconds':timeout,'process_tree_stopped':tree_stopped}
+
+def tool_egress(command,timeout,env,attempts=2):
+ history=[]
+ folder=LOCAL/'tool-probes'/uuid.uuid4().hex
+ for _ in range(attempts):
+  started=time.monotonic()
+  logs=folder/str(len(history)+1)
+  try:
+   attempt=run_tool_attempt(command,timeout,env,logs)
+  except OSError:
+   attempt={'ok':False,'error':'process-start-failed'}
+  attempt['elapsed_seconds']=round(time.monotonic()-started,2)
+  attempt['logs']=str(logs.relative_to(LOCAL));history.append(attempt)
+  if (attempt['ok'] or attempt.get('error')=='process-start-failed'
+      or (attempt.get('error')=='timeout' and not attempt.get('process_tree_stopped'))):break
+ return {'tested':True,**history[-1],'attempts':history}
+
 def git_egress():
  if not shutil.which('git'):return {'tested':False,'reason':'git not installed'}
- p=subprocess.run(['git','-c','http.proxy=','-c','https.proxy=','ls-remote','https://github.com/git/git','HEAD'],
-                  capture_output=True,text=True,env=clean_env(),timeout=30)
- return {'tested':True,'exit':p.returncode,'ok':p.returncode==0}
+ env=clean_env();env.update(GIT_TERMINAL_PROMPT='0',GCM_INTERACTIVE='Never',GIT_ASKPASS='',GIT_TRACE='1',GIT_CURL_VERBOSE='1')
+ return tool_egress(['git','-c','http.proxy=','-c','https.proxy=','-c','credential.helper=',
+                     '-c','core.askPass=','-c','http.lowSpeedLimit=1','-c','http.lowSpeedTime=10',
+                     'ls-remote','https://github.com/git/git','HEAD'],20,env)
 def npm_egress():
  npm=shutil.which('npm') or shutil.which('npm.cmd')
  if not npm:return {'tested':False,'reason':'npm not installed'}
- p=subprocess.run([npm,'ping','--registry','https://registry.npmjs.org'],capture_output=True,text=True,env=clean_env(),timeout=35)
- return {'tested':True,'exit':p.returncode,'ok':p.returncode==0}
+ return tool_egress([npm,'ping','--registry','https://registry.npmjs.org',
+                     '--fetch-retries=0','--fetch-timeout=12000','--update-notifier=false'],20,clean_env())
 def workload_scope():
  return {'docker_installed':bool(shutil.which('docker')),'wsl_installed':bool(shutil.which('wsl')),
          'note':'Container and WSL egress must be measured inside each workload; host curl is not proof.'}
@@ -140,7 +184,7 @@ def verify(outage=False,stage=None):
  stage=stage or ('node-outage' if outage else 'connectivity')
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root']);node=plan['node']
  report={'success':False,'account_tested':False,'application_usability_verified':False,
-         'not_tested':['browser_webrtc','browser_fingerprint']}
+         'not_tested':['browser_webrtc','browser_fingerprint','claude_http']}
  try:
   runtime=api(root,'GET','/configs')
   require(runtime.get('mode')=='rule','Live core is not in rule mode; network probes stopped')
@@ -152,7 +196,6 @@ def verify(outage=False,stage=None):
   egress=curl('https://ipinfo.io/json');require(egress['exit']==0,'配置检查未通过，请查看本地记录。')
   address=json.loads(egress['body']);require(address.get('country')==plan['region'],'Exit country differs from required region')
   report['egress']={k:address.get(k) for k in ('ip','country','city')}
-  claude=curl('https://claude.ai',True);report['claude_http']=claude['http'];require(claude['exit']==0 and claude['http']>0,'配置检查未通过，请查看本地记录。')
   report['dns']=[query('8.8.8.8',53,t,tcp) for t in (1,64,65) for tcp in (False,True)]
   require(all(x['passed'] for x in report['dns']),'配置检查未通过，请查看本地记录。')
   fake=query('8.8.8.8',53,1,False,host='claude.ai')
@@ -187,7 +230,7 @@ def verify(outage=False,stage=None):
      if node in connection.get('chains',[]):
       try:api(root,'DELETE','/connections/'+connection['id'])
       except Exception:pass
-    require(curl('https://claude.ai')['exit']!=0,'配置检查未通过，请查看本地记录。')
+    require(curl('https://ipinfo.io/json')['exit']!=0,'Foreign traffic remained reachable during node outage')
     require(curl('https://www.baidu.com',True)['http']==200,'配置检查未通过，请查看本地记录。')
     report['node_failure_blocks_foreign_preserves_domestic']=True
    finally:api(root,'PUT','/configs?force=true',{'payload':current})

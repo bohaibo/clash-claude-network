@@ -52,6 +52,50 @@ class Maintenance(unittest.TestCase):
   result,project,local,first,token=self.guard_fixture(force=True)
   self.assertEqual(result.returncode,0)
   self.assertEqual((project/'captured-snapshot').read_text(encoding='utf-8-sig').splitlines(),[str(first),str(first)])
+ def test_bad_firewall_journal_stops_system_actions_before_any_mutation(self):
+  project=self.local/'journal-preflight';scripts=project/'scripts';scripts.mkdir(parents=True)
+  snapshot=project/'snapshot';snapshot.mkdir()
+  (snapshot/'system.json').write_text('{}')
+  journal=snapshot/'firewall-disabled-by-apply.json'
+  journal.write_text('[{"value":["fixture-rule"],"Count":99}]')
+  before=journal.read_bytes()
+  for name in ('system.ps1','firewall_rules.ps1'):
+   shutil.copy2(client.PROJECT/'scripts'/name,scripts/name)
+  probe=scripts/'probe.ps1'
+  probe.write_text('''param($Action,$Snapshot)
+$ErrorActionPreference='Stop'
+$env:CCN_SNAPSHOT=$Snapshot
+function Set-Service { 'unexpected' | Set-Content -LiteralPath (Join-Path $PSScriptRoot '../mutation');throw 'Unexpected mutation' }
+function Get-NetFirewallRule { 'unexpected' | Set-Content -LiteralPath (Join-Path $PSScriptRoot '../mutation');throw 'Unexpected firewall access' }
+& (Join-Path $PSScriptRoot 'system.ps1') -Action $Action -Python 'unused-fixture'
+''',encoding='utf-8-sig')
+  for action in ('apply','restore','rollback-firewall','supplement'):
+   with self.subTest(action=action):
+    result=subprocess.run(['powershell.exe','-NoProfile','-File',str(probe),action,str(snapshot)],capture_output=True)
+    self.assertNotEqual(result.returncode,0)
+    self.assertFalse((project/'mutation').exists());self.assertEqual(journal.read_bytes(),before)
+ def test_verification_message_reports_current_tool_failure_without_raw_errors(self):
+  folder=self.local/'message-fixture';folder.mkdir()
+  (folder/'verification.json').write_text(json.dumps({'run_id':'a'*32,'error':'private-fixture-error',
+   'git':{'status':'failed','error':'timeout','attempts':[{},{}]},'npm':{'status':'passed'}}))
+  probe=folder/'probe.ps1'
+  probe.write_text('''param($Source,$LocalDir)
+$ErrorActionPreference='Stop'
+$local=$LocalDir
+$env:CCN_VERIFY_RUN='a'*32
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+$function=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-VerificationFailureMessage'},$true)
+Invoke-Expression $function.Extent.Text
+$message=Get-VerificationFailureMessage 'fallback'
+if($message -notmatch 'GitHub/Git' -or $message -notmatch '2' -or $message -match 'private-fixture-error'){throw 'Wrong current failure message'}
+$env:CCN_VERIFY_RUN='b'*32
+if((Get-VerificationFailureMessage 'fallback') -cne 'fallback'){throw 'Stale evidence included'}
+Remove-Item -LiteralPath (Join-Path $local 'verification.json')
+if((Get-VerificationFailureMessage 'fallback') -cne 'fallback'){throw 'Missing evidence included'}
+''',encoding='utf-8-sig')
+  result=subprocess.run(['powershell.exe','-NoProfile','-File',str(probe),str(client.PROJECT/'scripts/run.ps1'),str(folder)],capture_output=True)
+  self.assertEqual(result.returncode,0,result.stderr.decode('utf-8',errors='replace'))
  def proxy_fixture(self,original_exists=True):
   self.saved=self.local/'before';self.saved.mkdir()
   self.apps=self.local/'应用设置';self.apps.mkdir()

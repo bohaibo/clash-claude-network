@@ -16,6 +16,19 @@ function Get-AdapterIpv6Enabled($adapter) {$adapter.Enabled}
 function New-ItemProperty {param($LiteralPath,$Name,$PropertyType,$Value,[switch]$Force) $script:registry=$Value}
 function Remove-ItemProperty {[CmdletBinding()]param($LiteralPath,$Name) $script:registry=$null}
 function Assert-Case($condition,$label){if(!$condition){throw ('Failed: '+$label)};$script:cases++}
+$wrapped='[{"value":["one","two"],"Count":2}]' | ConvertFrom-Json
+$parsed=@(ConvertTo-RuleNameList $wrapped)
+Assert-Case ($parsed.Count -eq 2 -and $parsed[0] -ceq 'one' -and $parsed[1] -ceq 'two') 'legacy value/Count wrapper preserves every rule name'
+$nested='[[{"Value":[["one"],{"value":["two"],"Count":1}],"Count":2}]]' | ConvertFrom-Json
+Assert-Case (@(ConvertTo-RuleNameList $nested).Count -eq 2) 'nested arrays and legacy wrappers can be mixed'
+Assert-Case (@(ConvertTo-RuleNameList ('{"value":[],"Count":0}' | ConvertFrom-Json)).Count -eq 0) 'empty legacy wrapper is a valid empty list'
+Assert-Case (@(ConvertTo-RuleNameList ('{"value":"single","Count":1}' | ConvertFrom-Json))[0] -ceq 'single') 'single-string legacy wrapper is preserved'
+foreach($invalid in @('{"value":["one"],"Count":2}','{"value":["one"],"Count":1,"other":true}',
+ '{"value":42,"Count":1}','{"value":[42],"Count":1}','{"value":[],"Count":-1}',
+ '{"value":["one"],"Count":"1"}','{"name":"one"}')){
+ $rejected=$false;try{ConvertTo-RuleNameList ($invalid | ConvertFrom-Json) | Out-Null}catch{$rejected=$true}
+ Assert-Case $rejected 'unknown or inconsistent records are rejected without guessing'
+}
 $script:adapters=@([pscustomobject]@{InterfaceGuid='original';Name='same-name';InterfaceDescription='same-description';Enabled=$true},
  [pscustomobject]@{InterfaceGuid='later';Name='new';InterfaceDescription='new';Enabled=$false},
  [pscustomobject]@{InterfaceGuid='unrecorded';Name='other';InterfaceDescription='other';Enabled=$false})
@@ -60,6 +73,13 @@ Assert-Case ('CCN-Portable-Core' -in $script:removed) 'new project rule removed 
 $script:removed=@();$original.projectFirewallRules=@([pscustomobject]@{name='CCN-Portable-Core';enabled='True';fingerprint='original'})
 Restore-Firewall $original
 Assert-Case (!$script:removed.Count) 'manual snapshot retains its own project rule'
+$script:rules+=@([pscustomobject]@{Name='CCN-Portable-SharedAccess-Block';DisplayName='Claude network SharedAccess-Block outbound';Direction='Outbound';Action='Block';Fingerprint='service-block'})
+$script:removed=@();Restore-Firewall $original
+Assert-Case ($script:removed.Count -eq 1 -and 'CCN-Portable-SharedAccess-Block' -in $script:removed) 'restore removes service block absent from original snapshot'
+$original.projectFirewallRules+=@([pscustomobject]@{name='CCN-Portable-SharedAccess-Block';enabled='True';fingerprint='service-block'})
+$script:removed=@();Restore-Firewall $original
+Assert-Case (!$script:removed.Count) 'manual snapshot retains its existing service block'
+$original.projectFirewallRules=@($original.projectFirewallRules[0])
 $original.projectFirewallRules[0].fingerprint='changed';$rejected=$false
 try{Restore-Firewall $original}catch{$rejected=$true}
 Assert-Case $rejected 'manual rule drift stops restoration'
@@ -79,12 +99,21 @@ $oldJournal=Join-Path $fixture 'firewall-disabled-by-apply.json'
 '[["later-one","later-two"]]' | Set-Content -LiteralPath $oldJournal -Encoding UTF8
 $script:enabled=@();Restore-AdditionalOutboundRules $fixture
 Assert-Case ($script:enabled.Count -eq 2) 'legacy nested firewall journal restored'
+'[{"value":["later-one","later-two"],"Count":2}]' | Set-Content -LiteralPath $oldJournal -Encoding UTF8
+$script:enabled=@();Restore-AdditionalOutboundRules $fixture
+Assert-Case ($script:enabled.Count -eq 2) 'observed legacy wrapper restores all additional rules'
 function Get-EnabledOutboundAllowRules { @($script:rules | Where-Object {$_.Enabled -eq $true}) }
 function Disable-NetFirewallRule {[CmdletBinding()]param([Parameter(ValueFromPipeline=$true)]$Rule) process{$Rule.Enabled=$false}}
 $script:rules[2].Enabled=$true
 Disable-NonProjectOutboundRules ([pscustomobject]@{enabledOutboundRules=@()}) $fixture
 $journal=Get-Content -LiteralPath (Join-Path $fixture 'firewall-disabled-by-apply.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 Assert-Case ($journal.Count -eq 3 -and 'later-one' -in $journal -and 'later-three' -in $journal) 'supplemental records accumulate without nested arrays'
+Assert-Case (@($journal | Where-Object {$_ -isnot [string]}).Count -eq 0) 'rewritten journal is a plain string array without wrapper metadata'
+'[{"value":["later-one"],"Count":1}]' | Set-Content -LiteralPath $oldJournal -Encoding UTF8
+Disable-NonProjectOutboundRules ([pscustomobject]@{enabledOutboundRules=@()}) $fixture -Targets @()
+$singleText=Get-Content -LiteralPath $oldJournal -Raw -Encoding UTF8
+$singleItems=$singleText | ConvertFrom-Json
+Assert-Case ($singleText.Trim().StartsWith('[') -and $singleItems.Count -eq 1 -and ($singleItems[0] -is [string])) 'single-record journal is still a plain JSON array'
 $script:adapters=@([pscustomobject]@{Name='no-guid-one';InterfaceGuid='';InterfaceDescription='one';Enabled=$true},
  [pscustomobject]@{Name='no-guid-two';InterfaceGuid='';InterfaceDescription='two';Enabled=$true})
 '[]' | Set-Content -LiteralPath (Join-Path $fixture 'disabled-by-apply.json') -Encoding UTF8

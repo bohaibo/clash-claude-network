@@ -67,6 +67,24 @@ function Write-Done([string]$text){
  Write-Host ''
  Write-Host ('  ['+('='*20)+']  '+$text) -ForegroundColor Green
 }
+function Get-VerificationFailureMessage([string]$fallback){
+ $details=@()
+ try{
+  $report=Get-Content -LiteralPath (Join-Path $local 'verification.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+  if(!$env:CCN_VERIFY_RUN -or $report.run_id -ne $env:CCN_VERIFY_RUN){return $fallback}
+  foreach($name in @('git','npm','stun')){
+   $item=$report.$name
+   if($item -and $item.status -eq 'failed'){
+    $title=switch($name){'git'{'GitHub/Git'};'npm'{'npm'};'stun'{'UDP STUN'}}
+    if($item.error -eq 'timeout'){$details+=($title+' 检测超时（'+@($item.attempts).Count+' 次尝试）')}
+    else{$details+=($title+' 检测失败')}
+   }
+  }
+  if($report.udp_egress -and !$report.udp_egress.verified){$details+='UDP 出口地区或指定节点路由未确认'}
+ }catch{return $fallback}
+ if($details.Count){return ($fallback+' '+($details -join '；')+'。详情见 .local/verification.json。')}
+ return ($fallback+' 详情见 .local/verification.json。')
+}
 # 配置前的清单：一项一行，下面缩进写这一项可能造成的影响。
 function Write-PlanItem([int]$index,[string]$item,[string]$impact){
  Write-Host ('  {0}) {1}' -f $index,$item)
@@ -177,7 +195,7 @@ if(!$Acknowledged) {
   Write-Host ''
   Write-Host '本次会改动下面 6 项，每项后面是它可能造成的影响：' -ForegroundColor Yellow
   Write-PlanItem 1 'Clash 客户端：为所选订阅关联独立的项目增强脚本与固定节点组' '保留原自定义脚本；恢复时撤销项目关联，保留后加订阅和节点更新'
-  Write-PlanItem 2 '严格出站防火墙：只放行 Mihomo 和本项目的规则' 'Mihomo 一停，国内网站也一起断；VPN、Docker、WSL、视频通话、远程控制可能失效'
+  Write-PlanItem 2 '严格出站防火墙：保留四条放行，阻断 SharedAccess 服务出站' 'Mihomo 一停，国内网站也一起断；连接共享、移动热点、VPN、Docker、WSL、视频通话、远程控制可能失效'
   Write-PlanItem 3 '系统 IPv6：全局关闭' '依赖 IPv6 的内网或校园网资源不可用，要重启 Windows 才完全生效'
   Write-PlanItem 4 '区域与语言：设置新加坡时区，首选 zh-SG / en-SG' '部分应用的区域和语言显示可能变化；需要重启 Windows 才完全生效'
   Write-PlanItem 5 '代理环境变量：清空 HTTP_PROXY / HTTPS_PROXY 等' '依赖这些变量的命令行工具将不再走代理'
@@ -305,6 +323,8 @@ try {
   try{
    if(Test-Path -LiteralPath (Join-Path $local ($watchToken+'.rollback'))){throw '后台回滚已开始，停止配置。'}
    & (Join-Path $PSScriptRoot 'system.ps1') -Action apply -Python $python
+   $firewallPlan=Get-Content -LiteralPath (Join-Path $local 'plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+   Assert-StrictFirewall -coreProgram ([string]$firewallPlan.core_program)
   }finally{$applyMutex.ReleaseMutex();$applyMutex.Dispose()}
   if(!$SkipBrowser){
    Write-Step '写入浏览器设置：WebRTC 策略与语言偏好'
@@ -313,9 +333,9 @@ try {
   }
   Write-Step '网络验证：节点中断、内核退出后能否自动恢复（需要 1-2 分钟）'
   $env:CCN_VERIFY_RUN=[Guid]::NewGuid().ToString('N')
-  & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw '网络验证未通过。'}
+  & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '网络验证未通过。')}
   & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw '内核退出保护/重启验证未通过。'}
-  & $python (Join-Path $PSScriptRoot 'verify.py') --stage post-recovery;if($LASTEXITCODE -ne 0){throw '内核退出测试之后网络没有恢复。'}
+  & $python (Join-Path $PSScriptRoot 'verify.py') --stage post-recovery;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '内核退出测试之后网络没有恢复。')}
   $guardMutex=New-Object Threading.Mutex($false,('Global\CCN-'+$watchToken))
   try{[void]$guardMutex.WaitOne()}catch [Threading.AbandonedMutexException]{}
   try {
