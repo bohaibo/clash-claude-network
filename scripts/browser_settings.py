@@ -16,10 +16,10 @@ def read(path,name,hive=winreg.HKEY_CURRENT_USER):
         return {'exists':True,'value':value,'kind':kind}
     except FileNotFoundError:return {'exists':False}
 
-def list_values(path):
+def list_values(path,hive=winreg.HKEY_CURRENT_USER):
     result={}
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,path) as key:
+        with winreg.OpenKey(hive,path) as key:
             for index in range(winreg.QueryInfoKey(key)[1]):
                 name,value,kind=winreg.EnumValue(key,index);result[name]={'exists':True,'value':value,'kind':kind}
     except FileNotFoundError:pass
@@ -47,12 +47,38 @@ def remove(path,name):
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,path,0,winreg.KEY_SET_VALUE) as key:winreg.DeleteValue(key,name)
     except FileNotFoundError:pass
 
-def apply():
-    capture()
+def preflight():
+    # Check overriding policies before any browser/client shutdown or writes.
     for label,path in ROOTS.items():
         for name,value in VALUES[label].items():
             machine=read(path,name,winreg.HKEY_LOCAL_MACHINE)
-            require(not machine['exists'] or machine['value']==value,'Conflicting machine browser policy; manual review required')
+            require(not machine['exists'] or (machine['value']==value and machine['kind']==winreg.REG_SZ),
+                    label+': conflicting machine browser policy; manual review required')
+        for hive in (winreg.HKEY_CURRENT_USER,winreg.HKEY_LOCAL_MACHINE):
+            for name in ('ProxySettings','WebRtcIPHandlingUrl'):
+                stored=read(path,name,hive)
+                if not stored['exists']:continue
+                try:
+                    require(stored['kind']==winreg.REG_SZ,'Invalid policy type')
+                    value=json.loads(stored['value'])
+                    if name=='ProxySettings':
+                        valid=isinstance(value,dict) and value.get('ProxyMode')=='direct'
+                    else:
+                        valid=isinstance(value,list) and all(isinstance(entry,dict) and
+                            isinstance(entry.get('url'),str) and entry['url'] and
+                            entry.get('handling')=='disable_non_proxied_udp' for entry in value)
+                except (ValueError,TypeError,AssertionError):valid=False
+                require(valid,label+': conflicting or invalid '+name+'; existing policy preserved; manual review required')
+    machine_languages=list_values(ROOTS['Chrome']+r'\ForcedLanguages',winreg.HKEY_LOCAL_MACHINE)
+    expected={str(i):value for i,value in enumerate(('zh-SG','en-SG','zh-CN'),1)}
+    require(not machine_languages or (set(machine_languages)==set(expected) and all(
+        machine_languages[key]['value']==value and machine_languages[key]['kind']==winreg.REG_SZ
+        for key,value in expected.items())),'Chrome: conflicting machine ForcedLanguages; manual review required')
+    return {'preflight_passed':True,'effective_browser_behavior_verified':False}
+
+def apply():
+    preflight()
+    capture()
     for label,path in ROOTS.items():
         for name,value in VALUES[label].items():put(path,name,value)
     path=ROOTS['Chrome']+r'\ForcedLanguages'
@@ -76,10 +102,13 @@ def restore():
 def status():
     result={label:{name:read(path,name).get('value') for name in VALUES[label]} for label,path in ROOTS.items()}
     result['Chrome']['ForcedLanguages']={name:value['value'] for name,value in list_values(ROOTS['Chrome']+r'\ForcedLanguages').items()}
-    return {'policies_written':result,'browser_restart_required':True,'effective_policy_ui_verification_required':True}
+    return {'policies_written':result,'browser_restart_required':True,'effective_policy_ui_verification_required':True,
+            'effective_browser_behavior_verified':False,
+            'limitations':['Edge personal Microsoft-account profiles may ignore WebRTC and preferred-language policies; verify each real profile.',
+                          'Stored language preferences do not prove the default Intl locale or WebRTC behavior.']}
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('action',choices=('capture','apply','restore','status'));a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('action',choices=('capture','preflight','apply','restore','status'));a=p.parse_args()
     result=globals()[a.action]()
     print(json.dumps(result,ensure_ascii=False))
     if a.action in ('apply','restore'):

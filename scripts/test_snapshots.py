@@ -211,5 +211,17 @@ function Start-ScheduledTask { throw 'Unexpected task start' }
   stopped=subprocess.run(['powershell.exe','-NoProfile','-File',str(scripts/'run.ps1'),'-Action','apply',
                           '-Node','fixture','-Acknowledged','-NoPause','-SkipBrowser'],capture_output=True)
   self.assertEqual(stopped.returncode,1);self.assertFalse(sentinel.exists())
+  # Browser policy conflicts stop the actual entry path before DNS testing,
+  # closing apps, capturing a baseline, or making any client/system changes.
+  runner=runner.replace("function Get-Service { throw 'Fixture preflight failure' }",
+                        "function Get-Service { return $null }\nfunction Assert-FirewallAvailable { return $null }")
+  (scripts/'run.ps1').write_text(runner,encoding='utf-8-sig')
+  (scripts/'browser_settings.py').write_text('raise SystemExit(1)\n')
+  (scripts/'test_dns_filter.py').write_text("from pathlib import Path\nPath(__file__).parent.parent.joinpath('unexpected-process-action').write_text('unexpected DNS self-test')\n")
+  conflict=subprocess.run(['powershell.exe','-NoProfile','-File',str(scripts/'run.ps1'),'-Action','apply',
+                          '-Node','fixture','-Acknowledged','-NoPause'],capture_output=True)
+  self.assertEqual(conflict.returncode,1);self.assertFalse(sentinel.exists())
+  result=json.loads((project/'.local'/'last-run.json').read_text(encoding='utf-8-sig'))
+  self.assertEqual(result['failedStep'],1)
 
 if __name__=='__main__':unittest.main()

@@ -17,7 +17,8 @@ def update():
  _,_,previous,_=parse_project_wrapper(old)
  fresh=download_rules()
  for key in ('privateDomains','lanCidrs'):
-  require(set(fresh[key])==set(previous[key]),'Private/LAN source changed; review before publishing')
+  reviewed=previous.get('lanSourceCidrs',previous[key]) if key=='lanCidrs' else previous[key]
+  require(set(fresh[key])==set(reviewed),'Private/LAN source changed; review before publishing')
  for key in ('domains','ips'):
   require(len(set(fresh[key])^set(previous[key]))<=max(100,int(len(previous[key])*.1)),'Large source delta requires manual review')
  for value in set(fresh['ips'])-set(previous['ips']):

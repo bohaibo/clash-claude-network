@@ -230,6 +230,10 @@ try {
   Write-Step '确认 Clash Verge 后台服务在运行，并自检内核的 DNS 类型过滤'
   Get-Service -Name clash_verge_service -ErrorAction Stop | Out-Null
   Assert-FirewallAvailable | Out-Null
+  if(!$SkipBrowser){
+   & $python (Join-Path $PSScriptRoot 'browser_settings.py') preflight
+   if($LASTEXITCODE -ne 0){throw '浏览器已有冲突策略，未关闭应用或写入配置。请先审核原策略。'}
+  }
   & $python (Join-Path $PSScriptRoot 'test_dns_filter.py');if($LASTEXITCODE -ne 0){throw '内核 DNS 类型过滤自检未通过，未改动任何系统设置。'}
   $nodeNote=if($Node){'使用命令行指定的节点：'+$Node}else{'优先沿用上次用过的节点，也可以按编号重新选'}
   Write-Step $nodeNote
@@ -308,9 +312,10 @@ try {
    & $python (Join-Path $PSScriptRoot 'browser_languages.py') apply;if($LASTEXITCODE -ne 0){throw '浏览器语言写入失败。'}
   }
   Write-Step '网络验证：节点中断、内核退出后能否自动恢复（需要 1-2 分钟）'
+  $env:CCN_VERIFY_RUN=[Guid]::NewGuid().ToString('N')
   & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw '网络验证未通过。'}
   & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw '内核退出保护/重启验证未通过。'}
-  & $python (Join-Path $PSScriptRoot 'verify.py');if($LASTEXITCODE -ne 0){throw '内核退出测试之后网络没有恢复。'}
+  & $python (Join-Path $PSScriptRoot 'verify.py') --stage post-recovery;if($LASTEXITCODE -ne 0){throw '内核退出测试之后网络没有恢复。'}
   $guardMutex=New-Object Threading.Mutex($false,('Global\CCN-'+$watchToken))
   try{[void]$guardMutex.WaitOne()}catch [Threading.AbandonedMutexException]{}
   try {

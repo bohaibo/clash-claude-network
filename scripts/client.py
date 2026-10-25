@@ -4,6 +4,7 @@ from pathlib import Path
 import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.request,uuid
 import yaml
 from baseline import is_runtime_snapshot_file,verify_incremental_files,default_snapshot
+from routing_checks import audit_ingress,audit_lan_provider,lan_domain,local_network,normalize_lan_cidrs
 
 PROJECT=Path(__file__).resolve().parent.parent
 LOCAL=PROJECT/'.local';LOCAL.mkdir(exist_ok=True)
@@ -143,6 +144,10 @@ def build(root,item,node,data=None):
  for key in ('mixed-port','port','socks-port','allow-lan','log-level','external-controller','external-controller-pipe','secret','find-process-mode','profile'):
   if key in effective:config[key]=copy.deepcopy(effective[key])
  data=copy.deepcopy(data or download_rules());data.update(json.loads((PROJECT/'assets/claude-policy.json').read_text(encoding='utf-8')))
+ lan_audit=[]
+ data['lanSourceCidrs']=list(data['lanCidrs'])
+ data['lanCidrs']=normalize_lan_cidrs(data['lanCidrs'],lan_audit)
+ for domain in data['privateDomains']:lan_domain(domain,data)
  data['lan']=['IP-CIDR,127.0.0.0/8,DIRECT,no-resolve','IP-CIDR,10.0.0.0/8,DIRECT,no-resolve',
   'IP-CIDR,172.16.0.0/12,DIRECT,no-resolve','IP-CIDR,192.168.0.0/16,DIRECT,no-resolve',
   'IP-CIDR,169.254.0.0/16,DIRECT,no-resolve','IP-CIDR,100.64.0.0/10,DIRECT,no-resolve']
@@ -179,9 +184,10 @@ def build(root,item,node,data=None):
     network=ipaddress.ip_network(cidr,strict=False)
     if network.overlaps(FAKE):continue
    cleaned.append(value)
-  data['lanProviderOverrides'][name]={'type':'inline','behavior':provider['behavior'],'payload':cleaned}
+  data['lanProviderOverrides'][name]=audit_lan_provider({'type':'inline','behavior':provider['behavior'],'payload':cleaned},data,lan_audit)
   data['lan'].append(rule)
  data['lan']=list(dict.fromkeys(data['lan']))
+ write(LOCAL/'lan-audit.json',{'source_profiles_changed':False,'changes':lan_audit})
  scriptid=item.get('option',{}).get('script')
  entry=next((x for x in load(root/'profiles.yaml')['items'] if x['uid']==scriptid),None)
  previous=safe_file(root,'profiles/'+entry['file']).read_text(encoding='utf-8') if entry else 'function main(config) { return config; }'
@@ -201,6 +207,8 @@ def build(root,item,node,data=None):
  return wrapper,text,candidate,entry
 def validate(config,original,node):
  require(config['proxies']==original['proxies'],'Node definitions changed')
+ require(config.get('mode')=='rule','Only rule mode is allowed; direct/global mode rejected')
+ audit_ingress(config,GROUP)
  require(set(config.get('proxy-providers',{}))==set(original.get('proxy-providers',{})),'Subscription provider removed')
  for name,provider in original.get('proxy-providers',{}).items():
   require({k:v for k,v in provider.items() if k!='proxy'}=={k:v for k,v in config['proxy-providers'][name].items() if k!='proxy'},'Subscription provider changed unexpectedly')
@@ -215,6 +223,26 @@ def validate(config,original,node):
  require(set(config['tun']['dns-hijack'])=={'any:53','tcp://any:53'},'配置检查未通过，请查看本地记录。')
  for host in ('anthropic.com','claude.ai','claude.com','clau.de','claudeusercontent.com','claudemcpclient.com','claudemcpcontent.com'):
   require(config['rules'].index('DOMAIN-SUFFIX,'+host+','+GROUP)<config['rules'].index('RULE-SET,strict-cn-domain,DIRECT'),'配置检查未通过，请查看本地记录。')
+ policy=json.loads((PROJECT/'assets/claude-policy.json').read_text(encoding='utf-8'))
+ protected=['DOMAIN-SUFFIX,'+host+','+GROUP for host in policy['claude']+policy['extraSuffix']]
+ protected+=['DOMAIN,'+host+','+GROUP for host in policy['extraExact']]
+ end=max(config['rules'].index(rule) for rule in protected)
+ selected=next(p for p in original['proxies'] if p['name']==node)
+ try:server=ipaddress.ip_address(selected['server'])
+ except ValueError:server=None
+ for rule in config['rules'][:end+1]:
+  parts=rule.split(',')
+  if len(parts)<3 or parts[2]!='DIRECT':continue
+  require(len(parts) in (3,4) and (len(parts)==3 or parts[3]=='no-resolve'),'Unknown early DIRECT rule')
+  if parts[0]=='RULE-SET':
+   provider=config['rule-providers'][parts[1]]
+   require(audit_lan_provider(provider,policy)==provider,'LAN provider contains non-LAN ranges; normalize before publishing')
+  elif parts[0] in ('DOMAIN','DOMAIN-SUFFIX'):lan_domain(parts[1],policy)
+  elif parts[0] in ('IP-CIDR','IP-CIDR6'):
+   network=ipaddress.ip_network(parts[1],strict=False)
+   node_exception=bool(server and server.version==4 and network==ipaddress.ip_network(str(server)+'/32'))
+   require(local_network(network) or node_exception,'Public address in early LAN DIRECT rules')
+  else:raise AssertionError('Unknown early DIRECT rule; review required')
  for server in config['dns']['nameserver']:
   require('#'+GROUP in server,'Foreign DNS bypasses pinned group')
  direct_providers={r.split(',')[1] for r in config['rules'] if r.startswith('RULE-SET,') and r.split(',')[2]=='DIRECT'}
@@ -385,7 +413,7 @@ def client_restore_targets(root,original,plan,journal):
    raise ValueError('Active subscription source is invalid')
  before=restore_yaml(original/'profiles.yaml') or {}
  originals={entry['uid']:entry for entry in before.get('items',[])}
- targets={};remove=[];owned={}
+ targets={};remove=[];owned={};preserved=set()
  generated=set(plan.get('generated_files',[]))
  for entry in items:
   if entry.get('type')!='script' or not entry.get('file'):continue
@@ -394,6 +422,13 @@ def client_restore_targets(root,original,plan,journal):
   text=file.read_text(encoding='utf-8')
   marker='// PORTABLE-CLAUDE-NETWORK-V1'
   if marker not in text:continue
+  baseline_entry=originals.get(entry['uid'],{})
+  baseline_file=safe_file(original,'profiles/'+baseline_entry['file']) if baseline_entry.get('file') else None
+  if (baseline_entry.get('type')=='script' and baseline_entry.get('file')==entry['file'] and
+      baseline_file and baseline_file.is_file() and marker in baseline_file.read_text(encoding='utf-8')):
+   # This script already belonged to the selected snapshot. Keep its current
+   # content (including later rule updates), rather than undoing the snapshot.
+   parse_project_wrapper(text);preserved.add(entry['uid']);continue
   # Parse JSON boundaries so punctuation inside a node name cannot truncate JS.
   cleaned,has_user_suffix=strip_project_wrapper(text)
   created=relative in generated or str(entry['uid']).startswith('PortableClaude')
@@ -424,6 +459,21 @@ def client_restore_targets(root,original,plan,journal):
  # overwrite source files, URLs, ordering, timestamps, or node updates.
  referenced={x.get('option',{}).get('script') for x in items}
  if any(uid in referenced for uid in owned):raise ValueError('Project script is still referenced')
+ for entry in items:
+  uid=entry.get('option',{}).get('script')
+  if uid not in preserved:
+   old=originals.get(uid,{})
+   if old.get('file'):
+    old_file=safe_file(original,'profiles/'+old['file'])
+    if old_file.is_file() and '// PORTABLE-CLAUDE-NETWORK-V1' in old_file.read_text(encoding='utf-8'):
+     raise ValueError('Snapshot project script is missing or changed; restore stopped')
+   continue
+  script=next(x for x in items if x['uid']==uid)
+  _,_,_,node=parse_project_wrapper(safe_file(root,'profiles/'+script['file']).read_text(encoding='utf-8'))
+  source=restore_yaml(safe_file(root,'profiles/'+entry['file'])) or {}
+  if not isinstance(source,dict):raise ValueError('Current subscription source is invalid')
+  if not any(p.get('name')==node for p in source.get('proxies',[])):
+   raise ValueError('Snapshot project node is absent from the current subscription; no replacement selected')
  if 'items' in profiles:profiles['items']=[x for x in items if x['uid'] not in owned]
  targets[root/'profiles.yaml']=yaml.safe_dump(profiles,allow_unicode=True,sort_keys=False)
  for name,keys in [('verge.yaml',('enable_tun_mode','enable_system_proxy','enable_dns_settings')),
@@ -465,9 +515,15 @@ def restore_client():
  if not failed and not rebuild:
   try:api(root,'PUT','/configs?force=true',{'payload':runtime.read_text(encoding='utf-8')});reloaded=True
   except Exception as exc:failed.append({'file':'clash-verge.yaml','operation':'reload','reason':type(exc).__name__})
+ active=next((x for x in profiles.get('items',[]) if x.get('uid')==profiles.get('current')),None)
+ script=next((x for x in profiles.get('items',[]) if active and x.get('uid')==active.get('option',{}).get('script')),None)
+ project_node=None
+ if script and script.get('file') and not failed:
+  text=safe_file(root,'profiles/'+script['file']).read_text(encoding='utf-8')
+  if '// PORTABLE-CLAUDE-NETWORK-V1' in text:project_node=parse_project_wrapper(text)[3]
  report={'client_restored':not failed,'status':'partial' if failed else 'pending-runtime' if rebuild else 'complete',
          'root':str(root),'snapshot':str(path),'active_uid':profiles.get('current'),'previous_runtime_sha256':old_runtime,
-         'subscriptions_preserved':True,'runtime_rebuild_required':rebuild,'runtime_reloaded':reloaded,
+         'subscriptions_preserved':True,'runtime_rebuild_required':rebuild,'runtime_reloaded':reloaded,'project_node':project_node,
          'restored_files':restored,'failed_items':failed,
          'locked_not_restored':[x['file'] for x in failed if x['reason']=='PermissionError']}
  write(LOCAL/'client-restore-result.json',report)
@@ -478,11 +534,20 @@ def restored_runtime_ready(root,report):
  raw=(root/'clash-verge.yaml').read_bytes();text=raw.decode('utf-8-sig');effective=yaml.safe_load(text) or {}
  if not isinstance(current,dict) or not isinstance(effective,dict):raise ValueError('Invalid generated configuration')
  if current.get('current')!=report['active_uid']:return None
- if GROUP in [x.get('name') for x in effective.get('proxy-groups',[])]:return None
+ project_node=report.get('project_node')
+ if not project_node and GROUP in [x.get('name') for x in effective.get('proxy-groups',[])]:return None
  item=next((x for x in current.get('items',[]) if x.get('uid')==report['active_uid']),None)
  if not item or not item.get('file'):return None
  source=restore_yaml(safe_file(root,'profiles/'+item['file'])) or {}
  if not isinstance(source,dict):raise ValueError('Invalid subscription source')
+ if project_node:
+  script=next((x for x in current.get('items',[]) if x.get('uid')==item.get('option',{}).get('script')),None)
+  if not script or not script.get('file'):return None
+  if parse_project_wrapper(safe_file(root,'profiles/'+script['file']).read_text(encoding='utf-8'))[3]!=project_node:return None
+  # A configured manual snapshot legitimately retains the pinned group. Check
+  # it against today's source nodes instead of loading a saved runtime YAML.
+  try:validate(effective,source,project_node)
+  except (AssertionError,KeyError,TypeError,StopIteration):return None
  expected=source.get('proxies',[]);actual=effective.get('proxies',[])
  providers=effective.get('proxy-providers',{})
  providers_match=all(name in providers and all(providers[name].get(k)==v for k,v in definition.items() if k!='proxy')
@@ -490,6 +555,7 @@ def restored_runtime_ready(root,report):
  fresh=hashlib.sha256(raw).hexdigest()!=report['previous_runtime_sha256']
  unchanged_source=(actual==expected and effective.get('rules',[])==source.get('rules',[])
                    and providers==source.get('proxy-providers',{}))
+ if project_node:unchanged_source=True # validate() checked current nodes and routing above.
  tun=(restore_yaml(root/'verge.yaml') or {}).get('enable_tun_mode') if (root/'verge.yaml').exists() else None
  tun_matches=tun is None or bool(effective.get('tun',{}).get('enable',False))==bool(tun)
  if (fresh or unchanged_source) and tun_matches and providers_match and all(x in actual for x in expected):return text

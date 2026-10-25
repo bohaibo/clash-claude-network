@@ -53,6 +53,13 @@ def check():
  reject('Claude domain removed',lambda c:c['rules'].remove('DOMAIN-SUFFIX,clau.de,'+GROUP))
  reject('Fake-IP marked direct',lambda c:c['rule-providers']['strict-lancidr']['payload'].append('198.18.0.0/16'))
  reject('Domestic DNS for foreign',lambda c:c['dns'].__setitem__('nameserver',['https://223.5.5.5/dns-query#DIRECT&disable-qtype-64=true&disable-qtype-65=true']))
+ reject('Direct runtime mode',lambda c:c.__setitem__('mode','direct'))
+ reject('Global runtime mode',lambda c:c.__setitem__('mode','global'))
+ reject('Protected domain in LAN source',lambda c:c['rule-providers']['strict-private-domain']['payload'].append('+.claude.ai'))
+ reject('Public address in LAN source',lambda c:c['rule-providers']['strict-lancidr']['payload'].append('160.79.104.0/23'))
+ reject('Early direct protected domain',lambda c:c['rules'].insert(0,'DOMAIN-SUFFIX,claude.ai,DIRECT'))
+ reject('Extra direct listener',lambda c:c.__setitem__('listeners',[{'type':'http','listen':'127.0.0.1','port':19080,'proxy':'DIRECT'}]))
+ reject('Extra direct tunnel',lambda c:c.__setitem__('tunnels',['tcp,127.0.0.1:19081,example.invalid:443,DIRECT']))
  report={'success':True,'published_files_checked':len(files),'unsafe_mutations_rejected':cases,
          'live_client_or_system_changed':False}
  (LOCAL/'offline-checks.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

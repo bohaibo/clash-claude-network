@@ -1,6 +1,29 @@
 function secureMain(config,data,node,group) {
 
   if (!(config.proxies || []).some(p => p.name === node)) throw new Error('Selected node missing: refuse configuration');
+  // Also runs when the native client reapplies an updated subscription.
+  for (const field of ['listeners','tunnels']) {
+    const entries = config[field] || [];
+    if (!Array.isArray(entries)) throw new Error('Invalid additional ingress');
+    for (let entry of entries) {
+      if (field === 'tunnels' && typeof entry === 'string') {
+        const parts = entry.split(',');
+        if (parts.length !== 4) throw new Error('Unknown tunnel syntax');
+        entry = {network:parts[0].split('/'),address:parts[1],proxy:parts[3]};
+      }
+      if (!entry || entry.proxy !== group || ['rule','rules','sub-rules'].some(k => k in entry))
+        throw new Error('Additional ingress can bypass pinned routing; review source');
+      if (field === 'listeners') {
+        if (!['http','socks','mixed'].includes(entry.type) || !['127.0.0.1','::1'].includes(entry.listen))
+          throw new Error('Additional listener must be a reviewed loopback proxy');
+      } else {
+        const network = typeof entry.network === 'string' ? [entry.network] : entry.network;
+        if (!/^(?:127\.0\.0\.1|\[::1\]):[0-9]+$/.test(entry.address || '') ||
+            !Array.isArray(network) || !network.length || network.some(n => !['tcp','udp'].includes(n)))
+          throw new Error('Additional tunnel must use reviewed loopback routing');
+      }
+    }
+  }
   config.mode = 'rule';
   // Keep existing groups untouched: this project only guarantees that its own pinned
   // group has no DIRECT/REJECT. Rebuilding every subscription-owned group would
