@@ -20,10 +20,39 @@ def verify_incremental_files(path,manifest):
   if hashlib.sha256((path/relative).read_bytes()).hexdigest()!=digest:
    raise ValueError('Incremental browser backup integrity failure')
 def default_snapshot(local):
- roots=sorted([p for p in (local/'snapshots').glob('*') if (p/'manifest.json').is_file()],key=lambda p:p.name,reverse=True)
+ local=Path(local)
+ pointer=local/'baseline-selection.json'
+ if pointer.exists():
+  state=json.loads(pointer.read_text(encoding='utf-8'))
+  name=state.get('snapshot')
+  if not isinstance(name,str) or Path(name).name!=name or name in ('.','..'):
+   raise ValueError('Invalid pinned baseline; do not replace it with the current state')
+  target=local/'snapshots'/name
+  if not (target/'manifest.json').is_file():raise ValueError('Pinned baseline is missing; restore its original records')
+  return target
+ roots=sorted([p for p in (local/'snapshots').glob('*') if (p/'manifest.json').is_file()],key=lambda p:p.name)
  if not roots:return None
+ # Preserve the established recovery point when upgrading an existing machine.
+ plan=local/'plan.json'
+ if plan.exists():
+  name=json.loads(plan.read_text(encoding='utf-8')).get('snapshot')
+  if not name or Path(name).resolve() not in [p.resolve() for p in roots]:
+   raise ValueError('Existing plan recovery point is missing; do not choose another snapshot')
+  return Path(name)
  automatic=[p for p in roots if json.loads((p/'manifest.json').read_text(encoding='utf-8')).get('kind','auto')=='auto']
  return (automatic or roots)[0]
+
+def pin_baseline(local,path):
+ local=Path(local);path=Path(path).resolve()
+ if path.parent!=(local/'snapshots').resolve() or not (path/'manifest.json').is_file():
+  raise ValueError('Baseline must be an existing snapshot inside this project')
+ pointer=local/'baseline-selection.json'
+ if pointer.exists():
+  if default_snapshot(local).resolve()!=path:raise ValueError('The first baseline cannot be replaced')
+  return
+ temporary=pointer.with_suffix('.json.new')
+ temporary.write_text(json.dumps({'version':1,'snapshot':path.name}),encoding='utf-8')
+ temporary.replace(pointer)
 
 def snapshot():
  value=os.environ.get('CCN_SNAPSHOT')

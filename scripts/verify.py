@@ -185,24 +185,31 @@ def verify(outage=False,stage=None):
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root']);node=plan['node']
  report={'success':False,'account_tested':False,'application_usability_verified':False,
          'not_tested':['browser_webrtc','browser_fingerprint','claude_http']}
+ check='runtime'
  try:
   runtime=api(root,'GET','/configs')
   require(runtime.get('mode')=='rule','Live core is not in rule mode; network probes stopped')
   report['runtime_mode']='rule'
   group=api(root,'GET','/proxies')['proxies'][GROUP];require(group['all']==[node] and group['now']==node,'配置检查未通过，请查看本地记录。')
+  check='domestic'
   cn=curl('https://www.baidu.com',True);require(cn['exit']==0 and cn['http']==200,'配置检查未通过，请查看本地记录。')
   taobao=curl('https://www.taobao.com',True);require(taobao['exit']==0 and taobao['http'] in (200,301,302),'配置检查未通过，请查看本地记录。')
   report['domestic']={'baidu':cn['http'],'taobao':taobao['http']}
+  check='egress'
   egress=curl('https://ipinfo.io/json');require(egress['exit']==0,'配置检查未通过，请查看本地记录。')
   address=json.loads(egress['body']);require(address.get('country')==plan['region'],'Exit country differs from required region')
   report['egress']={k:address.get(k) for k in ('ip','country','city')}
+  check='dns'
   report['dns']=[query('8.8.8.8',53,t,tcp) for t in (1,64,65) for tcp in (False,True)]
   require(all(x['passed'] for x in report['dns']),'配置检查未通过，请查看本地记录。')
+  check='fake_ip'
   fake=query('8.8.8.8',53,1,False,host='claude.ai')
   require(any(ipaddress.ip_address(ip) in FAKE for ip in fake['ips']),'fake-IP not observed; TUN DNS hijack may be bypassed')
   report['fake_ip_hijack']=fake['ips']
+  check='ipv6'
   require(curl('https://[2606:4700:4700::1111]/cdn-cgi/trace')['exit']!=0,'配置检查未通过，请查看本地记录。')
   report['ipv6_public_blocked']=True
+  check='tools'
   report['stun']=stun(route_probe=lambda probe:udp_route(root,node,probe))
   report['git']=git_egress()
   report['npm']=npm_egress()
@@ -215,12 +222,14 @@ def verify(outage=False,stage=None):
     value['status']='passed' if value.get('ok') is True else 'failed'
     if value['status']=='failed':failed.append(name)
   require(not failed,'Required egress checks failed: '+', '.join(failed))
+  check='udp_egress'
   report['udp_egress']=udp_egress(report['stun'],report['egress'],plan['region'])
   require(report['udp_egress']['verified'],'UDP exit country or pinned route could not be verified')
   scope=workload_scope();report['workload_scope']=scope
   if scope['docker_installed']:report['not_tested'].append('docker_container_egress')
   if scope['wsl_installed']:report['not_tested'].append('wsl_egress')
   if outage:
+   check='node_outage'
    current=(root/'clash-verge.yaml').read_text(encoding='utf-8');broken=__import__('yaml').safe_load(current)
    for value in broken['proxies']:
     if value['name']==node:value['port']=1
@@ -234,10 +243,11 @@ def verify(outage=False,stage=None):
     require(curl('https://www.baidu.com',True)['http']==200,'配置检查未通过，请查看本地记录。')
     report['node_failure_blocks_foreign_preserves_domestic']=True
    finally:api(root,'PUT','/configs?force=true',{'payload':current})
+   check='recovery'
    recovered=curl('https://ipinfo.io/json');require(recovered['exit']==0 and json.loads(recovered['body']).get('country')==plan['region'],'配置检查未通过，请查看本地记录。')
    report['recovered']=True
   report['success']=True
- except Exception as exc:report['error']=str(exc);raise
+ except Exception as exc:report.update(error=str(exc),failed_check=check);raise
  finally:
   report=save_report(report,stage)
   print(json.dumps(report,ensure_ascii=False))

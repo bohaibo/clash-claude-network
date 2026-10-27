@@ -39,6 +39,15 @@ class Verification(unittest.TestCase):
      report=json.loads((self.local/'verification.json').read_text())
      self.assertFalse(report['success']);self.assertEqual(report[name]['status'],'failed')
     finally:mock.return_value=old
+ def test_failed_checkpoint_is_saved_without_guessing_from_error_text(self):
+  cases=[('runtime','api',{'mode':'direct'}),
+         ('domestic','curl',{'exit':7,'http':0}),
+         ('dns','query',{'passed':False,'ips':[]})]
+  for expected,name,value in cases:
+   with self.subTest(check=expected),patch.object(verify,name,return_value=value):
+    with self.assertRaises(AssertionError):verify.verify()
+    report=json.loads((self.local/'verification.json').read_text())
+    self.assertEqual(report['failed_check'],expected);self.assertFalse(report['success'])
  def test_tool_timeout_is_saved_and_other_checks_still_run(self):
   with patch.object(verify,'run_tool_attempt',return_value={'ok':False,'error':'timeout','process_tree_stopped':True}) as run:
    result=verify.tool_egress(['fixture'],20,{})

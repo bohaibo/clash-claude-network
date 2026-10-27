@@ -6,15 +6,12 @@ $localDir=Join-Path $project '.local'
 # CCN_SNAPSHOT pins the snapshot for this run; otherwise the shared default-snapshot policy is used by the entry point.
 $stateDir=$env:CCN_SNAPSHOT
 if(!$stateDir){
-  $snapshotRoot=Join-Path $localDir 'snapshots'
-  $latest=@(Get-ChildItem -LiteralPath $snapshotRoot -Directory -ErrorAction SilentlyContinue | Where-Object {Test-Path -LiteralPath (Join-Path $_.FullName 'manifest.json')} | Sort-Object Name -Descending)
-  $automatic=@($latest | Where-Object {
-    $manifest=Get-Content -LiteralPath (Join-Path $_.FullName 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    $kind=if($null -ne $manifest.kind){[string]$manifest.kind}else{'auto'}
-    $kind -eq 'auto'
-  })
-  $choices=if($automatic.Count){$automatic}else{$latest}
-  $stateDir=if(@($choices).Count){@($choices)[0].FullName}else{Join-Path $snapshotRoot 'uninitialized'}
+  # One selector for every helper; never duplicate the baseline policy here.
+  if(!$Python){throw '缺少 Python，无法确认固定基线；未改动系统设置。'}
+  Push-Location $PSScriptRoot
+  try{$selected=& $Python -c 'import json;from baseline import snapshot;print(json.dumps(str(snapshot())))'}finally{Pop-Location}
+  if($LASTEXITCODE -ne 0){throw '无法确认固定基线；请检查原始恢复记录，不要重新备份覆盖。'}
+  $stateDir=($selected | Select-Object -Last 1) | ConvertFrom-Json
 }
 $file=Join-Path $stateDir 'system.json'
 $prefix='CCN-Portable-'

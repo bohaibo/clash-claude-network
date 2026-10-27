@@ -14,6 +14,30 @@ class Maintenance(unittest.TestCase):
   for name in ('client.py','baseline.py','update.py','browser_settings.py','browser_languages.py','verify.py','verify_core_exit.py','routing_checks.py'):
    tree=ast.parse((client.PROJECT/'scripts'/name).read_text(encoding='utf-8'))
    self.assertFalse(any(isinstance(node,ast.Assert) for node in ast.walk(tree)),name)
+ def test_client_restart_waits_for_exit_and_prefers_observed_executable(self):
+  probe=self.local/'restart-probe.ps1'
+  probe.write_text('''param($Source)
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($Source,[ref]$tokens,[ref]$errors)
+foreach($name in @('Stop-ClashClient','Start-ClashClient')){
+ $function=$ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true) | Where-Object {$_.Name -eq $name}
+ Invoke-Expression $function.Extent.Text
+}
+$script:events=New-Object 'System.Collections.Generic.List[string]'
+function Get-Process {param($Name,$Id) if($Id){if(!$script:events.Contains('wait')){throw 'queried before waiting'};return};[pscustomobject]@{Id=4242} }
+function Stop-Process {param([switch]$Force) $script:events.Add('stop') }
+function Wait-Process {param($Id,$Timeout) if($Id -ne 4242 -or $Timeout -ne 15){throw 'wrong process wait'};$script:events.Add('wait') }
+function Test-Path {param($LiteralPath) return $true }
+function Start-Process {param($FilePath,$WindowStyle) if($FilePath -ne 'observed.exe' -or $WindowStyle -ne 'Hidden'){throw 'wrong executable'};$script:events.Add('start') }
+function Get-ScheduledTask {throw 'Task trigger must not replace observed executable'}
+$clashProgram=@('observed.exe')
+Stop-ClashClient
+Start-ClashClient
+if(($script:events -join ',') -cne 'stop,wait,start'){throw 'wrong restart order'}
+''',encoding='utf-8-sig')
+  run=subprocess.run(['powershell.exe','-NoProfile','-File',str(probe),str(client.PROJECT/'scripts/run.ps1')],capture_output=True)
+  self.assertEqual(run.returncode,0,run.stderr.decode('utf-8',errors='replace'))
  def test_pending_recovery_blocks_updates_and_releases_lock(self):
   token='guard-'+'a'*32
   (self.local/'pending-firewall.json').write_text(json.dumps({'token':token,'snapshot':str(self.local/'snapshots'/'original')}))
@@ -21,6 +45,22 @@ class Maintenance(unittest.TestCase):
    with operation_lock(self.local):self.fail('must not enter updater')
   (self.local/(token+'.commit')).write_text('completed')
   with operation_lock(self.local):pass
+ def test_stale_firewall_watchdog_cannot_restart_a_new_operations_core(self):
+  project=self.local/'watchdog-fixture';scripts=project/'scripts';scripts.mkdir(parents=True)
+  local=project/'.local';local.mkdir()
+  text=(client.PROJECT/'scripts/watchdog.ps1').read_text(encoding='utf-8-sig').replace('AddSeconds(180)','AddSeconds(-1)')
+  (scripts/'watchdog.ps1').write_text(text,encoding='utf-8-sig')
+  (scripts/'operation_guard.ps1').write_text("function Resolve-PendingFirewall {}\nfunction Start-Service { [CmdletBinding()]param($Name) 'started' | Set-Content -LiteralPath (Join-Path $PSScriptRoot '../service-started') }\n",encoding='utf-8-sig')
+  token='guard-'+'a'*32;other='guard-'+'b'*32
+  for pending,rollback,expected in ((other,True,False),(token,False,False),(token,True,True)):
+   with self.subTest(pending=pending,rollback=rollback):
+    marker=local/(token+'.rollback');marker.unlink(missing_ok=True)
+    if rollback:marker.touch()
+    client.write(local/'pending-firewall.json',{'token':pending})
+    sentinel=project/'service-started';sentinel.unlink(missing_ok=True)
+    result=subprocess.run(['powershell.exe','-NoProfile','-File',str(scripts/'watchdog.ps1'),'-Token',token,'-Python','unused'],capture_output=True)
+    self.assertEqual(result.returncode,0,result.stderr.decode('utf-8',errors='replace'))
+    self.assertEqual(sentinel.exists(),expected)
  def test_pending_recovery_rejects_path_like_tokens(self):
   (self.local/'pending-firewall.json').write_text(json.dumps({'token':'../../outside'}))
   with self.assertRaises(RuntimeError):
@@ -89,6 +129,10 @@ $function=$ast.Find({param($node) $node -is [System.Management.Automation.Langua
 Invoke-Expression $function.Extent.Text
 $message=Get-VerificationFailureMessage 'fallback'
 if($message -notmatch 'GitHub/Git' -or $message -notmatch '2' -or $message -match 'private-fixture-error'){throw 'Wrong current failure message'}
+$report=@{run_id=('a'*32);stages=@{'node-outage'=@{success=$false;failed_check='dns'};'core-exit'=@{success=$false;restart_failed=$true}};error='DO-NOT-ECHO'}
+$report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $local 'verification.json') -Encoding UTF8
+$message=Get-VerificationFailureMessage 'fallback'
+if($message -notmatch 'DNS A/64/65' -or $message -notmatch '核心重启失败' -or $message -match 'DO-NOT-ECHO'){throw 'Wrong stage failure message'}
 $env:CCN_VERIFY_RUN='b'*32
 if((Get-VerificationFailureMessage 'fallback') -cne 'fallback'){throw 'Stale evidence included'}
 Remove-Item -LiteralPath (Join-Path $local 'verification.json')

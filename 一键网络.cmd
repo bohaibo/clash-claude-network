@@ -16,11 +16,13 @@ echo    2. 配置（不改浏览器设置）
 echo    3. 恢复（可选快照）
 echo    4. 保存当前快照
 echo    5. 补充配置（扫描新增规则和网卡）
+echo    6. 恢复最早状态并重新配置（独立网络看护）
 echo    0. 退出
 echo.
-choice /C 123450 /N /M "请选择 [1/2/3/4/5/0]: "
+choice /C 1234560 /N /M "请选择 [1/2/3/4/5/6/0]: "
 if errorlevel 255 goto menu
-if errorlevel 6 exit /b 0
+if errorlevel 7 exit /b 0
+if errorlevel 6 goto reconfigure
 if errorlevel 5 goto supplement
 if errorlevel 4 goto snapshot
 if errorlevel 3 goto restore
@@ -54,6 +56,12 @@ exit /b %code%
 
 :supplement
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\run.ps1" -Action supplement
+set "code=%errorlevel%"
+if not "%code%"=="0" pause
+exit /b %code%
+
+:reconfigure
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\run.ps1" -Action reconfigure
 set "code=%errorlevel%"
 if not "%code%"=="0" pause
 exit /b %code%

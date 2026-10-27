@@ -3,7 +3,7 @@ from checks import require
 from pathlib import Path
 import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.request,uuid
 import yaml
-from baseline import is_runtime_snapshot_file,verify_incremental_files,default_snapshot
+from baseline import is_runtime_snapshot_file,verify_incremental_files,default_snapshot,pin_baseline
 from routing_checks import audit_ingress,audit_lan_provider,lan_domain,local_network,normalize_lan_cidrs
 
 PROJECT=Path(__file__).resolve().parent.parent
@@ -307,6 +307,7 @@ def seal():
 def prepare(root,node,subscription,region):
  item=select(root,node,subscription)
  path=snapshot_dir(create=True);backup(root,path);wrapper,text,candidate,entry=build(root,item,node)
+ pin_baseline(LOCAL,default_snapshot(LOCAL) or path)
  # Never overwrite an existing user script. Reuse only our own generated wrapper.
  owned=entry and str(entry['uid']).startswith('PortableClaude') and 'PORTABLE-CLAUDE-NETWORK-V1' in safe_file(root,'profiles/'+entry['file']).read_text(encoding='utf-8')
  uid=entry['uid'] if owned else 'PortableClaude'+uuid.uuid4().hex[:12]
@@ -561,7 +562,7 @@ def restored_runtime_ready(root,report):
  if (fresh or unchanged_source) and tun_matches and providers_match and all(x in actual for x in expected):return text
  return None
 
-def finish_restore(timeout=45):
+def finish_restore(timeout=90):
  # Never publish old nodes as a fallback. Tolerate transient files/pipe errors
  # while the native client is regenerating and restarting its controller.
  import time

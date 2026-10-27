@@ -4,6 +4,8 @@ from contextlib import contextmanager
 import msvcrt,json,re
 
 def check_pending_firewall(local):
+    if (Path(local)/'reconfigure-active.json').exists():
+        raise RuntimeError('Safe reconfiguration/recovery is active; scheduled updates must wait')
     file=Path(local)/'pending-firewall.json'
     if not file.exists():return
     pending=json.loads(file.read_text(encoding='utf-8-sig'))
