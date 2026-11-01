@@ -55,8 +55,8 @@ export async function bootstrap() {
   return value;
 }
 
-export function getState() {
-  return request('/api/state', { timeout: 20000 });
+export function getState(refresh = false) {
+  return request('/api/state' + (refresh ? '?refresh=1' : ''), { timeout: 20000 });
 }
 
 export function getNodes(refresh = false) {

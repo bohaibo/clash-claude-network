@@ -250,7 +250,7 @@ function navigate(page, options = {}) {
 
 async function refresh(force = false) {
   try {
-    const data = await api.getState();
+    const data = await api.getState(force);
     app.data = data;
     updateChrome();
     if (data.operation?.job && !app.jobId) resumeJob(data.operation.job.id);

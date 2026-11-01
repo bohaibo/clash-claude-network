@@ -157,31 +157,84 @@ function renderImpact(ctx) {
   const now = preview.current || {};
   const target = preview.regions?.[form.region] || {};
   const selected = Boolean(form.node && (currentSubscription(ctx)?.nodes || []).includes(form.node));
-  const unknown = '未能读取（未验证）';
+  const unknown = '未能确认';
+  const pending = '选择节点后确定';
+  const countryName = (code) => {
+    try { return code ? new Intl.DisplayNames(['zh-CN'], { type: 'region' }).of(code) : unknown; }
+    catch { return unknown; }
+  };
+  const languageName = (code) => {
+    try { return code ? new Intl.DisplayNames(['zh-CN'], { type: 'language' }).of(code.split(',')[0]) : unknown; }
+    catch { return unknown; }
+  };
+  const zoneName = (zone) => {
+    try { return new Intl.DateTimeFormat('zh-CN', { timeZone: zone, timeZoneName: 'long' }).formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value || unknown; }
+    catch { return unknown; }
+  };
+  const proxyState = (value) => {
+    if (!value || /读取失败|未能读取|未验证/.test(value)) return unknown;
+    return /已设置|已配置静态/.test(value) ? '开启' : '关闭';
+  };
+  const after = (value) => selected ? value : pending;
   const rows = [
-    ['系统定位策略 DisableLocation', now.location, '1（关闭系统定位）'],
-    ['自动时区', now.auto_timezone, 'Disabled / Stopped'],
-    ['自动校时', now.auto_time, 'Disabled / Stopped / NoSync'],
-    ['系统国家/地区', now.country ? 'GeoID ' + now.country : unknown, target.label ? target.label + '（' + form.region + '）' : '所选地区'],
-    ['区域格式 / 日期数字语言', now.culture, target.culture],
-    ['系统时区', now.timezone, target.timezone_id ? target.timezone_id + ' / ' + target.iana : '所选地区预设时区'],
-    ['沙箱浏览器语言', ctx.state.browser?.settings?.language, target.browser_language],
-    ['全局 IPv6 DisabledComponents', now.ipv6, '255（全局禁用，需重启）'],
-    ['网卡 IPv6', now.bindings, '关闭所有现有网卡（含隐藏/虚拟网卡）的 IPv6 绑定'],
-    ['防火墙默认出站', now.firewall, '所有配置文件 Block；仅保留核心/TUN/LAN/DHCP 必要项目放行，阻断 SharedAccess'],
-    ['系统代理', now.proxy, '关闭并清除代理覆盖'],
-    ...['winhttp', 'environment', 'git', 'npm', 'docker'].map((key) => [({winhttp: 'WinHTTP 代理', environment: '环境变量代理', git: 'Git 代理', npm: 'npm 代理', docker: 'Docker 代理'})[key], now[key], '清除代理覆盖，保留其他配置']),
-    ['Clash 节点与分流', now.routing || '未能读取（未验证）', '固定节点「' + form.node + '」；Claude 优先代理，国内直连，其余固定代理，不回落直连'],
-    ['DNS / TUN', now.dns_tun, 'fake-IP；国内/海外 DoH 分流；过滤 Type 64/65；关闭 DNS IPv6；TUN mixed / auto-route / strict-route，接管 TCP/UDP 53'],
+    ['系统定位', now.location_state, '关闭'],
+    ['自动设置时区', now.auto_timezone_state, '关闭'],
+    ['自动校准时间', now.auto_time_state, '关闭'],
+    ['国家或地区', countryName(now.country_code), after(target.label)],
+    ['日期和数字格式', languageName(now.culture), after(languageName(target.culture))],
+    ['时区', now.timezone === 'China Standard Time' ? '中国标准时间' : zoneName(Object.values(preview.regions || {}).find((r) => r.timezone_id === now.timezone)?.iana), after(zoneName(target.iana))],
+    ['独立浏览器语言', /尚未设置/.test(now.browser_language || '') ? '尚未设置' : languageName(now.browser_language), after(languageName(target.browser_language))],
+    ['IPv6 网络', now.ipv6_state, '关闭'],
+    ['严格联网保护', now.firewall_state, '开启'],
+    ['Windows 手动代理', now.proxy_state, '关闭'],
+    ['Windows 后台服务代理', proxyState(now.winhttp), '关闭'],
+    ['环境变量代理', proxyState(now.environment), '关闭'],
+    ['Git 代理', proxyState(now.git), '关闭'],
+    ['npm 代理', proxyState(now.npm), '关闭'],
+    ['Docker 代理', proxyState(now.docker), '关闭'],
+    ['网站连接方式', now.routing_simple, '国内直接连接，国外使用所选节点'],
+    ['国外连接节点', '尚未核实', after(form.node)],
+    ['DNS 解析', now.dns_simple, '开启'],
+    ['DNS 额外过滤', now.dns_filter_simple, '开启'],
+    ['接管应用网络', now.tun_simple, '开启'],
+    ['防止绕过代理', now.strict_route_simple, '开启'],
+  ];
+  let readTime = '未读取';
+  if (preview.read_at) readTime = new Date(preview.read_at).toLocaleTimeString('zh-CN', { hour12: false });
+  const valueBadge = (value) => {
+    const text = String(value || unknown);
+    const tone = text === '开启' ? 'on' : text === '关闭' ? 'off'
+      : /未能确认|尚未|未发现|未完整|部分/.test(text) ? 'unknown'
+      : text === pending ? 'pending' : 'text';
+    return ui.el('span', { class: 'config-value config-value-' + tone, text });
+  };
+  const groups = [
+    ['系统与地区', rows.slice(0, 7)],
+    ['网络保护', [...rows.slice(7, 9),
+      ['WebRTC 防泄露', now.webrtc_protection, '开启', '仅独立浏览器，打开时生效'],
+      ['DNS 防泄露', now.dns_protection, '开启', '防止域名查询绕过代理']], '开启表示已配置保护，实际效果可在浏览器实测页检测。'],
+    ['代理设置', rows.slice(9, 15), '关闭之前分散在各处的代理设置，统一由 TUN 模式接管网络。'],
+    ['网站访问', rows.slice(15)],
   ];
   impactHost.replaceChildren(ui.card({ title: selected ? '配置后会' : '配置会发生什么',
-    subtitle: '当前状态读取时间：' + (preview.read_at || '尚未读取') + '。选择节点后显示目标配置；刷新状态可重新读取。' },
-    ui.el('div', { class: 'stack' }, rows.map(([label, current, desired]) =>
-      ui.el('div', {}, ui.el('strong', { text: label + '：' }),
-        '当前 ', ui.el('strong', { text: String(current ?? unknown) }),
-        selected ? ' → 改为 ' : '；配置目标：',
-        ui.el('strong', { text: selected || !['系统国家/地区', '区域格式 / 日期数字语言', '系统时区', '沙箱浏览器语言', 'Clash 节点与分流'].includes(label) ? String(desired || '未能确定（未验证）') : '选择节点后确定' })))),
-    ui.note('配置前保存恢复点；后续沿用初始状态。配置将关闭 Clash 并运行网络验收。节点故障时国内仍直连；核心停止时全部公网阻断。关闭自动校时可能产生误差。Windows 显示语言不变；沙箱语言需重新打开，系统时区/IPv6 可能需重启。浏览器、虚拟网络与账号实际行为未验证。', 'warn')));
+    subtitle: '读取于 ' + readTime + ' · 选择节点后，国家、语言和时区会自动更新。',
+    class: 'config-preview-card' },
+    ui.el('div', { class: 'config-legend', 'aria-label': '状态颜色说明' },
+      valueBadge('开启'), valueBadge('关闭'), valueBadge('未能确认')),
+    ui.el('table', { class: 'config-table', 'aria-label': '当前状态与配置后的对照' },
+      ui.el('thead', {}, ui.el('tr', {},
+        ui.el('th', { scope: 'col', text: '配置项目' }),
+        ui.el('th', { scope: 'col', text: '当前状态' }),
+        ui.el('th', { scope: 'col', class: 'config-target-heading', text: '配置后' }))),
+      groups.map(([title, items, description]) => ui.el('tbody', {},
+        ui.el('tr', { class: 'config-group' }, ui.el('th', { colSpan: 3, scope: 'rowgroup' },
+          ui.el('span', { text: title }), description ? ui.el('small', { class: 'config-explanation', text: description }) : null)),
+        items.map(([label, current, desired, description]) => ui.el('tr', { class: 'config-item' },
+          ui.el('th', { scope: 'row' }, ui.el('span', { text: label }), description ? ui.el('small', { class: 'config-explanation', text: description }) : null),
+          ui.el('td', { 'data-label': '当前' }, valueBadge(current)),
+          ui.el('td', { 'data-label': '配置后', class: 'config-target' }, valueBadge(desired))))))),
+    ui.note('配置前会备份。配置时网络会短暂中断；代理核心停止运行时，所有外网连接都会被拦住。关闭自动校时后，时间可能逐渐出现误差。浏览器语言需重新打开后生效，部分设置需要重启电脑。Windows 界面语言保持不变。', 'warn')));
+
 }
 
 async function loadChoices(ctx) {

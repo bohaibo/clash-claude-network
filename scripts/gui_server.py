@@ -487,26 +487,29 @@ class App:
                 current = json.loads(result.stdout.decode('utf-8-sig', errors='replace'))
         except (OSError, ValueError, subprocess.SubprocessError):
             pass
+        import preview_config
+        try:
+            current['winhttp'] = preview_config.winhttp()
+        except (OSError, AttributeError):
+            current['winhttp'] = '读取失败（未验证）'
+        profile = sandbox_browser.profile_path(self.local)
+        preferences = read_json(profile / 'Default' / 'Preferences', {})
+        current['browser_language'] = (preferences.get('intl', {}).get('accept_languages') or '独立资料尚未设置语言（设置页默认值不代表浏览器当前值）')
+        rtc = preferences.get('webrtc', {})
+        current['webrtc_protection'] = ('开启' if rtc.get('ip_handling_policy') == 'disable_non_proxied_udp' and rtc.get('multiple_routes_enabled') is False and rtc.get('nonproxied_udp_enabled') is False else '尚未设置')
         # Read only summaries; never serialize node definitions or proxy URLs.
         try:
             import client
             root = client.root_path()
             config = client.load(root / 'clash-verge.yaml') or {}
-            current['routing'] = '模式 ' + str(config.get('mode', '未设置')) + '；规则 ' + str(len(config.get('rules', []))) + ' 条'
-            tun = config.get('tun') or {}
-            dns = config.get('dns') or {}
-            current['dns_tun'] = 'DNS 模式 ' + str(dns.get('enhanced-mode', '未设置')) + '；IPv6 ' + str(config.get('ipv6', '未设置')) + '；TUN ' + str(tun.get('enable', '未设置')) + ' / ' + str(tun.get('stack', '未设置')) + '；auto-route ' + str(tun.get('auto-route', '未设置')) + '；strict-route ' + str(tun.get('strict-route', '未设置'))
+            import preview_config
+            current.update(preview_config.network(config))
         except (OSError, ValueError, RuntimeError, TypeError):
             pass
         for name, relative in [('git', '.gitconfig'), ('npm', '.npmrc'), ('docker', '.docker/config.json')]:
             try:
-                path = Path.home() / relative
-                text = path.read_text(encoding='utf-8-sig') if path.exists() else ''
-                if name == 'docker':
-                    count = len((json.loads(text) if text else {}).get('proxies', {}))
-                else:
-                    count = len(re.findall(r'(?im)^\s*(?:https?-)?proxy\s*=|^\s*proxy\s*=', text))
-                current[name] = str(count) + ' 个代理字段/组（地址隐藏）'
+                import preview_config
+                current[name] = preview_config.app_proxy(name, Path.home() / relative)
             except (OSError, ValueError, TypeError):
                 current[name] = '未能读取（未验证）'
         value = {'current': current, 'regions': region_profile.PROFILES,
@@ -1427,6 +1430,8 @@ def make_handler(app):
                     self._json({'token': app.token, 'version': VERSION, 'admin': is_admin()})
                     return
                 if path == '/api/state':
+                    if parse_qs(parsed.query).get('refresh', ['0'])[0] == '1':
+                        app._preview_cache = None
                     app.last_heartbeat = time.monotonic()
                     self._json(app.app_state())
                     return

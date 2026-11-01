@@ -403,3 +403,40 @@ select.input { appearance: none; padding-right: 30px; background-image: linear-g
   .log-row { grid-template-columns: 20px minmax(0, 1fr) 60px; }
   .log-row .muted:nth-last-child(2) { display: none; }
 }
+
+/* Readable before/after comparison, with text labels as well as color. */
+.config-preview-card .card-body { gap: 16px; }
+.config-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.config-legend::before { content: '状态说明'; color: var(--muted); font-size: 12px; margin-right: 4px; }
+.config-table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; font-size: 13px; }
+.config-table th, .config-table td { padding: 11px 16px; text-align: left; vertical-align: middle; overflow-wrap: anywhere; }
+.config-table thead th { background: #f7f7f4; color: var(--muted); font-size: 12px; font-weight: 600; border-bottom: 1px solid var(--line); }
+.config-table thead th:first-child { width: 30%; }
+.config-table thead .config-target-heading { color: var(--info); background: #edf3fa; }
+.config-table .config-group th { background: #f4f3ef; padding: 9px 16px; font-size: 12px; font-weight: 650; color: #58584f; letter-spacing: .04em; border-top: 1px solid var(--line); }
+.config-table tbody:first-of-type .config-group th { border-top: 0; }
+.config-table .config-item th { font-weight: 500; }
+.config-table .config-item + .config-item > * { border-top: 1px solid #efeee9; }
+.config-table .config-target { background: #f8fafd; }
+.config-table .config-item:hover > * { box-shadow: inset 0 0 0 999px rgba(36,92,156,.025); }
+.config-value { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: 7px; font-size: 12px; line-height: 1.65; font-weight: 600; max-width: 100%; }
+.config-value-on { color: #17633d; background: #e5f4eb; border: 1px solid #cce7d6; }
+.config-value-off { color: #9a3933; background: #fceceb; border: 1px solid #f3d5d2; }
+.config-value-unknown { color: #865c15; background: #fff4dd; border: 1px solid #f1dfb7; }
+.config-value-pending { color: var(--muted); background: #f0f0ed; font-weight: 400; }
+.config-value-text { color: #343d48; background: #edf1f5; font-weight: 500; }
+.config-value-on::before, .config-value-off::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+@media (max-width: 600px) {
+  .config-table, .config-table tbody { display: block; }
+  .config-table thead { display: none; }
+  .config-table tr { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
+  .config-table .config-group { display: block; }
+  .config-table .config-group th { display: block; }
+  .config-table .config-item { padding: 12px; gap: 8px; border-top: 1px solid var(--line); }
+  .config-table .config-item th { grid-column: 1 / -1; padding: 0 0 2px; }
+  .config-table .config-item td { padding: 7px; border-radius: 8px; }
+  .config-table .config-item + .config-item > * { border-top: 0; }
+  .config-table td::before { content: attr(data-label); display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+  .config-value { padding: 4px 8px; }
+}
+.config-table .config-explanation { display: block; margin-top: 4px; font-size: 11px; line-height: 1.7; font-weight: 400; color: var(--muted); letter-spacing: 0; }
