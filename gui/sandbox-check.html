@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>沙箱浏览器实测</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/sandbox-check.css">
+</head>
+<body>
+  <main class="check-page">
+    <header class="hero">
+      <div class="hero-mark" aria-hidden="true">C</div>
+      <div>
+        <p class="eyebrow">SANDBOX BROWSER CHECK</p>
+        <h1>沙箱浏览器实测</h1>
+        <p class="lead">语言、时区、公网出口、WebRTC 候选和基础指纹一页查看。页面在独立资料目录中运行；检测结果只代表当前浏览器和当前网络。</p>
+        <div id="expected" class="expected"></div>
+      </div>
+      <button id="recheck" class="button secondary" type="button">重新检测</button>
+    </header>
+
+    <section id="overall" class="overall">
+      <span class="spinner"></span>
+      <span>正在读取浏览器环境…</span>
+    </section>
+
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-head">
+          <div><p class="panel-kicker">01 · ENVIRONMENT</p><h2>语言与时区</h2></div>
+          <span id="env-status" class="status-chip">读取中</span>
+        </div>
+        <dl id="environment" class="kv"></dl>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div><p class="panel-kicker">02 · EGRESS</p><h2>公网出口</h2></div>
+          <span id="egress-status" class="status-chip">检测中</span>
+        </div>
+        <dl id="egress" class="kv"></dl>
+        <div class="panel-foot">
+          <button id="check-egress" class="button ink" type="button">重新检测出口</button>
+          <small>通过 ipapi.co / ipinfo.io 读取；不会上传页面内容。</small>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div><p class="panel-kicker">03 · WEBRTC LEAK</p><h2>WebRTC 泄漏检测</h2></div>
+          <span id="rtc-status-chip" class="status-chip">检测中</span>
+        </div>
+        <p id="rtc-status" class="hint">正在通过多个 STUN 服务器收集公网候选（最多 8 秒）…</p>
+        <p class="hint">沙箱启动参数禁用非代理 UDP，因此“无候选”是可能结果；它表示未观察到 WebRTC 公网地址，不等于完整证明。</p>
+        <div id="rtc-results" class="results"></div>
+        <div class="panel-foot">
+          <button id="rtc-stun" class="button ink" type="button">重新检测（STUN）</button>
+          <button id="rtc-host" class="button secondary" type="button">仅本机候选</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div><p class="panel-kicker">04 · FINGERPRINT</p><h2>基础指纹</h2></div>
+          <span id="fp-status" class="status-chip">读取中</span>
+        </div>
+        <dl id="fingerprint" class="kv"></dl>
+        <p class="hint">本项目不做指纹伪装；这里只显示当前浏览器真实自报值，便于同一资料目录前后对比。</p>
+      </section>
+    </div>
+
+    <section class="panel note">
+      <h2>结果怎么看</h2>
+      <ul>
+        <li>语言、时区和出口地区与配置一致时标为绿色；不一致标为黄色或红色，需要人工检查。</li>
+        <li>WebRTC 检测与 browserleaks 的思路相同：通过 STUN 获取浏览器看到的公网地址，再与公网出口比较。出现不同公网 IP 就是泄漏；只有 <strong>host</strong> 候选时通常只暴露本机/mDNS 地址；<strong>relay</strong> 是 TURN 服务器，不等同于你的出口。</li>
+        <li>没有候选不等于“没有泄漏”，可能是浏览器策略或网络阻断了 STUN；页面会标为“无候选”并保留说明，而不是假装通过。</li>
+        <li>公网出口通过第三方接口读取；如果接口被拦截或限流，会显示未检测，而不是假装通过。</li>
+        <li>自检页不能证明 DNS 泄漏、账号可用性或所有应用路径；最终以「网络环境」的验收和实际网页为准。</li>
+      </ul>
+    </section>
+  </main>
+  <script type="module" src="/sandbox-check.js"></script>
+</body>
+</html>

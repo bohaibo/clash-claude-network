@@ -1,0 +1,82 @@
+{
+  "claude": [
+    "claude.ai",
+    "anthropic.com",
+    "claude.com",
+    "clau.de",
+    "claudeusercontent.com",
+    "claudemcpclient.com",
+    "claudemcpcontent.com",
+    "modelcontextprotocol.io"
+  ],
+  "extraSuffix": [
+    "sentry.io",
+    "statsigapi.net",
+    "statsig.com",
+    "statsigcdn.com",
+    "featuregates.org",
+    "featureassets.org",
+    "datadoghq.com",
+    "datadoghq.eu",
+    "datadog.com",
+    "browser-intake-us5-datadoghq.com",
+    "sift.com",
+    "siftscience.com",
+    "intercom.io",
+    "intercomcdn.com",
+    "intercom.com",
+    "intercomassets.com"
+  ],
+  "extraExact": [
+    "anthropic.auth0.com",
+    "anthropic.com.cdn.cloudflare.net",
+    "cdn.usefathom.com",
+    "cdn.growthbook.io",
+    "storage.googleapis.com"
+  ],
+  "claudeIpv4": [
+    "160.79.104.0/23"
+  ],
+  "claudeProcesses": [
+    "Claude.exe",
+    "claude.exe"
+  ],
+  "legacyLan": [
+    "DOMAIN-SUFFIX,acl4.ssr",
+    "DOMAIN-SUFFIX,ip6-localhost",
+    "DOMAIN-SUFFIX,ip6-loopback",
+    "DOMAIN-SUFFIX,internal",
+    "DOMAIN-SUFFIX,lan",
+    "DOMAIN-SUFFIX,local",
+    "DOMAIN-SUFFIX,localhost",
+    "IP-CIDR,0.0.0.0/8,no-resolve",
+    "IP-CIDR,10.0.0.0/8,no-resolve",
+    "IP-CIDR,100.64.0.0/10,no-resolve",
+    "IP-CIDR,127.0.0.0/8,no-resolve",
+    "IP-CIDR,169.254.0.0/16,no-resolve",
+    "IP-CIDR,172.16.0.0/12,no-resolve",
+    "IP-CIDR,192.168.0.0/16,no-resolve",
+    "IP-CIDR,224.0.0.0/4,no-resolve",
+    "IP-CIDR6,::1/128,no-resolve",
+    "IP-CIDR6,fc00::/7,no-resolve",
+    "IP-CIDR6,fe80::/10,no-resolve",
+    "IP-CIDR6,fd00::/8,no-resolve",
+    "DOMAIN,instant.arubanetworks.com",
+    "DOMAIN,setmeup.arubanetworks.com",
+    "DOMAIN,router.asus.com",
+    "DOMAIN,www.asusrouter.com",
+    "DOMAIN-SUFFIX,hiwifi.com",
+    "DOMAIN-SUFFIX,leike.cc",
+    "DOMAIN-SUFFIX,miwifi.com",
+    "DOMAIN-SUFFIX,my.router",
+    "DOMAIN-SUFFIX,p.to",
+    "DOMAIN-SUFFIX,peiluyou.com",
+    "DOMAIN-SUFFIX,phicomm.me",
+    "DOMAIN-SUFFIX,router.ctc",
+    "DOMAIN-SUFFIX,routerlogin.com",
+    "DOMAIN-SUFFIX,tendawifi.com",
+    "DOMAIN-SUFFIX,zte.home",
+    "DOMAIN-SUFFIX,tplogin.cn",
+    "DOMAIN-SUFFIX,wifi.cmcc"
+  ]
+}

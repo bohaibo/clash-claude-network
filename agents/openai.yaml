@@ -1,0 +1,3 @@
+interface:
+  display_name: "Windows Claude Network"
+  short_description: "Configure fixed-node Windows routing with verified rollback"
