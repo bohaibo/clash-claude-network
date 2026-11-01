@@ -44,6 +44,8 @@ foreach($entry in @(@{start=2;running=$true;sync='NTP';delayed=1},@{start=3;runn
  $beforeRegistry=$script:registry | ConvertTo-Json -Depth 5 -Compress
  Set-SystemRegionTime $dir 'US' 'en-US' 'Eastern Standard Time'
  Assert ($script:geo -eq 244 -and $script:zone -eq 'Eastern Standard Time' -and $script:culture -eq 'en-US') 'US region was not applied'
+ Assert ((Get-RegionRegistryValue 'HKCU:\Control Panel\International' 'Locale').value -eq '00000409') 'regional format locale ID was not applied'
+ Assert ((Get-RegionRegistryValue 'HKCU:\Control Panel\International' 'LocaleName').value -eq 'en-US') 'regional format locale name was not applied'
  Assert (!$script:running.W32Time -and !$script:running.tzautoupdate) 'automatic services were not stopped'
  Assert ((Get-RegionRegistryValue 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters' 'Type').value -eq 'NoSync') 'auto clock was not disabled'
  $record=Join-Path $dir 'region-time.json';$original=[IO.File]::ReadAllText($record)
@@ -51,6 +53,8 @@ foreach($entry in @(@{start=2;running=$true;sync='NTP';delayed=1},@{start=3;runn
  Assert ([IO.File]::ReadAllText($record) -ceq $original) 'repeat apply overwrote baseline'
  Restore-SystemRegionTime $dir
  Assert ($script:geo -eq 45 -and $script:culture -eq 'zh-CN' -and $script:zone -eq 'China Standard Time') 'original region was not restored'
+ Assert ((Get-RegionRegistryValue 'HKCU:\Control Panel\International' 'Locale').value -eq '00000804') 'regional format locale ID was not restored'
+ Assert ((Get-RegionRegistryValue 'HKCU:\Control Panel\International' 'LocaleName').value -eq 'zh-CN') 'regional format locale name was not restored'
  foreach($name in @('W32Time','tzautoupdate')){
   $current=Get-RegionServiceState $name
   Assert ($current.start -eq $entry.start -and $current.running -eq $entry.running) 'original service state was not restored'

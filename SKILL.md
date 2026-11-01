@@ -17,7 +17,7 @@ Workflow:
 
 1. `python scripts/client.py discover` shows subscriptions/node names without credentials.
 2. Select the exact node. Region is auto-hinted from node/subscription names; actual exit is checked after configuration. Apply also switches the Windows timezone and sandbox browser language to the selected region so Claude desktop and the sandbox browser agree. Restart Claude desktop/Windows as needed; reopen the sandbox for language changes.
-3. First apply creates the original snapshot automatically. Later applies reuse the pinned first recovery point; manual snapshots are additive. Never overwrite the baseline with the current state.
+3. Windows Settings → Time & language → Language & region → Regional format follows the selected region's culture (SG → zh-SG, US → en-US). Keep Locale and LocaleName consistent, verify in a fresh process, and restore the pinned original culture. First apply creates the original snapshot automatically. Later applies reuse the pinned first recovery point; manual snapshots are additive. Never overwrite the baseline with the current state.
 4. Apply: `scripts/run.ps1 -Action apply -Node "<exact>" -Acknowledged` (or the GUI). Use `-Subscription` for duplicate names and `-Region` when the hint is wrong.
 5. Apply/supplement block all non-project outbound allows, close IPv6 bindings, set strict firewall and system region/language. Node failure keeps domestic direct; core failure blocks all public traffic. Explain this before acting.
 6. Rule updates: manual, or scheduled every 1–365 days at HH:MM (current user task). Read `.local/ui-settings.json`; do not replace a manual choice with a scheduled task.

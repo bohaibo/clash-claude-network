@@ -7,7 +7,7 @@ const IMPACT = [
   { title: '全浏览器 WebRTC', text: '设置 Chrome、Edge、Firefox 策略；可能影响网页语音和视频，Firefox 关闭 WebRTC。需重启浏览器，其他浏览器和实际泄露效果未验证。' },
   { title: '系统 IPv6', text: '全局关闭并关闭现有网卡的 IPv6 绑定；依赖 IPv6 的内网资源可能不可用，需要重启 Windows 才完全生效。' },
   { title: '系统自动定位', text: '通过 Windows 策略关闭系统定位，地图、天气等定位功能会受影响；恢复时还原原有策略。' },
-  { title: '区域与时区', text: '关闭自动时区和自动校时，按所选节点地区设置系统国家、区域格式和时区；时间按时区显示。长期关闭校时可能产生误差，恢复会还原原状态。' },
+  { title: '区域与时区', text: '关闭自动时区和自动校时，按所选节点地区设置系统国家、Windows 语言和区域页面中的区域格式（日期和数字）及时区。区域格式可能需注销后重新登录或重启生效；恢复会还原原格式和时间设置。长期关闭校时可能产生误差。' },
   { title: '代理清理', text: '清理系统、WinHTTP、环境变量与 Git/npm/Docker 的代理覆盖，普通流量交给 TUN；已打开的终端需要重启。' },
 ];
 
@@ -182,7 +182,7 @@ function renderImpact(ctx) {
     ['自动设置时区', now.auto_timezone_state, '关闭'],
     ['自动校准时间', now.auto_time_state, '关闭'],
     ['国家或地区', countryName(now.country_code), after(target.label)],
-    ['日期和数字格式', languageName(now.culture), after(languageName(target.culture))],
+    ['区域格式（日期和数字）', languageName(now.culture), after(languageName(target.culture))],
     ['时区', now.timezone === 'China Standard Time' ? '中国标准时间' : zoneName(Object.values(preview.regions || {}).find((r) => r.timezone_id === now.timezone)?.iana), after(zoneName(target.iana))],
     ['独立浏览器语言', /尚未设置/.test(now.browser_language || '') ? '尚未设置' : languageName(now.browser_language), after(languageName(target.browser_language))],
     ['IPv6 网络', now.ipv6_state, '关闭'],

@@ -69,6 +69,8 @@ WebRTC 全局策略目前覆盖 Chrome、Edge、Firefox；其他品牌、便携�
 
 策略参考：[Edge WebRTC](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies/WebRtcLocalhostIpHandling)、[Firefox Preferences](https://firefox-admin-docs.mozilla.org/reference/policies/preferences/)。
 
+Windows「设置 → 时间和语言 → 语言和区域 → 区域格式」也随所选节点的出口地区配置，无需另行手动选择。例如 `bo-SG` 对应新加坡，区域格式为「中文（新加坡）」`zh-SG`；美国对应「英语（美国）」`en-US`。一键配置及补充配置同步处理此项，配置前的变更预览显示已保存的当前值与目标值。按节点名称识别的地区可手动修正，并非实时定位节点城市。恢复快照会还原首次记录的区域格式（例如「简体中文（中国大陆）」`zh-CN`），不覆盖原始基线。已保存格式与当前 Windows 会话的实际格式可能不同：设置窗口需重新打开，部分系统界面及应用可能需注销后重新登录或重启才生效；写入验证通过不代表已完成重启后的界面验收。
+
 ## 规则更新
 
 在「规则更新」选择：

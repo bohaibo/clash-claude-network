@@ -14,7 +14,9 @@ function Service-State($name) {
 }
 $result=[ordered]@{}
 $result.timezone=(Get-TimeZone).Id
-$result.culture=(Get-Culture).Name
+$result.culture=(Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\International' -Name LocaleName -ErrorAction Stop).LocaleName
+$result.culture_runtime=(Get-Culture).Name
+$result.culture_restart_required=($result.culture -ine $result.culture_runtime)
 $geo=(Get-WinHomeLocation).GeoId
 $region=[Globalization.CultureInfo]::GetCultures('SpecificCultures') | ForEach-Object {try{[Globalization.RegionInfo]::new($_.Name)}catch{}} | Where-Object {$_.GeoId -eq $geo} | Select-Object -First 1
 $result.country=if($region){$region.DisplayName+'（'+$region.TwoLetterISORegionName+'；GeoID '+$geo+'）'}else{'GeoID '+$geo}

@@ -63,8 +63,11 @@ function Disable-RegionTimeService([string]$Name) {
   if($state.start -ne 4 -or $state.running){throw "未能关闭自动时间服务：$Name"}
 }
 function Set-PersistedRegionCulture([string]$CultureName) {
+  $culture=[Globalization.CultureInfo]::GetCultureInfo($CultureName)
   Set-Culture -CultureInfo $CultureName -ErrorAction Stop
-  # Set-Culture can leave LocaleName stale within the current Windows session.
+  # Keep the legacy locale ID and locale name consistent for Windows Settings.
+  # A name-only write can leave Regional format displaying the previous region.
+  Set-RegionRegistryValue 'HKCU:\Control Panel\International' 'Locale' ([pscustomobject]@{exists=$true;kind='String';value=('{0:x8}' -f $culture.LCID)})
   Set-RegionRegistryValue 'HKCU:\Control Panel\International' 'LocaleName' ([pscustomobject]@{exists=$true;kind='String';value=$CultureName})
 }
 function Set-SystemRegionTime([string]$Directory,[string]$RegionCode,[string]$CultureName,[string]$TimeZoneId) {
