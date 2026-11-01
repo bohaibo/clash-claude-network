@@ -386,6 +386,7 @@ function renderJobDock() {
   const timeline = (job.events || []).filter((event) => ['elevation', 'step', 'done', 'error', 'cancelled'].includes(event.type)).slice(-8);
   const details = [];
   for (const item of timeline) {
+    if (!running && job.error && item.message === job.error) continue;
     if (item.type === 'step') details.push(h('div', { class: 'job-event' },
       h('span', { class: 'job-event-index', text: String(item.index || '') }),
       h('div', {}, h('strong', { text: item.title || '' }), item.note ? h('small', { text: item.note }) : null)));
@@ -429,7 +430,7 @@ function renderJobDock() {
 async function forceCancelJob(job) {
   const ok = await ui.confirmDialog({
     title: '结束卡住的任务？',
-    description: '恢复可能只完成了一部分，结束进程不会回滚已写入的系统/Clash 设置。请先查看控制台日志；结束后应重新恢复或重新配置。',
+    description: (ACTION_LABELS[job.action] || '本次操作') + '可能尚未完成，结束进程不会回滚已写入的设置。请先查看日志，确认是否需要恢复或重试。',
     confirmText: '结束任务',
     danger: true,
   });
@@ -441,7 +442,7 @@ async function forceCancelJob(job) {
     clearTimeout(app.jobTimer);
     renderJobDock();
     updateChrome();
-    ui.toast('已结束卡住的任务；请检查日志并重新恢复。', 'warn', 8000);
+    ui.toast(value.state === 'success' ? '操作已经完成，无需结束或重新恢复。' : '任务状态已更新；请检查日志后再决定是否恢复或重试。', value.state === 'success' ? 'ok' : 'warn', 8000);
     await refresh(true);
   } catch (error) {
     ui.toast(error.message || '结束任务失败；请从任务管理器结束卡住的 powershell.exe。', 'bad', 9000);

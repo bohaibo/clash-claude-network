@@ -208,6 +208,27 @@ class GuiServer(unittest.TestCase):
         self.assertEqual(value['state'], 'interrupted')
         self.assertIn('手动结束', value['error'])
 
+    def test_completed_apply_is_not_cancelled_while_wrapper_is_running(self):
+        job_id = 'd' * 32
+        folder = self.app.jobs_dir / job_id
+        folder.mkdir(parents=True)
+        job = {'id': job_id, 'action': 'apply', 'params': {}, 'folder': str(folder),
+               'created': gui_server.now_iso(), 'started_epoch': time.time() - 1, 'state': 'running'}
+        self.app.jobs[job_id] = job
+        self.app.active_job = job
+        (folder / 'status.json').write_text(json.dumps({'state': 'running', 'action': 'apply',
+            'started': job['created'], 'pid': 123}), encoding='utf-8')
+        (folder / 'events.jsonl').write_text(json.dumps({'type': 'done', 'time': gui_server.now_iso(),
+            'message': 'configuration complete'}) + '\n', encoding='utf-8')
+        (self.local / 'last-run.json').write_text(json.dumps({'action': 'apply', 'success': True}), encoding='utf-8')
+        with patch.object(self.app, '_process_info') as info:
+            view = self.app.cancel_job(job_id)
+        self.assertEqual(view['state'], 'success')
+        self.assertFalse(view['stale'])
+        info.assert_not_called()
+        self.assertIsNone(self.app.active_job)
+        self.assertNotIn('cancelled', (folder / 'events.jsonl').read_text())
+
     def test_firewall_guard_is_pending_only_without_commit(self):
         token = 'guard-' + 'a' * 32
         (self.local / 'pending-firewall.json').write_text(json.dumps({'token': token}), encoding='utf-8')

@@ -686,6 +686,11 @@ class App:
                 shutil.rmtree(folder, ignore_errors=True)
                 continue
             if isinstance(status, dict) and status.get('state') == 'running':
+                try:
+                    if self.job_view(folder.name).get('state') == 'success':
+                        continue
+                except ApiError:
+                    pass
                 pid = status.get('pid')
                 alive = False
                 if isinstance(pid, int) and pid > 0:
@@ -750,6 +755,10 @@ class App:
             return True
 
     def cancel_job(self, job_id):
+        # Reconcile a completed operation before offering to terminate its wrapper.
+        current = self.job_view(job_id)
+        if current.get('state') != 'running':
+            return current
         if not isinstance(job_id, str) or not JOB_ID_RE.fullmatch(job_id):
             raise ApiError(404, '操作记录无效。')
         folder = self.jobs_dir / job_id
@@ -776,7 +785,9 @@ class App:
                     raise ApiError(409, '无法结束卡住的任务进程；请在任务管理器中结束它。') from exc
                 if result.returncode != 0:
                     raise ApiError(409, '无法结束卡住的任务进程；它可能已提权，请在任务管理器中结束。')
-        message = '任务已手动结束；恢复可能只完成一部分，请检查快照/日志后重试。'
+        label = {'apply': '配置', 'restore': '恢复', 'supplement': '补充配置', 'snapshot': '快照保存',
+                 'reconfigure': '重新配置', 'update': '规则更新', 'verify': '连通性检查'}.get(status.get('action'), '操作')
+        message = '任务已手动结束；' + label + '可能未完成，请检查快照/日志后再决定是否重试。'
         status.update({'state': 'interrupted', 'finished': now_iso(), 'error': message})
         atomic_json(folder / 'status.json', status)
         append_event(folder / 'events.jsonl', {'type': 'cancelled', 'message': message})
@@ -1003,6 +1014,19 @@ class App:
             status = {'state': 'running', 'action': job.get('action'), 'exit_code': None}
         events = read_events(folder / 'events.jsonl')
         elapsed = 0
+        if status.get('state') == 'running' and job.get('action') in ('apply', 'restore', 'supplement', 'snapshot', 'reconfigure'):
+            terminal_events = [e for e in events if e.get('type') in ('done', 'error', 'cancelled')]
+            result_path = self.local / 'last-run.json'
+            result = read_json(result_path, {})
+            started = parse_time(status.get('started') or job.get('created'))
+            completed = parse_time(terminal_events[-1].get('time')) if terminal_events else None
+            if (terminal_events and terminal_events[-1].get('type') == 'done'
+                    and not any(e.get('type') in ('error', 'cancelled') for e in terminal_events)
+                    and isinstance(result, dict) and result.get('success') is True
+                    and result.get('action') == job.get('action') and started is not None and completed is not None
+                    and started.timestamp() - 5 <= result_path.stat().st_mtime <= completed.timestamp() + 30):
+                self._finish_job(job, 0)
+                status = read_json(folder / 'status.json', {})
         if job.get('started_epoch'):
             elapsed = int(max(0, time.time() - job['started_epoch']))
         else:

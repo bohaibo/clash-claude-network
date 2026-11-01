@@ -228,7 +228,9 @@ if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principa
   if($eventsPath){$arguments+=@('-EventsFile',('"'+$eventsPath+'"'))}
   Write-GuiEvent 'elevation' ([ordered]@{message='等待 Windows 管理员授权'})
   Write-Host '即将请求管理员权限；请在 Windows 授权窗口中确认。取消授权不会执行所选操作。' -ForegroundColor Yellow
-  try{$process=Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru}
+  # Start-Process -Wait also waits for Clash descendants, which stay open.
+  # Wait only for the elevated operation process itself.
+  try{$process=Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -PassThru;$null=$process.Handle;$process.WaitForExit()}
   catch{
    $native=$_.Exception
    while($native.InnerException){$native=$native.InnerException}
@@ -500,13 +502,13 @@ try {
    Assert-StrictFirewall -coreProgram ([string]$firewallPlan.core_program)
    Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Verified'
   } finally {$guardMutex.ReleaseMutex();$guardMutex.Dispose()}
-  Write-Step ('沙箱浏览器：设置 '+$regionProfile.label+' 语言；系统时区已切换，Claude 桌面/浏览器重启后读取新时区')
+  Write-Host ('沙箱浏览器：设置 '+$regionProfile.label+' 语言；系统时区已切换，Claude 桌面/浏览器重启后读取新时区')
   $browserScript=Join-Path $PSScriptRoot 'sandbox_browser.py'
   if(Test-Path -LiteralPath $browserScript){
    $browserRegionJson=& $python $browserScript --configure-region $Region
    if($LASTEXITCODE -ne 0){Write-Warning '沙箱浏览器地区配置未完成；网络配置仍已生效。'}
    else{
-    try{$browserRegion=$browserRegionJson | ConvertFrom-Json;if($browserRegion.running){Write-Step '沙箱浏览器正在运行：语言在关闭并重新打开后生效；系统时区变化也需重启浏览器/Claude'} }catch{}
+    try{$browserRegion=$browserRegionJson | ConvertFrom-Json;if($browserRegion.running){Write-Host '沙箱浏览器正在运行：语言在关闭并重新打开后生效；系统时区变化也需重启浏览器/Claude'} }catch{}
    }
   }
 
