@@ -121,6 +121,19 @@ class GuiServer(unittest.TestCase):
         with self.assertRaises(gui_server.ApiError):
             self.app._validate_job({'action': 'snapshot', 'confirm': 'WRONG'})
 
+    def test_first_apply_does_not_require_a_plan(self):
+        self.assertFalse((self.local / 'plan.json').exists())
+        with patch.object(self.app, 'configured', return_value=(False, '')):
+            action, params = self.app._validate_job({
+                'action': 'apply', 'confirm': gui_server.CONFIRM['apply'],
+                'node': 'Chosen', 'region': 'SG',
+            })
+            self.assertEqual(action, 'apply')
+            self.assertEqual(params['node'], 'Chosen')
+            for action in ('supplement', 'reconfigure', 'update', 'verify'):
+                with self.subTest(action=action), self.assertRaises(gui_server.ApiError):
+                    self.app._validate_job({'action': action, 'confirm': gui_server.CONFIRM[action]})
+
     def test_restore_requires_existing_sealed_snapshot(self):
         folder = self.local / 'snapshots' / '20260101-120000'
         folder.mkdir(parents=True)

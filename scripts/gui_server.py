@@ -834,7 +834,7 @@ class App:
             if not REGION_RE.fullmatch(region):
                 raise ApiError(400, '出口地区须为两位国家代码，例如 SG。')
             params.update(node=node, subscription=subscription, region=region)
-        if action in ('apply', 'supplement', 'reconfigure', 'update', 'verify') and not plan:
+        if action in ('supplement', 'reconfigure', 'update', 'verify') and not plan:
             raise ApiError(400, '还没有配置记录；请先完成一次配置。')
         if action in ('supplement', 'reconfigure') and not self.baseline_name():
             raise ApiError(400, '没有可用的首次恢复点；请先完成一次配置并保存原始快照。')

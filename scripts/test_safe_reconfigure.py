@@ -9,6 +9,19 @@ class SafeReconfigure(unittest.TestCase):
   temp=tempfile.TemporaryDirectory(dir=client.LOCAL,prefix='safe-test-');self.addCleanup(temp.cleanup)
   self.local=Path(temp.name);self.enterContext(patch.object(client,'LOCAL',self.local))
   self.enterContext(patch.dict(os.environ));os.environ.pop('CCN_SNAPSHOT',None)
+ def test_domestic_connectivity_is_enough_for_baseline_recovery(self):
+  with patch.object(safe.subprocess,'run',return_value=MagicMock(returncode=0,stdout=b'200')) as run:
+   self.assertTrue(safe.network_ready())
+  self.assertEqual(run.call_count,1)
+  self.assertEqual(run.call_args.args[0][-1],'https://www.baidu.com')
+ def test_connectivity_falls_back_and_rejects_failures(self):
+  failed=MagicMock(returncode=7,stdout=b'000')
+  with patch.object(safe.subprocess,'run',side_effect=[subprocess.TimeoutExpired('curl',15),failed,MagicMock(returncode=0,stdout=b'200')]):
+   self.assertTrue(safe.network_ready())
+  for response in (failed,MagicMock(returncode=0,stdout=b'403'),MagicMock(returncode=0,stdout=b'000')):
+   with self.subTest(response=response),patch.object(safe.subprocess,'run',return_value=response) as run:
+    self.assertFalse(safe.network_ready())
+    self.assertEqual(run.call_count,3)
  def snapshot(self,name,kind='auto'):
   p=self.local/'snapshots'/name;p.mkdir(parents=True)
   (p/'manifest.json').write_text(json.dumps({'kind':kind}))

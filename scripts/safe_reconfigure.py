@@ -69,12 +69,15 @@ def run_stage(folder,job,action,timeout):
   if code:raise RuntimeError(action+' failed; see '+action+'.log')
 
 def network_ready():
- try:
-  probe=subprocess.run(['curl.exe','--noproxy','*','--connect-timeout','4','--max-time','12','-sS','-o','NUL',
-                        '-w','%{http_code}','https://www.cloudflare.com/cdn-cgi/trace'],
-                       capture_output=True,timeout=15)
-  return probe.returncode==0 and probe.stdout.strip()==b'200'
- except (OSError,subprocess.TimeoutExpired):return False
+ # Baseline recovery confirms basic connectivity, not overseas proxy usability.
+ # Accept either domestic or overseas HTTPS; full apply still verifies exit country.
+ for url in ('https://www.baidu.com','https://www.taobao.com','https://www.cloudflare.com/cdn-cgi/trace'):
+  try:
+   probe=subprocess.run(['curl.exe','--noproxy','*','--connect-timeout','4','--max-time','12','-sS','-o','NUL',
+                         '-w','%{http_code}',url],capture_output=True,timeout=15)
+   if probe.returncode==0 and probe.stdout.strip() in (b'200',b'301',b'302'):return True
+  except (OSError,subprocess.TimeoutExpired):pass
+ return False
 
 def restart_current_runtime(job):
  # Reload only today's native generated file, never a snapshot's node YAML.

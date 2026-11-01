@@ -259,8 +259,12 @@ def verify(outage=False,stage=None):
   report=save_report(report,stage)
   print(json.dumps(report,ensure_ascii=False))
  return report
-if __name__=='__main__':
+def main(argv=None):
+ from operation_lock import operation_lock
  p=argparse.ArgumentParser();p.add_argument('--node-outage',action='store_true')
- p.add_argument('--stage',choices=('connectivity','node-outage','post-recovery'));args=p.parse_args()
+ p.add_argument('--stage',choices=('connectivity','node-outage','post-recovery'));args=p.parse_args(argv)
  if args.stage and (args.stage=='node-outage')!=args.node_outage:p.error('Stage must match --node-outage')
- verify(args.node_outage,args.stage)
+ with operation_lock(LOCAL):
+  return verify(args.node_outage,args.stage)
+
+if __name__=='__main__':main()

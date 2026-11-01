@@ -489,11 +489,12 @@ try {
   }finally{$applyMutex.ReleaseMutex();$applyMutex.Dispose()}
   Write-Step '即将短暂中断代理及全部公网，分别验证节点故障、停核保护和恢复；多项检测可能需要数分钟'
   $env:CCN_VERIFY_RUN=[Guid]::NewGuid().ToString('N')
-  & $python (Join-Path $PSScriptRoot 'verify.py') --node-outage;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '网络验证未通过。')}
+  # This coordinator already owns operation.lock; call the internal verifier.
+  & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from verify import verify;verify(outage=True)' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '网络验证未通过。')}
   Write-Host '  节点故障阶段已通过；开始停核测试，国内公网也会暂时断开。' -ForegroundColor Cyan
   & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '内核退出保护/重启验证未通过。')}
   Write-Host '  停核测试已通过；开始恢复后的连通性复测。' -ForegroundColor Cyan
-  & $python (Join-Path $PSScriptRoot 'verify.py') --stage post-recovery;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '内核退出测试之后网络没有恢复。')}
+  & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from verify import verify;verify(stage=''post-recovery'')' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '内核退出测试之后网络没有恢复。')}
   $guardMutex=New-Object Threading.Mutex($false,('Global\CCN-'+$watchToken))
   try{[void]$guardMutex.WaitOne()}catch [Threading.AbandonedMutexException]{}
   try {

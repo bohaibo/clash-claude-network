@@ -22,6 +22,25 @@ class Verification(unittest.TestCase):
   self.npm=self.enterContext(patch.object(verify,'npm_egress',return_value={'tested':True,'ok':True}))
   self.enterContext(patch.object(verify,'workload_scope',return_value={'docker_installed':False,'wsl_installed':False}))
   self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+ def test_standalone_verification_rejects_busy_operation_before_probing(self):
+  from operation_lock import operation_lock
+  with operation_lock(self.local):
+   with self.assertRaisesRegex(RuntimeError,'Another project operation'):
+    verify.main([])
+  self.api.assert_not_called()
+  self.assertFalse((self.local/'verification.json').exists())
+  self.assertTrue(verify.main([])['success'])
+ def test_coordinator_verification_commands_work_with_windows_quoting(self):
+  source=(client.PROJECT/'scripts/run.ps1').read_text(encoding='utf-8-sig')
+  commands=[line.strip().split(';if($LASTEXITCODE')[0] for line in source.splitlines()
+            if '& $python -c' in line and 'from verify import verify;' in line]
+  self.assertEqual(len(commands),2)
+  (self.local/'verify.py').write_text('def verify(outage=False,stage=None): print("OUTAGE" if outage else stage)')
+  probe=self.local/'probe.ps1'
+  probe.write_text('param($python,$scripts)\n$PSScriptRoot=$scripts\n'+'\n'.join(commands),encoding='utf-8-sig')
+  result=subprocess.run(['powershell.exe','-NoProfile','-File',str(probe),sys.executable,str(self.local)],capture_output=True,timeout=15)
+  self.assertEqual(result.returncode,0,result.stderr)
+  self.assertEqual(result.stdout.decode().split(),['OUTAGE','post-recovery'])
  def fake_api(self,root,method,path,body=None):
   if method=='PUT':self.broken=client.yaml.safe_load(body['payload'])['proxies'][0]['port']==1;return {}
   if path=='/configs':return {'mode':'rule'}
