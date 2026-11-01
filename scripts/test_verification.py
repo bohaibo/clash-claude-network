@@ -30,6 +30,21 @@ class Verification(unittest.TestCase):
  def fake_curl(self,url,head=False):
   if '[' in url or (self.broken and url=='https://ipinfo.io/json'):return {'exit':7,'http':0,'body':''}
   return {'exit':0,'http':200,'body':json.dumps({'country':'SG','ip':'8.8.8.8'})}
+ def test_post_recovery_retries_and_preserves_connection_failure(self):
+  failed={'exit':7,'http':0,'body':'','error':'connection refused'}
+  responses=[self.fake_curl('domestic'),self.fake_curl('domestic'),failed,self.fake_curl('egress')]
+  with patch.object(verify,'curl',side_effect=lambda *a,**k: responses.pop(0) if responses else self.fake_curl(*a,**k)),patch.object(verify.time,'sleep'):
+   report=verify.verify(stage='post-recovery')
+  self.assertTrue(report['success'])
+  self.assertEqual(report['egress_attempts'][0]['error'],'connection refused')
+  self.assertEqual(len(report['egress_attempts']),2)
+ def test_post_recovery_persistent_failure_still_fails(self):
+  def probe(url,head=False):
+   return {'exit':7,'http':0,'body':'','error':'timeout'} if url=='https://ipinfo.io/json' else self.fake_curl(url,head)
+  with patch.object(verify,'curl',side_effect=probe),patch.object(verify.time,'sleep'):
+   with self.assertRaises(AssertionError):verify.verify(stage='post-recovery')
+  report=json.loads((self.local/'verification.json').read_text())
+  self.assertFalse(report['success']);self.assertEqual(len(report['egress_attempts']),3)
  def test_failed_required_checks_cannot_pass(self):
   for name in ('stun','git','npm'):
    with self.subTest(check=name):

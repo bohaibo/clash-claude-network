@@ -62,6 +62,11 @@ function Disable-RegionTimeService([string]$Name) {
   $state=Get-RegionServiceState $Name
   if($state.start -ne 4 -or $state.running){throw "未能关闭自动时间服务：$Name"}
 }
+function Set-PersistedRegionCulture([string]$CultureName) {
+  Set-Culture -CultureInfo $CultureName -ErrorAction Stop
+  # Set-Culture can leave LocaleName stale within the current Windows session.
+  Set-RegionRegistryValue 'HKCU:\Control Panel\International' 'LocaleName' ([pscustomobject]@{exists=$true;kind='String';value=$CultureName})
+}
 function Set-SystemRegionTime([string]$Directory,[string]$RegionCode,[string]$CultureName,[string]$TimeZoneId) {
   $region=[Globalization.RegionInfo]::new($RegionCode)
   $null=[Globalization.CultureInfo]::GetCultureInfo($CultureName)
@@ -71,7 +76,7 @@ function Set-SystemRegionTime([string]$Directory,[string]$RegionCode,[string]$Cu
   Disable-RegionTimeService 'W32Time'
   Set-RegionRegistryValue 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters' 'Type' ([pscustomobject]@{exists=$true;kind='String';value='NoSync'})
   Set-WinHomeLocation -GeoId $region.GeoId -ErrorAction Stop
-  Set-Culture -CultureInfo $CultureName -ErrorAction Stop
+  Set-PersistedRegionCulture $CultureName
   Set-TimeZone -Id $TimeZoneId -ErrorAction Stop
   # Read persisted culture because Get-Culture can be cached in this PowerShell session.
   $locale=(Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\International' -Name LocaleName -ErrorAction Stop).LocaleName
@@ -104,7 +109,7 @@ function Restore-SystemRegionTime([string]$Directory) {
   }
   try{Set-RegionRegistryValue 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters' 'Type' $state.syncType}catch{$failures.Add('校时模式: '+$_.Exception.Message)}
   try{Set-WinHomeLocation -GeoId $state.homeGeoId -ErrorAction Stop}catch{$failures.Add('国家/地区: '+$_.Exception.Message)}
-  try{Set-Culture -CultureInfo $state.culture -ErrorAction Stop}catch{$failures.Add('区域格式: '+$_.Exception.Message)}
+  try{Set-PersistedRegionCulture $state.culture}catch{$failures.Add('区域格式: '+$_.Exception.Message)}
   try{Set-TimeZone -Id $state.timezone -ErrorAction Stop}catch{$failures.Add('时区: '+$_.Exception.Message)}
   try{
     if((Get-WinHomeLocation).GeoId -ne $state.homeGeoId -or (Get-TimeZone).Id -ne $state.timezone -or

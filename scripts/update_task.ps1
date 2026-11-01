@@ -7,6 +7,24 @@ $name='ClaudeNetwork-Update-'+$suffix
 $expectedAction='"'+(Join-Path $PSScriptRoot 'update.py')+'"'
 $existing=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
 
+function Grant-UpdateTaskUserAccess {
+ $task=Get-ScheduledTask -TaskName $name -ErrorAction Stop
+ $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+ if(@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -ne $expectedAction -or $task.Actions[0].Execute -ne $Python -or [int]$task.Principal.RunLevel -ne 0){throw 'Unexpected update task definition; permissions unchanged.'}
+ $taskSid=([Security.Principal.NTAccount]::new($task.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier])
+ if($taskSid.Value -ne $identity.User.Value){throw 'Update task belongs to another user; permissions unchanged.'}
+ $scheduler=New-Object -ComObject 'Schedule.Service';$scheduler.Connect()
+ $registered=$scheduler.GetFolder('\').GetTask($name)
+ $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(4))
+ $mask=0x1f01ff
+ foreach($ace in $descriptor.DiscretionaryAcl){
+  if($ace -is [Security.AccessControl.CommonAce] -and $ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and $ace.SecurityIdentifier -eq $identity.User -and ($ace.AccessMask -band $mask) -eq $mask){return}
+ }
+ $ace=[Security.AccessControl.CommonAce]::new([Security.AccessControl.AceFlags]::None,[Security.AccessControl.AceQualifier]::AccessAllowed,$mask,$identity.User,$false,$null)
+ $descriptor.DiscretionaryAcl.InsertAce(0,$ace)
+ $registered.SetSecurityDescriptor($descriptor.GetSddlForm([Security.AccessControl.AccessControlSections]::Access),0)
+}
+
 function Get-TriggerTime($task){
  $trigger=@($task.Triggers | Select-Object -First 1)
  if(!$trigger.Count -or !$trigger[0].StartBoundary){return ''}
@@ -42,6 +60,8 @@ if($DaysInterval -lt 1 -or $DaysInterval -gt 365){throw '更新间隔必须是 1
 $trigger=New-ScheduledTaskTrigger -Daily -At $At -DaysInterval $DaysInterval
 if($existing){
  if(@($existing.Actions | Where-Object {$_.Arguments -ne $expectedAction}).Count){throw '已存在一个参数不同的更新任务，请先人工确认。'}
+ $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+ if(([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){Grant-UpdateTaskUserAccess}
  if((Get-TriggerTime $existing) -ne $At -or (Get-TriggerInterval $existing) -ne $DaysInterval){Set-ScheduledTask -TaskName $name -Trigger $trigger | Out-Null}
  return
 }
@@ -49,3 +69,4 @@ $taskAction=New-ScheduledTaskAction -Execute $Python -Argument $expectedAction -
 $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 4) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $name -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
+Grant-UpdateTaskUserAccess

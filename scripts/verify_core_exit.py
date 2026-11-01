@@ -35,6 +35,9 @@ def verify_core_exit(recovery_timeout=35):
      except Exception:
       if time.monotonic()>=deadline:raise TimeoutError('Core configuration recovery timed out') from None
       time.sleep(1)
+    # Windows may retain fake-IP answers from the stopped core.
+    command('Clear-DnsClientCache -ErrorAction Stop')
+    report['dns_cache_cleared']=True
    except Exception:
     report['success']=False;report['restart_failed']=True
     raise

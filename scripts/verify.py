@@ -55,7 +55,7 @@ def curl(url,head=False):
  if head:cmd+=['-I']
  p=subprocess.run(cmd+[url],capture_output=True,text=True,encoding='utf-8',errors='replace',env=clean_env(),timeout=13)
  body,_,status=p.stdout.rpartition('\n__CHECK__')
- return {'exit':p.returncode,'http':int(status or 0),'body':body}
+ return {'exit':p.returncode,'http':int(status or 0),'body':body,'error':p.stderr.strip()[:500]}
 def stun(host='stun.l.google.com',port=19302,route_probe=None):
  """Native UDP STUN binding request, bypassing any HTTP proxy."""
  transaction=os.urandom(12);cookie=0x2112A442
@@ -196,7 +196,14 @@ def verify(outage=False,stage=None):
   taobao=curl('https://www.taobao.com',True);require(taobao['exit']==0 and taobao['http'] in (200,301,302),'配置检查未通过，请查看本地记录。')
   report['domestic']={'baidu':cn['http'],'taobao':taobao['http']}
   check='egress'
-  egress=curl('https://ipinfo.io/json');require(egress['exit']==0,'配置检查未通过，请查看本地记录。')
+  attempts=[]
+  for attempt in range(3 if stage=='post-recovery' else 1):
+   egress=curl('https://ipinfo.io/json')
+   attempts.append({k:egress.get(k) for k in ('exit','http','error')})
+   if egress['exit']==0:break
+   if stage=='post-recovery' and attempt<2:time.sleep(2)
+  report['egress_attempts']=attempts
+  require(egress['exit']==0,'海外出口连接失败；详见 egress_attempts')
   address=json.loads(egress['body']);require(address.get('country')==plan['region'],'Exit country differs from required region')
   report['egress']={k:address.get(k) for k in ('ip','country','city')}
   check='dns'
