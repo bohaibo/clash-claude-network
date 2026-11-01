@@ -192,7 +192,7 @@ function renderBanners() {
     rows.push(ui.note('本机安全重新配置或网络恢复正在执行。请等待独立看护完成后重试。', 'warn'));
   }
   if (app.data.app?.node === false) {
-    rows.push(ui.note('未找到 Node.js。生成候选配置需要 Node.js，请先按 README 安装；本软件不会自动安装。', 'warn'));
+    rows.push(ui.note('未找到项目内 Node.js。请重新运行根目录「一键网络.cmd」，启动器会将所需环境安装或修复到项目内，不修改系统 PATH。', 'warn'));
   }
   if (app.data.browser?.engine?.name == null) {
     rows.push(ui.note('未找到 Chrome 或 Edge。界面仍可配置网络，但沙箱浏览器不可用；本项目不会下载浏览器。', 'warn'));
@@ -217,10 +217,21 @@ function renderPage() {
   updateNav();
   const content = document.getElementById('content');
   if (!content) return;
-  if (!app.data) {
-    content.replaceChildren(h('div', { class: 'loading-panel' }, h('span', { class: 'spinner' }), '正在读取本地状态…'));
+  if (!app.data && page.id !== 'help') {
+    content.setAttribute('aria-busy', 'true');
+    content.replaceChildren(h('div', { class: 'stack startup-loading' },
+      ui.pageHeader({ eyebrow: 'LOCAL SETUP', title: page.title, description: '正在准备本机配置，请稍候。' }),
+      ui.card({},
+        h('div', { class: 'startup-loading-status', role: 'status', 'aria-live': 'polite' },
+          h('span', { class: 'spinner large', 'aria-hidden': 'true' }),
+          h('div', {}, h('strong', { text: '正在读取本地配置…' }),
+            h('p', { class: 'muted', text: '正在检查 Clash、恢复记录和系统设置，首次读取可能需要几秒。' }))),
+        h('div', { class: 'startup-skeleton', 'aria-hidden': 'true' },
+          h('div', { class: 'skeleton-line' }), h('div', { class: 'skeleton-line short' }),
+          h('div', { class: 'skeleton-line' })))));
     return;
   }
+  content.removeAttribute('aria-busy');
   try {
     const node = page.render(ctx);
     content.replaceChildren(node);
@@ -261,7 +272,8 @@ async function refresh(force = false) {
     } else {
       ui.toast(error.message || '读取状态失败。', 'bad');
       const content = document.getElementById('content');
-      if (content && !app.data) {
+      if (content && !app.data && app.page !== 'help') {
+        content.removeAttribute('aria-busy');
         content.replaceChildren(h('div', { class: 'card' }, h('div', { class: 'card-body' },
           ui.note(error.message || '读取本地状态失败。请检查 .local/gui/server.log。', 'bad'),
           ui.button('重试', { variant: 'ink', onClick: () => refresh(true) }))));
@@ -504,6 +516,7 @@ async function init() {
   bootShell();
   const initial = (location.hash || '#/overview').replace('#/', '');
   app.page = PAGES.some((item) => item.id === initial) ? initial : 'overview';
+  renderPage();
   await refresh(true);
   window.scrollTo(0, 0);
   setInterval(() => { api.heartbeat().catch(() => {}); }, 8000);
