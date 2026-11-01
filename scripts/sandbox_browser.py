@@ -34,11 +34,13 @@ ENGINE_LOG = BROWSER_ROOT / 'engine.log'
 GUI_PROFILE = LOCAL / 'gui' / 'browser-profile'
 
 LANGUAGE_RE = re.compile(r'^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})+$')
+CHECK_URLS = ('https://ip.net.coffee/claude/', 'https://browserleaks.com/webrtc')
+
 LANGUAGES = tuple(sorted(set(region_profile.all_browser_languages()) | {
     'zh-SG', 'en-SG', 'zh-CN', 'en-US', 'en-GB', 'ja-JP',
 }))
 ENGINES = ('auto', 'chrome', 'edge')
-DEFAULT_SETTINGS = {'engine': 'auto', 'region': 'SG', 'language': 'zh-SG', 'start_url': 'https://claude.ai/'}
+DEFAULT_SETTINGS = {'engine': 'auto', 'region': 'SG', 'language': 'zh-SG', 'start_url': 'about:blank'}
 
 
 def valid_language(value):
@@ -177,6 +179,8 @@ def load_settings(local=None):
         if not isinstance(stored, dict):
             raise ValueError('沙箱浏览器设置文件格式无效。')
         result.update(stored)
+    if result.get('start_url') == 'https://claude.ai/':
+        result['start_url'] = 'about:blank'
     result.setdefault('region', 'SG')
     if result.get('engine') not in ENGINES:
         raise ValueError('沙箱浏览器引擎设置无效。')
@@ -185,7 +189,7 @@ def load_settings(local=None):
     result['region'] = str(result['region']).upper()
     if not valid_language(result.get('language')):
         raise ValueError('沙箱浏览器语言设置无效。')
-    if not isinstance(result.get('start_url'), str) or not result['start_url'].startswith(('http://', 'https://')):
+    if not isinstance(result.get('start_url'), str) or not (result['start_url'] == 'about:blank' or result['start_url'].startswith(('http://', 'https://'))):
         raise ValueError('沙箱浏览器起始地址无效。')
     return result
 
@@ -202,7 +206,7 @@ def save_settings(values, local=None):
     current['region'] = str(current['region']).upper()
     if not valid_language(current.get('language')):
         raise ValueError('沙箱浏览器语言设置无效。')
-    if not isinstance(current['start_url'], str) or not current['start_url'].startswith(('http://', 'https://')):
+    if not isinstance(current['start_url'], str) or not (current['start_url'] == 'about:blank' or current['start_url'].startswith(('http://', 'https://'))):
         raise ValueError('沙箱浏览器起始地址无效。')
     root = browser_root(local)
     root.mkdir(parents=True, exist_ok=True)
@@ -591,7 +595,7 @@ def launch(url=None, local=None, app=False, gui=False, engine=None, language=Non
     profile = gui_profile_path(local) if gui else profile_path(local)
     profile.parent.mkdir(parents=True, exist_ok=True)
     target = url or ('http://127.0.0.1/' if gui else settings['start_url'])
-    if not isinstance(target, str) or not target.startswith(('http://', 'https://', 'file://')):
+    if not isinstance(target, str) or not (target == 'about:blank' or target.startswith(('http://', 'https://', 'file://'))):
         raise ValueError('浏览器地址无效。')
     already = running_pids(profile, use_cache=False)
     if not already and not gui:
@@ -718,6 +722,21 @@ def status(local=None):
         'environment': environment_status(),
         'touches_default_browser': False,
     }
+
+
+def open_environment_checks(local=None):
+    opened = []
+    engine = None
+    for url in CHECK_URLS:
+        try:
+            result = launch(url, local=local, engine=engine)
+        except (OSError, RuntimeError, ValueError) as exc:
+            if opened:
+                raise RuntimeError('第一个检测网站已打开，第二个打开失败，请重试。') from exc
+            raise
+        engine = result.get('engine') or engine
+        opened.append(url)
+    return {'opened': opened, 'engine': engine}
 
 
 def open_check_page(base_url, local=None, region=None, language=None, timezone=None):

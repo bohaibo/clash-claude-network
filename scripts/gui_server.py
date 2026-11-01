@@ -495,8 +495,14 @@ class App:
         profile = sandbox_browser.profile_path(self.local)
         preferences = read_json(profile / 'Default' / 'Preferences', {})
         current['browser_language'] = (preferences.get('intl', {}).get('accept_languages') or '独立资料尚未设置语言（设置页默认值不代表浏览器当前值）')
-        rtc = preferences.get('webrtc', {})
-        current['webrtc_protection'] = ('开启' if rtc.get('ip_handling_policy') == 'disable_non_proxied_udp' and rtc.get('multiple_routes_enabled') is False and rtc.get('nonproxied_udp_enabled') is False else '尚未设置')
+        try:
+            import webrtc_system
+            rtc = webrtc_system.status()
+            current['webrtc_protection'] = rtc['state']
+            current['webrtc_browsers'] = rtc['browsers']
+        except (OSError, ValueError):
+            current['webrtc_protection'] = '未能确认'
+
         # Read only summaries; never serialize node definitions or proxy URLs.
         try:
             import client
@@ -1081,19 +1087,7 @@ class App:
             if action == 'open':
                 return sandbox_browser.launch(local=self.local)
             if action == 'check':
-                try:
-                    language = sandbox_browser.load_settings(self.local)['language']
-                except (ValueError, OSError):
-                    language = 'zh-SG'
-                region = str(self.plan().get('region') or 'SG').upper()
-                try:
-                    timezone = region_profile.get(region)['iana']
-                except ValueError:
-                    timezone = None
-                return sandbox_browser.open_check_page(
-                    self.base_url, local=self.local,
-                    region=region, language=language, timezone=timezone,
-                )
+                return sandbox_browser.open_environment_checks(local=self.local)
             if action == 'close':
                 return sandbox_browser.close(local=self.local)
             if action == 'reset':

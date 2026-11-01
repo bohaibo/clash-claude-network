@@ -122,14 +122,15 @@ async function supplement(ctx) {
   const ok = await ctx.confirm({
     title: '执行补充配置？',
     subtitle: '不重新选择节点，不关闭浏览器',
-    description: '会扫描当前本地防火墙规则与全部网卡，禁用非项目的出站放行规则、关闭启用的 IPv6 绑定、系统定位、自动时区和自动校时，按所选节点地区设置国家/区域格式/时区，并把改动记录到关联快照。入站规则保留。',
+    description: '会扫描当前本地防火墙规则与全部网卡，禁用非项目的出站放行规则、关闭启用的 IPv6 绑定、系统定位、自动时区和自动校时，按所选节点地区设置国家/区域格式/时区，并配置 Chrome、Edge、Firefox 的 WebRTC 保护，将改动记录到关联快照。入站规则保留。',
     items: [
       { title: '可能影响', text: '新软件、其他 VPN、Docker/WSL、远程控制和依赖 IPv6 的内网资源可能失效。' },
+      { title: '全浏览器 WebRTC', text: '覆盖 Chrome、Edge、Firefox 普通窗口，需重启浏览器；Firefox 会关闭 WebRTC，网页语音和视频可能受影响。其他浏览器未验证。' },
       { title: '不运行测试', text: '补充配置不会运行网络或断网测试；需要时请另行检查连通性。' },
     ],
     note: '需要已有完整配置记录和可校验的原始快照；缺失时会停止，不会覆盖首次基线。',
     confirmText: '补充配置',
-    requireCheck: '我已了解补充配置会修改防火墙、网卡、定位及国家/时间设置。',
+    requireCheck: '我已了解补充配置会修改防火墙、网卡、定位、国家/时间及浏览器 WebRTC 设置。',
   });
   if (!ok) return;
   ctx.startJob({ action: 'supplement', confirm: 'SUPPLEMENT' });

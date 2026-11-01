@@ -32,7 +32,7 @@ export function render(ctx) {
   root.append(ui.card({ title: '浏览器沙箱的准确含义' },
     ui.el('ul', { class: 'check-list' },
       ui.el('li', {}, '使用独立 --user-data-dir；Cookie、历史、扩展和登录与默认浏览器分开。'),
-      ui.el('li', {}, '不写注册表浏览器策略，不编辑默认 Chrome/Edge 的 Preferences，不关闭默认浏览器。'),
+      ui.el('li', {}, 'WebRTC 保护覆盖 Chrome、Edge、Firefox 普通窗口；修改前备份策略，恢复时还原。不编辑默认浏览器资料，也不自动关闭浏览器。'),
       ui.el('li', {}, '通过启动参数与资料首选项关闭浏览器独立 DoH、限制 WebRTC 非代理 UDP、关闭 QUIC 和浏览器同步。'),
       ui.el('li', {}, '这不是操作系统级沙箱，也不是指纹伪装；扩展、其他浏览器、Docker/WSL 仍需单独验证。'),
       ui.el('li', {}, '自检页只显示浏览器自报信息和 WebRTC 候选，不能证明出口 IP、DNS 泄漏或账号可用性。'))));

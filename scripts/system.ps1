@@ -183,7 +183,17 @@ function Restore-SystemLocation {
     }
   }
 }
+function Invoke-WebRtcPolicy([string]$PolicyAction) {
+  $previous=$env:CCN_SNAPSHOT
+  try {
+    $env:CCN_SNAPSHOT=$stateDir
+    $output=& $Python (Join-Path $PSScriptRoot 'webrtc_system.py') $PolicyAction
+    if($LASTEXITCODE -ne 0){throw '全浏览器 WebRTC 设置或恢复未完成，请查看错误并重试。'}
+    if($output){$result=($output | Select-Object -Last 1) | ConvertFrom-Json;if($result.skipped){Write-Warning ([string]$result.skipped)}}
+  } finally { $env:CCN_SNAPSHOT=$previous }
+}
 if($Action -eq 'snapshot') {
+  Invoke-WebRtcPolicy 'snapshot'
   Save-RegionTimeState $stateDir
   Save-LocationState
   if(Test-Path -LiteralPath $file){Write-Output '已有系统状态快照，保留原文件不覆盖。';return}
@@ -244,6 +254,7 @@ if($Action -eq 'repair-bindings') {
   return
 }
 $saved=Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+if($Action -eq 'restore' -and (Test-Path -LiteralPath (Join-Path $stateDir 'webrtc-policies.json'))){Invoke-WebRtcPolicy 'verify'}
 # Validate legacy journals before touching firewall, IPv6, language or proxies.
 # In particular, a failed rollback must not change more state before discovering
 # that its additional-rule journal is unreadable.
@@ -265,6 +276,7 @@ if($Action -eq 'supplement'){
     Assert-StrictFirewall -coreProgram ([string]$plan.core_program)
     Set-SystemRegionTime $stateDir $RegionCode $CultureName $TimeZoneId
     Disable-SystemLocation
+    Invoke-WebRtcPolicy 'apply'
   }catch{
     $failure=$_
     try{if($outbound.Count){$outbound | Enable-NetFirewallRule -ErrorAction Stop}}catch{Write-Warning '本次出站规则回滚未完成，请使用菜单 3 恢复。'}
@@ -280,6 +292,7 @@ if($Action -eq 'restore') {
   $languageRestoreFailed=$false
   $regionRestoreFailed=$false
   Restore-Firewall $saved
+  try{Invoke-WebRtcPolicy 'restore'}catch{$regionRestoreFailed=$true;Write-Warning ('WebRTC 恢复失败：'+$_.Exception.Message)}
   try{Restore-SystemLocation}catch{$regionRestoreFailed=$true;Write-Warning ('定位恢复失败：'+$_.Exception.Message)}
   try{Restore-SystemRegionTime $stateDir}catch{$regionRestoreFailed=$true;Write-Warning ('区域/时间恢复失败：'+$_.Exception.Message)}
   Set-Service -Name clash_verge_service -StartupType $saved.serviceStartupType
@@ -320,6 +333,7 @@ if($Action -eq 'restore') {
   if($languageRestoreFailed){throw '语言列表尚未还原，其余系统设置已继续处理。恢复未完成，请检查后重试。'}
   return
 }
+Invoke-WebRtcPolicy 'apply'
 Set-SystemRegionTime $stateDir $RegionCode $CultureName $TimeZoneId
 Disable-SystemLocation
 # Applying does not create any browser/account identity or install Claude.

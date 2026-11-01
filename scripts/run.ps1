@@ -318,7 +318,7 @@ if($Action -eq 'supplement'){
   if($LASTEXITCODE -ne 0){throw '原始快照校验失败，未补充任何配置。'}
   if(!(Test-Path -LiteralPath (Join-Path $snapshotPath 'system.json'))){throw '缺少系统恢复记录，无法补充配置。'}
   if(!$Acknowledged){
-   Write-Host '补充配置会禁用非项目的本地出站放行规则、关闭当前启用的网卡 IPv6、系统定位、自动时区和自动校时，按节点地区设置国家/区域格式/时区，并累积记录供「快照与恢复」撤销。' -ForegroundColor Yellow
+   Write-Host '补充配置会禁用非项目的本地出站放行规则、关闭当前启用的网卡 IPv6、系统定位、自动时区和自动校时，按节点地区设置国家/区域格式/时区，并配置 Chrome、Edge、Firefox 的 WebRTC 策略（网页通话可能受影响），累积记录供「快照与恢复」撤销。' -ForegroundColor Yellow
    Write-Host '入站规则扫描后保留。可能影响新软件、VPN、Docker/WSL、远程控制；不运行网络或断网测试。'
    $answer=Read-Host '确认执行请输入 1（直接回车 = 取消）'
    if($answer -ne '1' -and $answer -cne '是' -and $answer -ine 'YES'){Write-Host '已取消，没有做任何改动。';return}
@@ -362,7 +362,7 @@ if(!$Acknowledged) {
   Write-PlanItem 5 '清理系统、WinHTTP、环境变量与 Git/npm/Docker 的代理覆盖' '普通本机流量交给 TUN 分流；已打开的终端需重新启动，容器内部行为未验证'
   Write-Host ''
   Write-Host '执行时会逐条显示进度。中途失败可以在「快照与恢复」中还原本项目记录的改动；后加订阅和正常更新会保留。' -ForegroundColor White
-  Write-Host '本项目的浏览器改动只发生在独立沙箱资料目录，不会修改或关闭本机默认 Chrome / Edge。' -ForegroundColor Cyan
+  Write-Host '本项目的 WebRTC 保护会写入 Chrome、Edge、Firefox 的机器级策略，需重启浏览器，网页语音和视频可能受影响；不会自动关闭浏览器。' -ForegroundColor Cyan
  }
  else{
   Write-Host ''

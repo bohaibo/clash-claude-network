@@ -16,10 +16,10 @@ export function render(ctx) {
   root.append(ui.pageHeader({
     eyebrow: 'SANDBOX',
     title: '浏览器沙箱',
-    description: 'Claude 使用独立的浏览器资料目录启动。本项目不再读取或写入本机默认 Chrome / Edge 的注册表策略、语言偏好或登录数据。',
+    description: 'Claude 使用独立的浏览器资料目录启动。语言和登录数据保留在独立资料中；WebRTC 保护也会通过机器级策略覆盖 Chrome、Edge、Firefox 的普通窗口。',
     actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) })],
   }));
-  root.append(ui.note('这是资料目录级隔离，不是操作系统级沙箱，也不是指纹伪装。默认浏览器完全不会被修改或关闭。', 'info'));
+  root.append(ui.note('这是资料目录级隔离，不是操作系统级沙箱，也不是指纹伪装。仅 WebRTC 策略覆盖受支持的普通浏览器；不会自动关闭浏览器，实际防泄露效果需检测。', 'info'));
   root.append(ui.note('一键配置会按节点地区设置系统时区和沙箱浏览器语言，让 Claude 桌面与沙箱浏览器读取同一时区；语言需重新打开沙箱，系统时区通常需重启。', 'info'));
   root.append(statusCard(ctx, browser));
   root.append(settingsCard(ctx, browser));
@@ -88,7 +88,7 @@ function isolationCard(browser) {
         ui.el('h3', { text: '已实现' }),
         ui.el('ul', { class: 'check-list' },
           ui.el('li', {}, '独立 --user-data-dir，登录 Cookie 与默认浏览器分开'),
-          ui.el('li', {}, '不写 HKCU/HKLM 浏览器策略，不编辑默认资料 Preferences'),
+          ui.el('li', {}, '仅 WebRTC 使用可恢复的全浏览器策略，不编辑默认资料'),
           ui.el('li', {}, '启动参数限制 WebRTC 非代理 UDP，关闭浏览器独立 DoH 与 QUIC'),
           ui.el('li', {}, '网络由 Windows TUN 接管，不额外配置浏览器代理'),
           ui.el('li', {}, '可单独关闭、重置，不影响默认浏览器'))),
@@ -105,10 +105,10 @@ function actionsCard(ctx, browser) {
   return ui.card({ title: '操作' },
     ui.el('div', { class: 'action-grid' },
       ui.el('div', { class: 'action-row' },
-        ui.el('div', {}, ui.el('strong', { text: '打开沙箱浏览器' }), ui.el('p', { text: '在独立资料目录中打开 Claude；首次需要自行登录。' })),
+        ui.el('div', {}, ui.el('strong', { text: '打开沙箱浏览器' }), ui.el('p', { text: '在独立资料目录中打开空白页，不自动访问任何网站。' })),
         ui.button(browser.running ? '再开一个窗口' : '打开沙箱浏览器', { variant: 'ink', icon: 'external', disabled: !engineReady || ctx.busy, onClick: () => openBrowser(ctx) })),
       ui.el('div', { class: 'action-row' },
-        ui.el('div', {}, ui.el('strong', { text: '打开环境自检页' }), ui.el('p', { text: '显示浏览器自报的语言、时区和 WebRTC 候选；不会证明出口 IP 或指纹。' })),
+        ui.el('div', {}, ui.el('strong', { text: '打开环境自检页' }), ui.el('p', { text: '在独立浏览器中打开 IP／地区环境检测和 WebRTC 泄露检测两个网站。' })),
         ui.button('打开自检页', { variant: 'secondary', icon: 'shield', disabled: !engineReady || ctx.busy, onClick: () => openCheck(ctx) })),
       ui.el('div', { class: 'action-row' },
         ui.el('div', {}, ui.el('strong', { text: '关闭沙箱浏览器' }), ui.el('p', { text: '只关闭本项目的资料目录进程，不影响默认浏览器。' })),
@@ -151,7 +151,7 @@ async function openBrowser(ctx) {
 async function openCheck(ctx) {
   try {
     await ctx.api.post('/api/browser', { action: 'check' });
-    ui.toast('已在沙箱浏览器中打开自检页。', 'ok');
+    ui.toast('已在沙箱浏览器中打开两个环境检测网站。', 'ok');
   } catch (error) {
     ui.toast(error.message || '打开自检页失败。', 'bad');
   }

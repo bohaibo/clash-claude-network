@@ -4,6 +4,7 @@ import * as ui from '../ui.js';
 const IMPACT = [
   { title: 'Clash 客户端', text: '为所选订阅关联独立的项目增强脚本与固定节点组；保留原自定义脚本和现有节点。' },
   { title: '严格出站防火墙', text: '保留四条项目放行并阻断 SharedAccess 服务出站。Mihomo 停止时国内公网也会断开。' },
+  { title: '全浏览器 WebRTC', text: '设置 Chrome、Edge、Firefox 策略；可能影响网页语音和视频，Firefox 关闭 WebRTC。需重启浏览器，其他浏览器和实际泄露效果未验证。' },
   { title: '系统 IPv6', text: '全局关闭并关闭现有网卡的 IPv6 绑定；依赖 IPv6 的内网资源可能不可用，需要重启 Windows 才完全生效。' },
   { title: '系统自动定位', text: '通过 Windows 策略关闭系统定位，地图、天气等定位功能会受影响；恢复时还原原有策略。' },
   { title: '区域与时区', text: '关闭自动时区和自动校时，按所选节点地区设置系统国家、区域格式和时区；时间按时区显示。长期关闭校时可能产生误差，恢复会还原原状态。' },
@@ -211,8 +212,8 @@ function renderImpact(ctx) {
   const groups = [
     ['系统与地区', rows.slice(0, 7)],
     ['网络保护', [...rows.slice(7, 9),
-      ['WebRTC 防泄露', now.webrtc_protection, '开启', '仅独立浏览器，打开时生效'],
-      ['DNS 防泄露', now.dns_protection, '开启', '防止域名查询绕过代理']], '开启表示已配置保护，实际效果可在浏览器实测页检测。'],
+      ['WebRTC 防泄露（全浏览器）', now.webrtc_protection, '开启', '覆盖 Chrome、Edge、Firefox 普通窗口；需重启浏览器，其他浏览器未验证'],
+      ['DNS 防泄露', now.dns_protection, '开启', '防止域名查询绕过代理']], '开启表示已写入保护策略；实际效果需检测，Edge 个人账号资料可能不采用策略。'],
     ['代理设置', rows.slice(9, 15), '关闭之前分散在各处的代理设置，统一由 TUN 模式接管网络。'],
     ['网站访问', rows.slice(15)],
   ];
@@ -233,7 +234,7 @@ function renderImpact(ctx) {
           ui.el('th', { scope: 'row' }, ui.el('span', { text: label }), description ? ui.el('small', { class: 'config-explanation', text: description }) : null),
           ui.el('td', { 'data-label': '当前' }, valueBadge(current)),
           ui.el('td', { 'data-label': '配置后', class: 'config-target' }, valueBadge(desired))))))),
-    ui.note('配置前会备份。配置时网络会短暂中断；代理核心停止运行时，所有外网连接都会被拦住。关闭自动校时后，时间可能逐渐出现误差。浏览器语言需重新打开后生效，部分设置需要重启电脑。Windows 界面语言保持不变。', 'warn')));
+    ui.note('配置前会备份。配置时网络会短暂中断；代理核心停止运行时，所有外网连接都会被拦住。关闭自动校时后，时间可能逐渐出现误差。浏览器语言需重新打开后生效，部分设置需要重启电脑。Windows 界面语言保持不变。WebRTC 保护会修改 Chrome、Edge、Firefox 的浏览器策略，可能影响网页语音和视频通话；Firefox 将关闭 WebRTC。', 'warn')));
 
 }
 
@@ -434,7 +435,7 @@ async function beginApply(ctx) {
   const ok = await ctx.confirm({
     title: '开始配置网络？',
     subtitle: form.node + ' · 出口 ' + form.region,
-    description: '配置会关闭 Clash Verge、写入项目增强脚本、按节点地区应用系统与沙箱浏览器设置，并运行网络验收。界面与默认浏览器不会被关闭。',
+    description: '配置会关闭 Clash Verge、写入项目增强脚本、按节点地区应用系统与沙箱浏览器设置，并运行网络验收。界面与默认浏览器不会被关闭。WebRTC 保护将应用到 Chrome、Edge、Firefox，网页通话可能受影响；需重启浏览器。',
     items: IMPACT,
     note: 'Mihomo 停止时所有公网（包括国内网站）都会短暂断开；请先保存正在进行的网络工作。',
     noteType: 'warn',

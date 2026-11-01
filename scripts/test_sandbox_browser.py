@@ -23,6 +23,32 @@ class SandboxBrowser(unittest.TestCase):
         self.local = Path(temp.name)
         self.profile = sb.profile_path(self.local)
 
+    def test_default_home_is_blank_and_legacy_default_migrates(self):
+        self.assertEqual(sb.load_settings(self.local)['start_url'], 'about:blank')
+        path = sb.settings_path(self.local)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'start_url': 'https://claude.ai/'}), encoding='utf-8')
+        self.assertEqual(sb.load_settings(self.local)['start_url'], 'about:blank')
+        self.assertEqual(sb.save_settings({'language': 'en-US'}, self.local)['start_url'], 'about:blank')
+
+    def test_only_the_blank_about_address_is_allowed(self):
+        with self.assertRaises(ValueError):
+            sb.save_settings({'start_url': 'about:settings'}, self.local)
+        sb.save_settings({'start_url': 'about:blank'}, self.local)
+
+    def test_environment_checks_open_both_requested_sites_in_same_engine(self):
+        with patch.object(sb, 'launch', side_effect=[{'engine': 'edge'}, {'engine': 'edge'}]) as launch:
+            result = sb.open_environment_checks(self.local)
+        self.assertEqual(result['opened'], list(sb.CHECK_URLS))
+        self.assertEqual(launch.call_args_list[0].args, ('https://ip.net.coffee/claude/',))
+        self.assertEqual(launch.call_args_list[1].args, ('https://browserleaks.com/webrtc',))
+        self.assertEqual(launch.call_args_list[1].kwargs, {'local': self.local, 'engine': 'edge'})
+
+    def test_second_check_failure_reports_partial_open(self):
+        with patch.object(sb, 'launch', side_effect=[{'engine': 'chrome'}, RuntimeError('failed')]):
+            with self.assertRaisesRegex(RuntimeError, '第一个检测网站已打开'):
+                sb.open_environment_checks(self.local)
+
     def test_desktop_shell_launch_is_preferred_to_direct_child(self):
         found = {'name': 'edge', 'path': 'msedge.exe'}
         with patch.object(sb, '_shell_launch', return_value=33), \
