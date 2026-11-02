@@ -3,6 +3,7 @@ from checks import require
 from pathlib import Path
 import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.request,uuid
 import yaml
+from atomic_files import replace_file
 from baseline import is_runtime_snapshot_file,verify_incremental_files,default_snapshot,pin_baseline
 from routing_checks import audit_ingress,audit_lan_provider,lan_domain,local_network,normalize_lan_cidrs
 
@@ -19,7 +20,7 @@ FAKE=ipaddress.ip_network('198.18.0.0/15')
 def load(path):return yaml.safe_load(path.read_text(encoding='utf-8-sig'))
 def write(path,data):
  path.parent.mkdir(parents=True,exist_ok=True);temp=path.with_name(path.name+'.new')
- temp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(path)
+ temp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8');replace_file(temp,path)
 def snapshot_roots():
  return sorted([p for p in SNAPSHOTS.glob('*') if (p/'manifest.json').is_file()],key=lambda p:p.name,reverse=True)
 def migrate_legacy_baseline():

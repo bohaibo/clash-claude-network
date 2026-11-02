@@ -136,11 +136,14 @@ class Verification(unittest.TestCase):
     self.assertTrue(kernel.GetExitCodeProcess(handle,ctypes.byref(status)))
     self.assertNotEqual(status.value,259,'Timed-out command left its helper alive')
    finally:kernel.CloseHandle(handle)
- def test_configuration_never_requests_claude_http(self):
-  with patch.object(verify,'curl',side_effect=self.fake_curl) as curl:
+ def test_configuration_never_requests_claude_http_or_dns(self):
+  with patch.object(verify,'curl',side_effect=self.fake_curl) as curl, \
+       patch.object(verify,'query',return_value={'passed':True,'ips':['198.18.0.1']}) as query:
    report=verify.verify(True)
   self.assertTrue(report['success']);self.assertIn('claude_http',report['not_tested'])
+  self.assertIn('claude_dns',report['not_tested'])
   self.assertFalse(any('claude' in call.args[0] or 'anthropic' in call.args[0] for call in curl.call_args_list))
+  self.assertFalse(any('claude' in call.kwargs.get('host','') or 'anthropic' in call.kwargs.get('host','') for call in query.call_args_list))
  def test_missing_tools_are_explicitly_untested(self):
   self.git.return_value={'tested':False,'reason':'git not installed'}
   report=verify.verify();self.assertTrue(report['success'])
@@ -289,5 +292,16 @@ class Stun(unittest.TestCase):
  def test_truncated_attribute_rejected(self):self.assertFalse(self.probe(attribute=struct.pack('!HH',0x0020,8))['ok'])
  def test_private_mapping_rejected(self):
   self.assertFalse(self.probe(attribute=struct.pack('!HHBBH',1,8,0,1,4321)+socket.inet_aton('192.168.1.1'))['ok'])
+
+class NoClaudeNetworkTests(unittest.TestCase):
+ def test_claude_targets_are_rejected_before_network_or_process_io(self):
+  with patch.object(verify.subprocess,'run') as process, patch.object(verify.socket,'socket') as sock:
+   for host in (*verify.NO_TEST_DOMAINS,'API.ANTHROPIC.COM.','160.79.104.1','::ffff:160.79.104.1'):
+    with self.subTest(host=host):
+     with self.assertRaises(ValueError):verify.query('8.8.8.8',53,1,host=host)
+     with self.assertRaises(ValueError):verify.stun(host=host)
+     url_host='['+host+']' if ':' in host else host
+     with self.assertRaises(ValueError):verify.curl('https://'+url_host+'/')
+   process.assert_not_called();sock.assert_not_called()
 
 if __name__=='__main__':unittest.main()

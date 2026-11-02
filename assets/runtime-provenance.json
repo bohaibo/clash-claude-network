@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "checked_on": "2026-11-02",
+  "trust": "Official HTTPS sources; detached release signatures are not independently verified.",
+  "files": [
+    {
+      "name": "python-3.13.17-embed-amd64.zip",
+      "sha256": "9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38",
+      "download_url": "https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip",
+      "source_url": "https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip.sigstore",
+      "method": "sigstore-published-digest"
+    },
+    {
+      "name": "node-v26.13.0-win-x64.zip",
+      "sha256": "dcc60d59a0746999f99064a01c020445d54d84228c691cdbf25b49ac3b59150a",
+      "download_url": "https://nodejs.org/dist/v26.13.0/node-v26.13.0-win-x64.zip",
+      "source_url": "https://nodejs.org/dist/v26.13.0/SHASUMS256.txt",
+      "method": "shasums256"
+    },
+    {
+      "name": "get-pip.py",
+      "sha256": "f4448a01e3ab2914c65f4ca59d4cacba6b2dbde19a483fbac46587f8bbaff424",
+      "download_url": "https://bootstrap.pypa.io/get-pip.py",
+      "source_url": "https://bootstrap.pypa.io/get-pip.py",
+      "method": "official-content-sha256"
+    }
+  ]
+}

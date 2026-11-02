@@ -1,3 +1,14 @@
+function Assert-NoPendingSettings([string]$LocalDir) {
+ $root=Join-Path $LocalDir 'gui/settings-transactions'
+ foreach($folder in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)){
+  if($folder.Name -notmatch '^[a-f0-9]{32}$'){continue}
+  $journal=Join-Path $folder.FullName 'transaction.json'
+  if(!(Test-Path -LiteralPath $journal)){continue}
+  try{$record=Get-Content -LiteralPath $journal -Raw -Encoding UTF8 | ConvertFrom-Json}catch{throw '设置恢复记录损坏，请在界面快照与恢复页面检查。'}
+  if($record.phase -cnotin @('committed','rolled_back')){throw '存在未完成的设置保存，请先在界面快照与恢复页面恢复原设置。'}
+ }
+}
+
 # A pending rollback belongs to its original snapshot, never the newest one.
 function Resolve-PendingFirewall([string]$LocalDir,[string]$Python,[string]$ExpectedToken,[switch]$Force) {
  $file=Join-Path $LocalDir 'pending-firewall.json'

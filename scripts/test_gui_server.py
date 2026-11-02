@@ -179,7 +179,10 @@ class GuiServer(unittest.TestCase):
         self.assertEqual(status['state'], 'cancelled')
 
     def test_update_settings_persist_and_revert_on_failure(self):
-        with patch.object(self.app, '_update_task') as update_task, \
+        def checkpoint(action, *args, state_file=None):
+            if action == 'snapshot':
+                Path(state_file).write_text('{}', encoding='utf-8')
+        with patch.object(self.app, '_update_task', side_effect=checkpoint) as update_task, \
              patch.object(self.app, 'configured', return_value=(True, '')):
             value = self.app.save_update_settings({'mode': 'manual', 'time': '08:00'})
             self.assertEqual(value['mode'], 'manual')
@@ -193,8 +196,22 @@ class GuiServer(unittest.TestCase):
             self.assertEqual(json.loads((self.local / 'ui-settings.json').read_text(encoding='utf-8'))['update'],
                              {'mode': 'manual', 'time': '08:00', 'days': 1})
 
+    def test_shutdown_is_blocked_while_settings_are_saving(self):
+        cookie = self.session_cookie()
+        self.app._settings_busy = True
+        try:
+            status, _, _ = self.request('POST', '/api/shutdown',
+                {'Cookie': cookie, **self.token_headers()}, '{}')
+            self.assertEqual(status, 409)
+            self.assertFalse(self.app.stopping)
+        finally:
+            self.app._settings_busy = False
+
     def test_update_settings_passes_interval_days(self):
-        with patch.object(self.app, '_update_task') as update_task, \
+        def checkpoint(action, *args, state_file=None):
+            if action == 'snapshot':
+                Path(state_file).write_text('{}', encoding='utf-8')
+        with patch.object(self.app, '_update_task', side_effect=checkpoint) as update_task, \
              patch.object(self.app, 'configured', return_value=(True, '')):
             value = self.app.save_update_settings({'mode': 'scheduled', 'time': '09:00', 'days': 7})
             self.assertEqual(value['days'], 7)

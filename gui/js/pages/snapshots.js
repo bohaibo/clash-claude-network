@@ -19,6 +19,7 @@ export function render(ctx) {
       ui.button('保存当前快照', { variant: 'secondary', icon: 'plus', disabled: ctx.busy, onClick: () => saveSnapshot(ctx) }),
     ],
   }));
+  root.append(settingsRecoveryCard(ctx));
   root.append(baselineCard(ctx));
   root.append(listCard(ctx, snapshots));
   root.append(ui.card({ title: '恢复边界', subtitle: '恢复不是 Windows 重置，也不会回放旧节点配置。' },
@@ -33,6 +34,19 @@ export function render(ctx) {
       ui.el('div', {}, ui.el('strong', { text: '恢复最早状态并重新配置' }), ui.el('p', { text: '使用固定首次恢复点，再沿用当前精确节点重新配置。会短暂中断网络，并启动独立本机看护。' })),
       ui.button('前往网络环境', { variant: 'secondary', icon: 'network', onClick: () => ctx.navigate('network') }))));
   return root;
+}
+
+function settingsRecoveryCard(ctx) {
+  const pending = ctx.state.operation?.settings_pending || [];
+  return ui.card({ title: '未完成的设置保存', subtitle: '这里只恢复更新方式和计划任务，不更改网络快照或首次基线。' },
+    pending.length ? pending.map(row => ui.el('div', { class: 'action-row' },
+      ui.el('div', {}, ui.el('strong', { text: row.id }),
+        ui.el('p', { text: row.error || '检测到中断或恢复失败的设置保存，可恢复修改前的状态。' })),
+      ui.button('恢复原设置', { variant: 'secondary', disabled: ctx.busy, onClick: async () => {
+        const ok = await ctx.confirm({ title: '恢复原设置？',
+          description: '还原此次保存前的更新方式和计划任务。不会恢复或删除网络快照，也不会重新配置网络。', confirmText: '恢复原设置' });
+        if (ok) ctx.startJob({ action: 'settings-recover', transaction: row.id, confirm: row.id });
+      } }))) : ui.note('没有待恢复的设置保存。', 'info'));
 }
 
 function baselineCard(ctx) {

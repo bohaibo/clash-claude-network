@@ -272,6 +272,7 @@ $operationStream=[IO.File]::Open((Join-Path $local 'operation.lock'),[IO.FileMod
 try{$operationStream.Lock(0,1)}catch{$operationStream.Dispose();throw '本项目另一个操作正在执行，请稍后重试。'}
 try {
 Resolve-PendingFirewall -LocalDir $local -Python $python
+Assert-NoPendingSettings -LocalDir $local
 $env:CCN_SNAPSHOT=$null
 if($Snapshot){
  if([IO.Path]::GetFileName($Snapshot) -ne $Snapshot -or $Snapshot -in @('.','..')){throw '快照只能使用 .local/snapshots 内的目录名。'}

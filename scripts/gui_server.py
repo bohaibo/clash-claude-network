@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import threading
 import time
 import traceback
 import urllib.request
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +33,8 @@ import gui_settings
 import node_region
 import region_profile
 import sandbox_browser
+from operation_lock import operation_lock, pending_settings
+from atomic_files import replace_file
 
 PROJECT = Path(__file__).resolve().parent.parent
 LOCAL = PROJECT / '.local'
@@ -54,6 +58,10 @@ CONFIRM = {
 }
 ADMIN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure'}
 RUN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure'}
+LOCAL_ACTIONS = {
+    'browser-open': 'open', 'browser-check': 'check', 'browser-close': 'close',
+    'browser-reset': 'reset', 'browser-register': 'register-default', 'settings-recover': None,
+}
 PUBLIC_FILES = {'sandbox-check.html', 'sandbox-check.js', 'sandbox-check.css', 'favicon.svg'}
 MIME = {
     '.html': 'text/html; charset=utf-8',
@@ -90,8 +98,11 @@ def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.new')
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    with temporary.open('w', encoding='utf-8') as stream:
+        stream.write(json.dumps(value, ensure_ascii=False, indent=2))
+        stream.flush()
+        os.fsync(stream.fileno())
+    replace_file(temporary, path)
 
 
 def append_event(path, event):
@@ -107,12 +118,12 @@ def read_events(path, limit=400):
     if not path.is_file():
         return []
     try:
-        text = path.read_text(encoding='utf-8-sig', errors='replace')
+        text = tail_text(path, limit=800000, lines=max(limit * 4, 1600))
     except OSError:
         return []
     events = []
     for line in text.splitlines():
-        line = line.strip()
+        line = line.strip().lstrip('\ufeff')
         if not line:
             continue
         try:
@@ -129,7 +140,11 @@ def tail_text(path, limit=24000, lines=140):
     if not path.is_file():
         return ''
     try:
-        data = path.read_text(encoding='utf-8', errors='replace')
+        with path.open('rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - (limit * 4 + 4)))
+            data = stream.read(limit * 4 + 4).decode('utf-8', errors='replace')
     except OSError:
         return ''
     values = data.splitlines()[-lines:]
@@ -224,6 +239,9 @@ class App:
         self.active_job = None
         self.jobs = {}
         self._lock = threading.RLock()
+        self._background = {}
+        self._settings_busy = False
+        self._shutdown_requested = False
         self._task_cache = (0.0, None)
         self._service_cache = (0.0, None)
         self._nodes_cache = (0.0, None)
@@ -330,9 +348,6 @@ class App:
         return False, ''
 
     def task_status(self):
-        now = time.monotonic()
-        if self._task_cache[1] is not None and now - self._task_cache[0] < 12:
-            return self._task_cache[1]
         script = self.scripts / 'update_task.ps1'
         result = {'installed': None, 'error': ''}
         try:
@@ -344,13 +359,9 @@ class App:
                 result = parsed
         except (OSError, subprocess.SubprocessError) as exc:
             result['error'] = '读取规则更新任务失败：' + type(exc).__name__
-        self._task_cache = (now, result)
         return result
 
     def service_status(self):
-        now = time.monotonic()
-        if self._service_cache[1] is not None and now - self._service_cache[0] < 15:
-            return self._service_cache[1]
         command = (
             "$ErrorActionPreference='SilentlyContinue';"
             "$s=Get-Service -Name clash_verge_service;"
@@ -369,7 +380,6 @@ class App:
                 result = parsed
         except (OSError, subprocess.SubprocessError):
             pass
-        self._service_cache = (now, result)
         return result
 
     def update_summary(self):
@@ -468,6 +478,7 @@ class App:
                 'stage': str(status.get('stage') or ''),
                 'success': bool(status.get('success')),
                 'error': str(status.get('error') or ''),
+            'record_warning': status.get('record_warning') or (job.get('monitor_warning') if status.get('state') == 'running' else ''),
                 'time': datetime.datetime.fromtimestamp(folder.stat().st_mtime).astimezone().isoformat(timespec='seconds'),
                 'recovered': (folder / 'recovery-result.json').is_file(),
             })
@@ -523,6 +534,85 @@ class App:
         self._preview_cache = (time.monotonic(), value)
         return value
 
+    def background_value(self, name, loader, default, ttl=30):
+        with self._lock:
+            entry = self._background.setdefault(name, {'value': default, 'at': 0, 'running': False,
+                'generation': 0, 'read_at': '', 'error': ''})
+            if not entry['running'] and time.monotonic() - entry['at'] >= ttl:
+                entry['running'] = True
+                generation = entry['generation']
+                def collect():
+                    try:
+                        value = loader()
+                        issue = self.state_issue(name, value)
+                    except Exception as exc:
+                        self.log('state collection failed: ' + name + ': ' + type(exc).__name__)
+                        with self._lock:
+                            if entry['generation'] == generation:
+                                entry['error'] = '读取失败（' + type(exc).__name__ + '），显示上次结果，未验证当前状态。'
+                    else:
+                        with self._lock:
+                            if entry['generation'] == generation:
+                                if issue:
+                                    entry['error'] = issue + '显示上次结果，未验证当前状态。'
+                                else:
+                                    entry['value'] = value
+                                    entry['read_at'] = now_iso()
+                                    entry['error'] = ''
+                    finally:
+                        with self._lock:
+                            if entry['generation'] == generation:
+                                entry['at'] = time.monotonic()
+                            elif name == 'preview':
+                                self._preview_cache = None
+                            elif name == 'update':
+                                self._task_cache = (0.0, None)
+                            elif name == 'service':
+                                self._service_cache = (0.0, None)
+                            entry['running'] = False
+                threading.Thread(target=collect, daemon=True, name='ccn-state-' + name).start()
+            return entry['value']
+
+    def invalidate_background(self, *names):
+        with self._lock:
+            for name in names or tuple(self._background):
+                entry = self._background.get(name)
+                if entry is not None:
+                    entry['generation'] += 1
+                    entry['at'] = 0
+
+    def publish_background(self, name, value):
+        with self._lock:
+            entry = self._background.setdefault(name, {'running': False, 'generation': 0})
+            issue = self.state_issue(name, value)
+            entry.update(value=value, generation=entry['generation'] + 1,
+                         at=time.monotonic(), read_at=entry.get('read_at', '') if issue else now_iso(), error=issue)
+
+    @staticmethod
+    def state_issue(name, value):
+        if not isinstance(value, dict):
+            return '状态读取失败，当前值未验证。'
+        if name == 'service' and value.get('service') == 'Unknown':
+            return '无法读取 Clash 服务状态。'
+        if name == 'update' and value.get('task', {}).get('error'):
+            return '计划任务状态读取失败。'
+        if name == 'update' and value.get('settings', {}).get('error'):
+            return '更新设置读取失败。'
+        return '状态读取失败，当前值未验证。' if value.get('error') else ''
+
+    def collection_status(self):
+        with self._lock:
+            return {name: {'read_at': entry['read_at'], 'refreshing': entry['running'],
+                           'error': entry['error'],
+                           'stale': not entry['read_at'] or bool(entry['error']) or
+                                    time.monotonic() - entry['at'] >= 30}
+                    for name, entry in self._background.items()}
+
+    def browser_summary(self):
+        browser = sandbox_browser.status(self.local)
+        browser['default'] = sandbox_browser.default_status(self.local)
+        return browser
+
     def app_state(self):
         plan = self.plan()
         configured, configured_error = self.configured()
@@ -545,17 +635,16 @@ class App:
             'snapshot_ok': snapshot_ok,
             'core_program': str(plan.get('core_program') or ''),
         }
-        try:
-            browser = sandbox_browser.status(self.local)
-            browser['default'] = sandbox_browser.default_status(self.local)
-        except (ValueError, OSError, RuntimeError) as exc:
-            browser = {'error': str(exc), 'running': False, 'settings': {}, 'engine': {}, 'profile': {}, 'default': {}}
+        browser = self.background_value('browser', self.browser_summary,
+            {'running': False, 'settings': {}, 'engine': {}, 'profile': {}, 'default': {},
+             'error': '正在读取浏览器状态（未验证）'}, ttl=15)
         active = self.active_job_view()
         last_run = read_json(self.local / 'last-run.json', {})
         if not isinstance(last_run, dict):
             last_run = {}
         return {
-            'preview': self.configuration_preview(),
+            'preview': self.background_value('preview', self.configuration_preview,
+                {'current': {}, 'regions': region_profile.PROFILES, 'read_at': ''}),
             'version': VERSION,
             'admin': is_admin(),
             'configured': configured,
@@ -564,9 +653,11 @@ class App:
             'baseline': self.baseline_name(),
             'snapshots': self.snapshots(),
             'verification': self.verification_summary(),
-            'update': self.update_summary(),
+            'update': self.background_value('update', self.update_summary,
+                {'mode': 'unknown', 'task': {'installed': None}, 'settings': {}, 'last': {}}, ttl=12),
             'browser': browser,
-            'service': self.service_status(),
+            'service': self.background_value('service', self.service_status,
+                {'service': 'Unknown', 'app_running': False}, ttl=15),
             'app': {
                 'python': sys.version.split()[0],
                 'node': bool(self.node_path()),
@@ -576,6 +667,8 @@ class App:
                 'path': str(self.local.relative_to(self.project)) if self.local.is_relative_to(self.project) else '',
             },
             'operation': {
+                'settings_busy': self._settings_busy,
+                'settings_pending': self.settings_transactions(),
                 'job': active,
                 'reconfigure_active': (self.local / 'reconfigure-active.json').is_file(),
                 'pending_firewall': self.pending_firewall(),
@@ -592,6 +685,7 @@ class App:
                 'browser': '沙箱资料目录仅隔离浏览器数据；不是操作系统级沙箱，也不修改默认 Chrome/Edge。',
                 'network': '未测试浏览器 WebRTC、Claude 网页、账号可用性、Docker/WSL 和虚拟机。',
             },
+            'collection': self.collection_status(),
         }
 
     def log_files(self):
@@ -621,8 +715,7 @@ class App:
             path = self.jobs_dir / match.group(1) / 'console.log'
         if not path.is_file():
             raise ApiError(404, '日志不存在。')
-        text = path.read_text(encoding='utf-8', errors='replace')
-        return {'name': name, 'text': text[-200000:]}
+        return {'name': name, 'text': tail_text(path, limit=200000, lines=20000)}
 
     # ---- discovery -----------------------------------------------------
     def nodes(self, refresh=False):
@@ -677,58 +770,30 @@ class App:
     def _cleanup_jobs(self):
         try:
             self.jobs_dir.mkdir(parents=True, exist_ok=True)
+            folders = []
+            for folder in self.jobs_dir.iterdir():
+                try:
+                    if (JOB_ID_RE.fullmatch(folder.name) and folder.is_dir()
+                            and not folder.is_symlink() and not folder.is_junction()
+                            and folder.resolve().parent == self.jobs_dir.resolve()):
+                        folders.append((folder.stat().st_mtime, folder))
+                except OSError:
+                    continue
         except OSError:
             return
-        folders = sorted([p for p in self.jobs_dir.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True)
-        for index, folder in enumerate(folders):
+        completed = 0
+        for _, folder in sorted(folders, reverse=True):
             status = read_json(folder / 'status.json', {})
-            if index >= 30:
-                shutil.rmtree(folder, ignore_errors=True)
+            if not isinstance(status, dict):
                 continue
-            if isinstance(status, dict) and status.get('state') == 'running':
-                try:
-                    if self.job_view(folder.name).get('state') == 'success':
-                        continue
-                except ApiError:
-                    pass
-                pid = status.get('pid')
-                alive = False
-                if isinstance(pid, int) and pid > 0:
-                    try:
-                        alive = subprocess.run(['tasklist.exe', '/FI', f'PID eq {pid}', '/NH'],
-                                               capture_output=True, text=True, timeout=8,
-                                               creationflags=_no_window()).stdout.find(str(pid)) >= 0
-                    except (OSError, subprocess.SubprocessError):
-                        alive = False
-                if not alive:
-                    status['state'] = 'interrupted'
-                    status['error'] = '界面服务重启前该操作已结束或中断；请查看本地日志确认结果。'
-                    status['finished'] = now_iso()
-                    atomic_json(folder / 'status.json', status)
-                elif status.get('action') == 'restore':
-                    events = read_events(folder / 'events.jsonl')
-                    terminal = any(isinstance(event, dict) and event.get('type') in ('done', 'error', 'cancelled') for event in events)
-                    if terminal and not self._process_has_children(pid):
-                        info = self._process_info(pid)
-                        command = str(info.get('command') or '')
-                        if (self.scripts / 'run.ps1').as_posix().lower() in command.replace('\\', '/').lower():
-                            try:
-                                killed = subprocess.run(
-                                    ['taskkill.exe', '/PID', str(pid), '/T', '/F'],
-                                    capture_output=True, text=True, timeout=15,
-                                    creationflags=_no_window(),
-                                ).returncode == 0
-                            except (OSError, subprocess.SubprocessError):
-                                killed = False
-                            if killed:
-                                status['state'] = 'interrupted'
-                                status['error'] = '恢复已结束但界面没有收到退出信号；已结束卡住的进程，请检查日志后重试恢复。'
-                                status['finished'] = now_iso()
-                                atomic_json(folder / 'status.json', status)
-                                self.log('cleaned stuck restore job ' + folder.name)
+            if status.get('state') not in ('success', 'failed', 'cancelled', 'interrupted'):
+                continue
+            completed += 1
+            if completed > 30 and folder.resolve().parent == self.jobs_dir.resolve():
+                shutil.rmtree(folder, ignore_errors=True)
 
     def _process_info(self, pid):
-        command = ("$p=Get-CimInstance Win32_Process -Filter \"ProcessId=" + str(int(pid)) + "\";"
+        command = ("$ErrorActionPreference='Stop';$p=Get-CimInstance Win32_Process -Filter \"ProcessId=" + str(int(pid)) + "\";"
                    "if($p){[ordered]@{alive=$true;command=[string]$p.CommandLine;name=[string]$p.Name}|ConvertTo-Json -Compress}"
                    "else{[ordered]@{alive=$false;command='';name=''}|ConvertTo-Json -Compress}")
         try:
@@ -738,9 +803,11 @@ class App:
                 timeout=8, creationflags=_no_window(),
             )
             value = _last_json_line(result.stdout)
-            return value if isinstance(value, dict) else {'alive': False}
+            if result.returncode == 0 and isinstance(value, dict) and type(value.get('alive')) is bool:
+                return value
+            return {'alive': None}
         except (OSError, subprocess.SubprocessError):
-            return {'alive': False}
+            return {'alive': None}
 
     def _process_has_children(self, pid):
         command = ("$p=Get-CimInstance Win32_Process -Filter \"ParentProcessId=" + str(int(pid)) + "\";"
@@ -759,32 +826,55 @@ class App:
         current = self.job_view(job_id)
         if current.get('state') != 'running':
             return current
+        if current.get('action') in LOCAL_ACTIONS:
+            raise ApiError(409, '本地操作仍在进行，不能中断；请等待结果。')
         if not isinstance(job_id, str) or not JOB_ID_RE.fullmatch(job_id):
             raise ApiError(404, '操作记录无效。')
         folder = self.jobs_dir / job_id
         status = read_json(folder / 'status.json', {})
+        tracked = self.jobs.get(job_id)
+        if tracked and tracked.get('runtime'):
+            status = tracked['runtime']
         if not isinstance(status, dict) or status.get('state') != 'running':
             return self.job_view(job_id)
         if (self.local / 'reconfigure-active.json').is_file():
             raise ApiError(409, '本机安全重新配置或网络恢复仍在执行；请等待独立看护完成。')
+        status = dict(status)
         pid = status.get('pid')
-        if isinstance(pid, int) and pid > 0:
-            info = self._process_info(pid)
-            if info.get('alive'):
-                command = str(info.get('command') or '')
-                allowed = [str(self.scripts / 'run.ps1'), str(self.scripts / 'update.py'), str(self.scripts / 'verify.py')]
-                if not any(value.lower() in command.lower() for value in allowed):
-                    raise ApiError(409, '该进程不是本项目的操作进程，未结束。')
-                try:
-                    result = subprocess.run(
-                        ['taskkill.exe', '/PID', str(pid), '/T', '/F'],
-                        capture_output=True, text=True, timeout=15,
-                        creationflags=_no_window(),
-                    )
-                except (OSError, subprocess.SubprocessError) as exc:
-                    raise ApiError(409, '无法结束卡住的任务进程；请在任务管理器中结束它。') from exc
-                if result.returncode != 0:
-                    raise ApiError(409, '无法结束卡住的任务进程；它可能已提权，请在任务管理器中结束。')
+        if type(pid) is not int or pid <= 0:
+            raise ApiError(409, '无法确认任务进程，未结束任务或解除保护。请稍后重试。')
+        info = self._process_info(pid)
+        if info.get('alive') is None:
+            raise ApiError(409, '无法确认任务进程状态，仍保留忙碌保护。请稍后重试。')
+        if info.get('alive') is False and tracked and tracked.get('process'):
+            try:
+                confirmed_exit = tracked['process'].poll() is not None
+            except Exception:
+                confirmed_exit = False
+            if not confirmed_exit:
+                raise ApiError(409, '进程信息尚不一致，仍保留忙碌保护。请稍后重试。')
+        if info.get('alive') is True:
+            command = str(info.get('command') or '')
+            allowed = [str(self.scripts / 'run.ps1'), str(self.scripts / 'update.py'), str(self.scripts / 'verify.py')]
+            if not any(value.lower() in command.lower() for value in allowed):
+                raise ApiError(409, '该进程不是本项目的操作进程，未结束。')
+            try:
+                result = subprocess.run(
+                    ['taskkill.exe', '/PID', str(pid), '/T', '/F'],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=_no_window(),
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ApiError(409, '无法结束卡住的任务进程；请在任务管理器中结束它。') from exc
+            if result.returncode != 0:
+                raise ApiError(409, '无法结束卡住的任务进程；它可能已提权，请在任务管理器中结束。')
+            try:
+                if tracked and tracked.get('process'):
+                    tracked['process'].wait(timeout=5)
+                elif self._process_info(pid).get('alive') is not False:
+                    raise RuntimeError('exit not confirmed')
+            except Exception as exc:
+                raise ApiError(409, '已请求结束任务，但尚未确认退出，仍保留忙碌保护。') from exc
         label = {'apply': '配置', 'restore': '恢复', 'supplement': '补充配置', 'snapshot': '快照保存',
                  'reconfigure': '重新配置', 'update': '规则更新', 'verify': '连通性检查'}.get(status.get('action'), '操作')
         message = '任务已手动结束；' + label + '可能未完成，请检查快照/日志后再决定是否重试。'
@@ -796,12 +886,25 @@ class App:
             if job:
                 job['forced'] = True
                 job['state'] = 'interrupted'
+                job['completion'] = status
             if self.active_job and self.active_job.get('id') == job_id:
                 self.active_job = None
         return self.job_view(job_id)
 
     def _validate_job(self, payload):
         action = str(payload.get('action') or '')
+        if action in LOCAL_ACTIONS:
+            if action == 'settings-recover':
+                transaction = str(payload.get('transaction') or '')
+                self.transaction_folder(transaction)
+                if payload.get('confirm') != transaction:
+                    raise ApiError(400, '设置恢复确认不匹配。')
+                if transaction not in {row['id'] for row in self.settings_transactions()}:
+                    raise ApiError(400, '没有待恢复的设置记录。')
+                return action, {'transaction': transaction}
+            if payload.get('confirm') != ('DELETE' if action == 'browser-reset' else action.upper()):
+                raise ApiError(400, '浏览器操作确认不匹配。')
+            return action, {}
         if action not in RUN_ACTIONS | {'update', 'verify'}:
             raise ApiError(400, '不支持的操作。')
         confirm = str(payload.get('confirm') or '')
@@ -847,8 +950,10 @@ class App:
 
     def start_job(self, payload):
         with self._lock:
-            if self.active_job:
+            if self.active_job or self._settings_busy or self.stopping or self._shutdown_requested:
                 raise ApiError(409, '另一个操作正在进行，请等待完成。')
+            if payload.get('action') != 'settings-recover' and self.settings_transactions():
+                raise ApiError(409, '请先在快照与恢复页面恢复未完成的设置保存。')
             action, params = self._validate_job(payload)
             job_id = secrets.token_hex(16)
             self.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -863,12 +968,24 @@ class App:
                 'state': 'running',
                 'folder': str(folder),
             }
-            self.jobs[job_id] = job
-            self.active_job = job
-            atomic_json(folder / 'job.json', {k: job[k] for k in ('id', 'action', 'params', 'created', 'state')})
-            thread = threading.Thread(target=self._run_job, args=(job,), daemon=True, name='ccn-job-' + job_id[:8])
-            job['thread'] = thread
-            thread.start()
+            try:
+                atomic_json(folder / 'job.json', {k: job[k] for k in ('id', 'action', 'params', 'created', 'state')})
+                atomic_json(folder / 'status.json', {'state': 'running', 'action': action, 'started': job['created'], 'exit_code': None})
+                thread = threading.Thread(target=self._run_job, args=(job,), daemon=True, name='ccn-job-' + job_id[:8])
+                job['thread'] = thread
+                self.jobs[job_id] = job
+                self.active_job = job
+                thread.start()
+            except Exception as exc:
+                self.jobs.pop(job_id, None)
+                if self.active_job is job:
+                    self.active_job = None
+                try:
+                    atomic_json(folder / 'status.json', {'state': 'failed', 'action': action,
+                        'error': '任务创建失败，未开始执行。', 'exit_code': None, 'finished': now_iso()})
+                except OSError:
+                    pass
+                raise ApiError(500, '任务创建失败，未开始执行。请检查本地目录权限和剩余空间。') from exc
             return self.job_view(job_id)
 
     def _job_command(self, action, params, folder):
@@ -891,11 +1008,26 @@ class App:
             return [python_console(), str(self.scripts / 'update.py')], events
         return [python_console(), str(self.scripts / 'verify.py')], events
 
+    def _complete_job(self, job, status):
+        try:
+            atomic_json(Path(job['folder']) / 'status.json', status)
+        except OSError:
+            status['record_warning'] = '任务已结束，但状态记录写入失败；本次结果仅保留在当前界面会话中。'
+        with self._lock:
+            job['completion'] = status
+            job['state'] = status['state']
+            if self.active_job is job or (self.active_job and self.active_job['id'] == job['id']):
+                self.active_job = None
+
     def _run_job(self, job):
+        if job['action'] in LOCAL_ACTIONS:
+            self._run_local_job(job)
+            return
         folder = Path(job['folder'])
         action = job['action']
-        console = folder / 'console.log'
         events = folder / 'events.jsonl'
+        process = None
+        exit_code = None
         env = dict(os.environ, PYTHONUTF8='1', PYTHONIOENCODING='utf-8', PYTHONNOUSERSITE='1', CCN_EVENTS_FILE=str(events))
         if self.node_path():
             env['CCN_NODE'] = self.node_path()
@@ -903,35 +1035,84 @@ class App:
             command, events = self._job_command(action, job['params'], folder)
             if action in ('update', 'verify'):
                 append_event(events, {'type': 'start', 'action': action})
-            with console.open('ab') as output:
-                process = subprocess.Popen(
-                    command, cwd=str(self.project), env=env, stdin=subprocess.DEVNULL,
-                    stdout=output, stderr=subprocess.STDOUT, creationflags=_no_window(),
-                )
-            atomic_json(folder / 'status.json', {
-                'state': 'running', 'action': action, 'pid': process.pid,
-                'started': now_iso(), 'exit_code': None,
-            })
-            job['process'] = process
-            code = process.wait()
-            if job.get('forced'):
-                with self._lock:
-                    if self.active_job and self.active_job.get('id') == job['id']:
-                        self.active_job = None
-                return
-            self._finish_job(job, code)
+            with (folder / 'console.log').open('ab') as output:
+                process = subprocess.Popen(command, cwd=str(self.project), env=env, stdin=subprocess.DEVNULL,
+                    stdout=output, stderr=subprocess.STDOUT, creationflags=_no_window())
+                # Track the child before any fallible disk writes or stream cleanup.
+                job['process'] = process
+                job['runtime'] = {'state': 'running', 'action': action, 'pid': process.pid,
+                                  'started': job['created'], 'exit_code': None}
+                try:
+                    atomic_json(folder / 'status.json', job['runtime'])
+                except OSError:
+                    job['monitor_warning'] = '运行记录写入失败，仍在跟踪进程；操作结束前请勿重复执行。'
+            while exit_code is None:
+                try:
+                    exit_code = process.wait()
+                except Exception:
+                    job['monitor_warning'] = '暂时无法读取进程退出状态，仍在跟踪；请勿重复执行。'
+                    try:
+                        exit_code = process.poll()
+                    except Exception:
+                        pass
+                    time.sleep(.5)
+            self._finish_job(job, exit_code)
         except Exception as exc:
-            self.log('job ' + job['id'] + ' failed to start: ' + repr(exc))
-            append_event(events, {'type': 'error', 'message': '操作启动失败：' + type(exc).__name__})
-            atomic_json(folder / 'status.json', {
-                'state': 'failed', 'action': action, 'exit_code': None,
+            # Even an error closing the output stream must not orphan a started child.
+            if process is not None and exit_code is None:
+                job['monitor_warning'] = '任务记录发生错误，仍在等待已启动的进程结束。'
+                while exit_code is None:
+                    try:
+                        exit_code = process.wait()
+                    except Exception:
+                        try:
+                            exit_code = process.poll()
+                        except Exception:
+                            pass
+                        time.sleep(.5)
+            self.log('job ' + job['id'] + ' failed: ' + type(exc).__name__)
+            try:
+                append_event(events, {'type': 'error', 'message': '任务记录或执行失败：' + type(exc).__name__})
+            except OSError:
+                pass
+            self._complete_job(job, {'state': 'failed', 'action': action, 'exit_code': exit_code,
                 'started': job['created'], 'finished': now_iso(),
-                'error': '操作启动失败：' + type(exc).__name__ + '。详情见 .local/gui/server.log。',
-            })
+                'error': '任务未完成或结果记录失败，请检查本地日志及当前设置。'})
+
+    def _run_local_job(self, job):
+        folder = Path(job['folder'])
+        events = folder / 'events.jsonl'
+        result = None
+        error = ''
+        try:
+            append_event(events, {'type': 'step', 'index': 1, 'total': 1,
+                                  'title': '正在恢复原设置…' if job['action'] == 'settings-recover' else '正在处理浏览器操作…'})
+            with operation_lock(self.local, settings_recovery=job['action'] == 'settings-recover'):
+                if job['action'] == 'settings-recover':
+                    result = self.restore_settings_transaction(job['params']['transaction'])
+                else:
+                    self.invalidate_background('browser')
+                    result = self._browser_action({'action': LOCAL_ACTIONS[job['action']], 'confirm': 'DELETE'})
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, ApiError) else '操作未完成（' + type(exc).__name__ + '）。'
+        finally:
+            self.invalidate_background('browser', 'update')
+        status = {'state': 'failed' if error else 'success', 'action': job['action'],
+            'started': job['created'], 'finished': now_iso(), 'exit_code': 1 if error else 0,
+            'error': error, 'result': result}
+        try:
+            append_event(events, {'type': 'error' if error else 'done', 'message': error or '操作已完成。'})
+            atomic_json(folder / 'status.json', status)
+            (folder / 'console.log').write_text(error or '操作已完成。', encoding='utf-8')
+        except OSError:
+            status.update(state='failed', exit_code=1,
+                          error='操作已结束，但本地记录写入失败。请检查当前状态和目录权限。')
+        finally:
             with self._lock:
-                if self.active_job and self.active_job.get('id') == job['id']:
+                job['completion'] = status
+                job['state'] = status['state']
+                if self.active_job and self.active_job['id'] == job['id']:
                     self.active_job = None
-                job['state'] = 'failed'
 
     def _finish_job(self, job, code):
         if job.get('forced'):
@@ -992,11 +1173,7 @@ class App:
             'result': result if isinstance(result, dict) else None,
             'params': job.get('params', {}),
         }
-        atomic_json(folder / 'status.json', status)
-        with self._lock:
-            if self.active_job and self.active_job.get('id') == job['id']:
-                self.active_job = None
-            job['state'] = state
+        self._complete_job(job, status)
 
     def job_view(self, job_id):
         if not isinstance(job_id, str) or not JOB_ID_RE.fullmatch(job_id):
@@ -1009,12 +1186,15 @@ class App:
             if not isinstance(stored, dict):
                 raise ApiError(404, '找不到该操作记录。')
             job = {'id': job_id, **stored, 'started_epoch': 0}
-        status = read_json(folder / 'status.json', {})
-        if not isinstance(status, dict):
-            status = {'state': 'running', 'action': job.get('action'), 'exit_code': None}
+        status = job.get('completion') or read_json(folder / 'status.json', {})
+        if not job.get('completion') and job.get('runtime') and (not isinstance(status, dict) or status.get('state') in (None, 'running')):
+            status = job['runtime']
+        if not isinstance(status, dict) or not status:
+            status = {'state': job.get('state', 'running'), 'action': job.get('action'), 'exit_code': None}
         events = read_events(folder / 'events.jsonl')
         elapsed = 0
-        if status.get('state') == 'running' and job.get('action') in ('apply', 'restore', 'supplement', 'snapshot', 'reconfigure'):
+        if (status.get('state') == 'running' and not job.get('process')
+                and job.get('action') in ('apply', 'restore', 'supplement', 'snapshot', 'reconfigure')):
             terminal_events = [e for e in events if e.get('type') in ('done', 'error', 'cancelled')]
             result_path = self.local / 'last-run.json'
             result = read_json(result_path, {})
@@ -1043,6 +1223,7 @@ class App:
             'state': status.get('state') or 'running',
             'exit_code': status.get('exit_code'),
             'error': str(status.get('error') or ''),
+            'record_warning': status.get('record_warning') or (job.get('monitor_warning') if status.get('state') == 'running' else ''),
             'result': status.get('result'),
             'elapsed': elapsed,
             'stale': stale,
@@ -1061,8 +1242,10 @@ class App:
             return None
 
     # ---- mutations -----------------------------------------------------
-    def _update_task(self, action, at=None, days=None):
+    def _update_task(self, action, at=None, days=None, *, state_file=None):
         command = ['-Action', action, '-Python', python_console()]
+        if state_file:
+            command += ['-StateFile', str(state_file)]
         if at:
             command += ['-At', at]
         if days:
@@ -1076,36 +1259,150 @@ class App:
             raise ApiError(500, '规则更新任务操作失败；详情见 .local/gui/server.log。')
         return completed
 
+    def settings_transactions(self):
+        return pending_settings(self.local)
+
+    def transaction_folder(self, transaction):
+        if not JOB_ID_RE.fullmatch(str(transaction)):
+            raise ApiError(400, '设置恢复记录名称无效。')
+        root = (self.local / 'gui' / 'settings-transactions').resolve()
+        folder = root / transaction
+        if not folder.resolve().is_relative_to(root) or folder.is_symlink():
+            raise ApiError(400, '设置恢复路径不在本项目内。')
+        return folder
+
+    def restore_settings_transaction(self, transaction):
+        folder = self.transaction_folder(transaction)
+        journal = folder / 'transaction.json'
+        record = read_json(journal, {})
+        if (not isinstance(record, dict) or record.get('version') != 1
+                or type(record.get('previous_exists')) is not bool
+                or type(record.get('mutations_started')) is not bool):
+            raise ApiError(400, '设置恢复记录不完整，未修改当前设置。')
+        if record.get('phase') in ('committed', 'rolled_back'):
+            return {'success': True, 'already_finished': True}
+        if not record['mutations_started']:
+            atomic_json(journal, {**record, 'phase': 'rolled_back'})
+            return {'success': True}
+        state_file = folder / 'task.json'
+        original = folder / 'ui-settings.original'
+        for path, key in [(state_file, 'task_sha256')] + ([(original, 'settings_sha256')] if record['previous_exists'] else []):
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != record.get(key):
+                raise ApiError(400, '设置恢复备份缺失或校验失败，未修改当前设置。')
+        atomic_json(journal, {**record, 'phase': 'recovering'})
+        failures = []
+        try:
+            self._update_task('rollback', state_file=state_file)
+        except Exception:
+            failures.append('计划任务')
+        try:
+            settings_path = gui_settings.settings_path(self.local)
+            if record['previous_exists']:
+                temporary = folder / 'ui-settings.restore'
+                with temporary.open('wb') as stream:
+                    stream.write(original.read_bytes())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                replace_file(temporary, settings_path)
+            else:
+                settings_path.unlink(missing_ok=True)
+        except Exception:
+            failures.append('界面设置')
+        self.invalidate_background('update')
+        atomic_json(journal, {**record, 'phase': 'recovery_failed' if failures else 'rolled_back'})
+        if failures:
+            raise ApiError(500, '、'.join(failures) + '恢复未完成，可在快照与恢复页面重试。')
+        return {'success': True}
+
+    @contextmanager
+    def settings_operation(self):
+        with self._lock:
+            if self.active_job or self._settings_busy or self.stopping or self._shutdown_requested:
+                raise ApiError(409, '另一个操作正在进行，请等待完成。')
+            if self.settings_transactions():
+                raise ApiError(409, '存在未完成的设置保存，请先在快照与恢复页面恢复原设置。')
+            self._settings_busy = True
+        try:
+            with operation_lock(self.local):
+                yield
+        except RuntimeError as exc:
+            if isinstance(exc, ApiError):
+                raise
+            raise ApiError(409, '另一个操作或恢复正在进行，请稍后重试。') from exc
+        finally:
+            with self._lock:
+                self._settings_busy = False
+
     def save_update_settings(self, payload):
         mode = str(payload.get('mode') or '')
         time_value = str(payload.get('time') or '')
         days = payload.get('days', 1)
-        previous = None
         try:
             gui_settings.validate(mode, time_value, days)
-            days = int(days)
-            previous = gui_settings.load(self.local)['update']
-            gui_settings.save(mode, time_value, days, self.local)
-            if mode == 'manual':
-                self._update_task('remove')
-            elif self.configured()[0]:
-                self._update_task('install', time_value, days)
         except ValueError as exc:
             raise ApiError(400, str(exc)) from exc
-        except Exception as exc:
+        with self.settings_operation():
+            # Validate before taking the exact file/task recovery point.
+            gui_settings.load(self.local)
+            settings_path = gui_settings.settings_path(self.local)
+            previous = settings_path.read_bytes() if settings_path.exists() else None
+            folder = self.local / 'gui' / 'settings-transactions' / secrets.token_hex(16)
+            folder.mkdir(parents=True)
+            state_file = folder / 'task.json'
+            journal = folder / 'transaction.json'
+            record = {'version': 1, 'phase': 'preparing', 'previous_exists': previous is not None,
+                      'mutations_started': False, 'created': now_iso()}
             if previous is not None:
+                with (folder / 'ui-settings.original').open('wb') as stream:
+                    stream.write(previous)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                record['settings_sha256'] = hashlib.sha256(previous).hexdigest()
+            atomic_json(journal, record)
+            try:
+                self._update_task('snapshot', state_file=state_file)
+                record.update(task_sha256=hashlib.sha256(state_file.read_bytes()).hexdigest(),
+                              phase='applying', mutations_started=True)
+                atomic_json(journal, record)
+                if mode == 'manual':
+                    self._update_task('remove')
+                elif self.configured()[0]:
+                    self._update_task('install', time_value, int(days))
+                gui_settings.save(mode, time_value, int(days), self.local)
+                atomic_json(journal, {**record, 'phase': 'committed'})
+            except Exception as exc:
                 try:
-                    gui_settings.save(previous['mode'], previous['time'], previous.get('days', 1), self.local)
-                except Exception:
-                    pass
-            if isinstance(exc, ApiError):
-                raise
-            self.log('save_update_settings failed: ' + repr(exc))
-            raise ApiError(500, '保存规则更新方式失败。') from exc
-        self._task_cache = (0.0, None)
-        return self.update_summary()
+                    self.restore_settings_transaction(folder.name)
+                except Exception as recovery:
+                    raise ApiError(500, '保存失败，恢复未完成。请在快照与恢复页面重试；记录位于 '
+                                   '.local/gui/settings-transactions/' + folder.name + '。') from recovery
+                raise ApiError(500, '保存失败，原界面设置和计划任务已恢复。') from exc
+            self._task_cache = (0.0, None)
+            summary = self.update_summary()
+            self.publish_background('update', summary)
+            return summary
 
     def browser_action(self, payload):
+        asynchronous = {value: key for key, value in LOCAL_ACTIONS.items() if value is not None}
+        action = str(payload.get('action') or '')
+        if action in asynchronous:
+            job_action = asynchronous[action]
+            if action == 'reset' and payload.get('confirm') != 'DELETE':
+                raise ApiError(400, '重置资料需要明确确认。')
+            return self.start_job({'action': job_action, 'confirm': 'DELETE' if action == 'reset' else job_action.upper()})
+        with self.settings_operation():
+            self.invalidate_background('browser')
+            try:
+                result = self._browser_action(payload)
+                if str(payload.get('action')) == 'save-settings':
+                    result['default'] = sandbox_browser.default_status(self.local)
+                    self.publish_background('browser', result)
+                return result
+            finally:
+                if str(payload.get('action')) != 'save-settings':
+                    self.invalidate_background('browser')
+
+    def _browser_action(self, payload):
         action = str(payload.get('action') or '')
         try:
             if action == 'open':
@@ -1245,7 +1542,7 @@ class App:
             if self.stopping or not self.idle_exit:
                 continue
             with self._lock:
-                active = self.active_job is not None
+                active = self.active_job is not None or self._settings_busy
             if active:
                 continue
             now = time.monotonic()
@@ -1259,11 +1556,13 @@ class App:
                 elif (self.last_browser_seen and now - self.last_browser_seen > 25
                       and now - self.last_heartbeat > 40):
                     self.log('GUI browser closed; stopping server')
-                    self.stop()
+                    if self.stop() is False:
+                        continue
                     return
             if now - self.last_heartbeat > 600:
                 self.log('GUI heartbeat expired; stopping server')
-                self.stop()
+                if self.stop() is False:
+                    continue
                 return
 
     def _cleanup_session(self):
@@ -1282,9 +1581,10 @@ class App:
         with self._lock:
             if self.stopping:
                 return
+            if self.active_job or self._settings_busy:
+                self.log('shutdown deferred until current operation completes')
+                return False
             self.stopping = True
-            if self.active_job:
-                self.log('shutdown requested while a job is running; job is left to finish')
         try:
             if self.httpd:
                 self.httpd.shutdown()
@@ -1449,7 +1749,9 @@ def make_handler(app):
                     return
                 if path == '/api/state':
                     if parse_qs(parsed.query).get('refresh', ['0'])[0] == '1':
-                        app._preview_cache = None
+                        with app._lock:
+                            app._preview_cache = None
+                            app.invalidate_background()
                     app.last_heartbeat = time.monotonic()
                     self._json(app.app_state())
                     return
@@ -1504,9 +1806,13 @@ def make_handler(app):
                     self._json(app.reveal_local())
                 elif parsed.path == '/api/shutdown':
                     with app._lock:
-                        active = app.active_job is not None
+                        active = app.active_job is not None or app._settings_busy
                     if active:
                         raise ApiError(409, '操作仍在进行，完成后再退出界面。')
+                    with app._lock:
+                        if app.active_job or app._settings_busy:
+                            raise ApiError(409, '操作仍在进行，完成后再退出界面。')
+                        app._shutdown_requested = True
                     self._json({'ok': True})
                     threading.Timer(0.4, app.stop).start()
                 else:

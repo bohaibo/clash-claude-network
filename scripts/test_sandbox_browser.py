@@ -169,6 +169,31 @@ class SandboxBrowser(unittest.TestCase):
         self.assertTrue(keep.exists())
         self.assertFalse(any(sb.browser_root(self.local).glob('trash-*')))
 
+    def test_reset_retries_transient_directory_lock(self):
+        self.profile.mkdir(parents=True)
+        original = Path.replace
+        attempts = []
+        def rename(path, destination):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise PermissionError('locked')
+            return original(path, destination)
+        with patch.object(sb, 'running_pids', return_value=[]), \
+             patch.object(Path, 'replace', rename), patch.object(sb.time, 'sleep'):
+            self.assertTrue(sb.reset(self.local, confirm='DELETE')['reset'])
+        self.assertEqual(len(attempts), 3)
+
+    def test_reset_preserves_profile_when_directory_stays_locked(self):
+        self.profile.mkdir(parents=True)
+        (self.profile / 'Cookies').write_text('keep', encoding='utf-8')
+        with patch.object(sb, 'running_pids', return_value=[]), \
+             patch.object(Path, 'replace', side_effect=PermissionError('locked')), \
+             patch.object(sb.time, 'sleep'), patch.object(sb.shutil, 'rmtree') as delete:
+            with self.assertRaisesRegex(RuntimeError, '原资料仍保留'):
+                sb.reset(self.local, confirm='DELETE')
+            delete.assert_not_called()
+        self.assertEqual((self.profile / 'Cookies').read_text(encoding='utf-8'), 'keep')
+
     def test_close_rejects_paths_outside_project(self):
         with self.assertRaises(AssertionError):
             sb.close(local=self.local, profile=Path('C:/Windows'))

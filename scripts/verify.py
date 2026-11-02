@@ -2,10 +2,27 @@
 from checks import require
 from pathlib import Path
 import argparse,contextlib,datetime,ipaddress,json,os,shutil,socket,struct,subprocess,sys,time,uuid
+from urllib.parse import urlsplit
 from client import PROJECT,LOCAL,api,root_path,GROUP,load
 from verification_reports import save_report
 
 FAKE=ipaddress.ip_network('198.18.0.0/16')
+NO_TEST_DOMAINS=('claude.ai','claude.com','clau.de','anthropic.com','anthropic.ai','claudeusercontent.com',
+                 'claudemcpclient.com','claudemcpcontent.com','modelcontextprotocol.io',
+                 'anthropic.auth0.com','anthropic.com.cdn.cloudflare.net')
+
+def assert_test_host(host):
+ normalized=str(host).rstrip('.').lower()
+ if any(normalized==domain or normalized.endswith('.'+domain) for domain in NO_TEST_DOMAINS):
+  raise ValueError('禁止连接 Claude/Anthropic 进行测试；仅允许离线样例和 mock。')
+ try:
+  address=ipaddress.ip_address(normalized)
+ except ValueError:
+  return
+ if isinstance(address,ipaddress.IPv6Address) and address.ipv4_mapped:
+  address=address.ipv4_mapped
+ if address in ipaddress.ip_network('160.79.104.0/23'):
+  raise ValueError('禁止连接 Claude/Anthropic IP 进行测试。')
 
 def clean_env():
  return {k:v for k,v in os.environ.items() if k.lower() not in ('http_proxy','https_proxy','all_proxy','no_proxy')}
@@ -31,6 +48,8 @@ def answer_ips(data):
  return ips
 
 def query(server,port,kind,tcp=False,source=None,host='cloudflare.com'):
+ assert_test_host(host)
+ assert_test_host(server)
  token=os.urandom(2);packet=token+struct.pack('!HHHHH',0x100,1,0,0,0)+b''.join(bytes([len(s)])+s.encode() for s in host.split('.'))+b'\0'+struct.pack('!HH',kind,1)
  with socket.socket(socket.AF_INET,socket.SOCK_STREAM if tcp else socket.SOCK_DGRAM) as sock:
   sock.settimeout(5)
@@ -51,6 +70,7 @@ def query(server,port,kind,tcp=False,source=None,host='cloudflare.com'):
          'ips':answer_ips(data) if kind==1 else [],
          'passed':rcode==0 and (answers==0 if kind in (64,65) else answers>0)}
 def curl(url,head=False):
+ assert_test_host(urlsplit(url).hostname or '')
  cmd=['curl.exe','--noproxy','*','--connect-timeout','4','--max-time','10','-sS','-w','\n__CHECK__%{http_code}']
  if head:cmd+=['-I']
  p=subprocess.run(cmd+[url],capture_output=True,text=True,encoding='utf-8',errors='replace',env=clean_env(),timeout=13)
@@ -58,6 +78,7 @@ def curl(url,head=False):
  return {'exit':p.returncode,'http':int(status or 0),'body':body,'error':p.stderr.strip()[:500]}
 def stun(host='stun.l.google.com',port=19302,route_probe=None):
  """Native UDP STUN binding request, bypassing any HTTP proxy."""
+ assert_test_host(host)
  transaction=os.urandom(12);cookie=0x2112A442
  request=struct.pack('!HHI',0x0001,0,cookie)+transaction
  try:
@@ -184,7 +205,7 @@ def verify(outage=False,stage=None):
  stage=stage or ('node-outage' if outage else 'connectivity')
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root']);node=plan['node']
  report={'success':False,'account_tested':False,'application_usability_verified':False,
-         'not_tested':['browser_webrtc','browser_fingerprint','claude_http']}
+         'not_tested':['browser_webrtc','browser_fingerprint','claude_http','claude_dns','claude_live_routing']}
  check='runtime'
  try:
   runtime=api(root,'GET','/configs')
@@ -210,7 +231,7 @@ def verify(outage=False,stage=None):
   report['dns']=[query('8.8.8.8',53,t,tcp) for t in (1,64,65) for tcp in (False,True)]
   require(all(x['passed'] for x in report['dns']),'配置检查未通过，请查看本地记录。')
   check='fake_ip'
-  fake=query('8.8.8.8',53,1,False,host='claude.ai')
+  fake=query('8.8.8.8',53,1,False,host='example.com')
   require(any(ipaddress.ip_address(ip) in FAKE for ip in fake['ips']),'fake-IP not observed; TUN DNS hijack may be bypassed')
   report['fake_ip_hijack']=fake['ips']
   check='ipv6'

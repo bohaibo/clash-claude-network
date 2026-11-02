@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import client
 import gui_settings
@@ -39,6 +40,14 @@ class GuiSettings(unittest.TestCase):
         with self.assertRaises(ValueError):
             gui_settings.load(self.local)
         self.assertEqual(path.read_text(encoding='utf-8'), '{"update":')
+
+    def test_failed_flush_preserves_previous_file(self):
+        gui_settings.save('manual', '08:15', 1, self.local)
+        original = gui_settings.settings_path(self.local).read_bytes()
+        with patch.object(gui_settings.os, 'fsync', side_effect=OSError('flush fixture')):
+            with self.assertRaises(OSError):
+                gui_settings.save('scheduled', '09:00', 7, self.local)
+        self.assertEqual(gui_settings.settings_path(self.local).read_bytes(), original)
 
 
 if __name__ == '__main__':

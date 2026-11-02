@@ -20,6 +20,7 @@ export function render(ctx) {
   root.append(reconfigureCard(ctx));
   const inline = document.createElement('div');
   inline.id = 'log-inline';
+  inline.dataset.preserveKey = 'open-log';
   inline.className = 'log-inline';
   root.append(inline);
   return root;

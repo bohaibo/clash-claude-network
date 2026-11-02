@@ -74,6 +74,13 @@ export function render(ctx) {
   return rootNode;
 }
 
+export function refreshStatus(ctx) {
+  if (!rootNode?.isConnected) return;
+  rootNode.querySelector('.tiles')?.replaceWith(statusGrid(ctx));
+  renderImpact(ctx);
+  updateStartButton(ctx);
+}
+
 function statusGrid(ctx) {
   const state = ctx.state;
   const verification = state.verification || {};

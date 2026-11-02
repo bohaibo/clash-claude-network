@@ -1,13 +1,19 @@
 import { icon } from '../icons.js';
 import * as ui from '../ui.js';
 
+let saving = false;
+let revision = 0;
+let currentCtx = null;
+export function hasDraft() { return draft.dirty || saving; }
+
 const draft = { engine: '', language: '', dirty: false };
 
 export function render(ctx) {
+  currentCtx = ctx;
   const state = ctx.state;
   const browser = state.browser || {};
   const settings = browser.settings || {};
-  if (!draft.engine || !draft.dirty) {
+  if (!draft.engine || (!draft.dirty && !saving)) {
     draft.engine = settings.engine || 'auto';
     draft.language = settings.language || 'zh-SG';
   }
@@ -66,19 +72,21 @@ function settingsCard(ctx, browser) {
   const languageOptions = languages.map((value) => ({ value, label: value + (value === 'zh-SG' ? '（新加坡简体）' : value === 'en-SG' ? '（新加坡英语）' : '') }));
   const save = ui.button('保存浏览器设置', {
     variant: 'ink',
-    disabled: browser.running || !draft.dirty || ctx.busy,
+    disabled: browser.running || !draft.dirty || ctx.busy || saving,
     onClick: () => saveSettings(ctx),
   });
   save.id = 'save-browser-settings';
-  return ui.card({ title: '启动设置', subtitle: '修改引擎或语言需要先关闭沙箱浏览器；设置只写独立资料目录。' },
+  const card = ui.card({ title: '启动设置', subtitle: '修改引擎或语言需要先关闭沙箱浏览器；设置只写独立资料目录。' },
     ui.el('div', { class: 'choice-grid' },
-      ui.field('引擎', ui.select(engineOptions, draft.engine, (value) => { draft.engine = value; draft.dirty = true; markDirty(); }, { disabled: browser.running }), '自动模式只在本机已安装的浏览器中选择。'),
-      ui.field('网页语言', ui.select(languageOptions, draft.language, (value) => { draft.language = value; draft.dirty = true; markDirty(); }, { disabled: browser.running }), '同时写入启动参数和资料首选项；网页的 Intl 默认 locale 仍可能不同。'),
+      ui.field('引擎', ui.select(engineOptions, draft.engine, (value) => { draft.engine = value; draft.dirty = true; revision++; markDirty(); }, { disabled: browser.running }), '自动模式只在本机已安装的浏览器中选择。'),
+      ui.field('网页语言', ui.select(languageOptions, draft.language, (value) => { draft.language = value; draft.dirty = true; revision++; markDirty(); }, { disabled: browser.running }), '同时写入启动参数和资料首选项；网页的 Intl 默认 locale 仍可能不同。'),
     ),
     ui.el('div', { class: 'form-foot' },
       ui.el('p', { class: 'muted small', text: '固定启用：关闭浏览器独立 DoH、限制 WebRTC 非代理 UDP、关闭 QUIC、禁用浏览器同步与登录。' }),
       save),
     browser.running ? ui.note('沙箱浏览器正在运行，修改引擎或语言前请先关闭。', 'warn') : null);
+  card.dataset.preserveKey = 'browser-settings';
+  return card;
 }
 
 function isolationCard(browser) {
@@ -125,58 +133,25 @@ function actionsCard(ctx, browser) {
 
 function markDirty() {
   const button = document.getElementById('save-browser-settings');
-  if (button) button.disabled = false;
+  if (button) button.disabled = !draft.dirty || saving || currentCtx.busy || currentCtx.state.browser?.running;
 }
 
 const ENGINE_NAMES = { chrome: 'Chrome', edge: 'Edge' };
 
 async function openBrowser(ctx) {
-  try {
-    const result = await ctx.api.post('/api/browser', { action: 'open' });
-    const opened = ENGINE_NAMES[result.engine] || '浏览器';
-    const asked = ENGINE_NAMES[result.requested_engine];
-    // A different engine than the one chosen in 启动设置 must be visible: the
-    // requested browser aborted and the other one was used instead.
-    if (asked && result.requested_engine !== 'auto' && result.requested_engine !== result.engine) {
-      ui.toast(asked + ' 未能打开窗口，已改用 ' + opened + ' 打开沙箱浏览器。', 'warn', 8000);
-    } else {
-      ui.toast('已在 ' + opened + ' 中打开沙箱浏览器。', 'ok');
-    }
-    await ctx.refresh(true);
-  } catch (error) {
-    ui.toast(error.message || '打开沙箱浏览器失败。', 'bad', 8000);
-  }
+  return ctx.startJob({ action: 'browser-open', confirm: 'BROWSER-OPEN' });
 }
 
 async function openCheck(ctx) {
-  try {
-    await ctx.api.post('/api/browser', { action: 'check' });
-    ui.toast('已在沙箱浏览器中打开两个环境检测网站。', 'ok');
-  } catch (error) {
-    ui.toast(error.message || '打开自检页失败。', 'bad');
-  }
+  return ctx.startJob({ action: 'browser-check', confirm: 'BROWSER-CHECK' });
 }
 
 async function closeBrowser(ctx) {
-  try {
-    await ctx.api.post('/api/browser', { action: 'close' });
-    ui.toast('沙箱浏览器已关闭。', 'ok');
-    await ctx.refresh(true);
-  } catch (error) {
-    ui.toast(error.message || '关闭沙箱浏览器失败。', 'bad');
-  }
+  return ctx.startJob({ action: 'browser-close', confirm: 'BROWSER-CLOSE' });
 }
 
 async function registerDefault(ctx) {
-  try {
-    const result = await ctx.api.post('/api/browser', { action: 'register-default' });
-    ui.toast(result.settings_opened
-      ? '已注册沙箱浏览器并打开 Windows 默认应用设置，请在设置中确认。'
-      : '已注册沙箱浏览器；请手动打开 Windows 默认应用设置确认。', 'ok', 7000);
-    await ctx.refresh(true);
-  } catch (error) {
-    ui.toast(error.message || '注册默认浏览器失败。', 'bad');
-  }
+  return ctx.startJob({ action: 'browser-register', confirm: 'BROWSER-REGISTER' });
 }
 
 async function resetBrowser(ctx) {
@@ -190,21 +165,27 @@ async function resetBrowser(ctx) {
   });
   if (!ok) return;
   try {
-    await ctx.api.post('/api/browser', { action: 'reset', confirm: 'DELETE' });
-    ui.toast('沙箱资料已重置。', 'ok');
-    await ctx.refresh(true);
+    await ctx.startJob({ action: 'browser-reset', confirm: 'DELETE' });
   } catch (error) {
     ui.toast(error.message || '重置失败。', 'bad');
   }
 }
 
 async function saveSettings(ctx) {
+  if (saving || ctx.busy) return;
+  saving = true;
+  markDirty();
+  const sentRevision = revision;
   try {
-    await ctx.api.post('/api/browser', { action: 'save-settings', engine: draft.engine, language: draft.language });
-    draft.dirty = false;
+    const result = await ctx.api.post('/api/browser', { action: 'save-settings', engine: draft.engine, language: draft.language });
+    ctx.acceptState('browser', result);
+    if (revision === sentRevision) draft.dirty = false;
     ui.toast('浏览器设置已保存。', 'ok');
     await ctx.refresh(true);
   } catch (error) {
     ui.toast(error.message || '保存浏览器设置失败。', 'bad');
+  } finally {
+    saving = false;
+    markDirty();
   }
 }

@@ -6,6 +6,8 @@ project records; this file must never contain nodes, subscriptions or secrets.
 from __future__ import annotations
 
 import json
+import os
+from atomic_files import replace_file
 import re
 from pathlib import Path
 
@@ -63,8 +65,11 @@ def save(mode, time_value, days=1, local=None):
     root.mkdir(parents=True, exist_ok=True)
     path = settings_path(local)
     temporary = path.with_name(path.name + '.new')
-    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    with temporary.open('w', encoding='utf-8') as stream:
+        stream.write(json.dumps(data, ensure_ascii=False, indent=2))
+        stream.flush()
+        os.fsync(stream.fileno())
+    replace_file(temporary, path)
     return data
 
 

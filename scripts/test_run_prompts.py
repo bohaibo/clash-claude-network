@@ -21,6 +21,7 @@ function Start-Process { throw 'Unexpected process start' }
 function Get-Service { return $null }
 function Assert-FirewallAvailable { return $null }
 function Resolve-PendingFirewall { return $null }
+function Assert-NoPendingSettings { return $null }
 $script:answers=New-Object 'System.Collections.Generic.Queue[string]'
 $entries=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../answers.json') -Raw | ConvertFrom-Json
 foreach($entry in $entries){$script:answers.Enqueue([string]$entry)}
@@ -39,6 +40,16 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   command=['powershell.exe','-NoProfile','-File',str(self.scripts/'run.ps1'),'-Action',action,'-NoPause']
   result=subprocess.run(command+list(extra),capture_output=True,encoding='utf-8',timeout=25)
   return result,result.stdout+result.stderr
+ def test_pending_settings_blocks_real_console_guard_before_configuration(self):
+  script=self.scripts/'run.ps1'
+  script.write_text(script.read_text(encoding='utf-8-sig').replace('function Assert-NoPendingSettings { return $null }',''),encoding='utf-8-sig')
+  (self.scripts/'operation_guard.ps1').write_text((client.PROJECT/'scripts/operation_guard.ps1').read_text(encoding='utf-8-sig'),encoding='utf-8-sig')
+  folder=self.local/'gui/settings-transactions'/('a'*32);folder.mkdir(parents=True)
+  (folder/'transaction.json').write_text('{"phase":"applying"}',encoding='utf-8')
+  result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Missing')
+  self.assertNotEqual(result.returncode,0)
+  self.assertIn('未完成的设置保存',text)
+  self.assertNotIn('Unexpected process',text)
  def test_missing_node_stops_before_closing_client_without_restore_advice(self):
   result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Missing')
   self.assertEqual(result.returncode,1,text);self.assertIn('没有这个精确节点',text)

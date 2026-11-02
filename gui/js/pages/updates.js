@@ -1,12 +1,18 @@
 import { icon } from '../icons.js';
 import * as ui from '../ui.js';
 
+let saving = false;
+let revision = 0;
+let currentCtx = null;
+export function hasDraft() { return draft.dirty || saving; }
+
 const draft = { mode: '', time: '', days: 1, dirty: false };
 
 export function render(ctx) {
+  currentCtx = ctx;
   const state = ctx.state;
   const update = state.update || {};
-  if (!draft.mode || !draft.dirty) {
+  if (!draft.mode || (!draft.dirty && !saving)) {
     draft.mode = update.mode || 'scheduled';
     draft.time = update.time || '13:00';
     draft.days = Number(update.days) || 1;
@@ -38,7 +44,7 @@ function modeCard(ctx, update) {
   const option = (value, title, description, iconName) => ui.el('button', {
     class: 'mode-card' + (draft.mode === value ? ' selected' : ''),
     type: 'button',
-    onclick: () => { draft.mode = value; draft.dirty = true; rerenderMode(ctx); },
+    onclick: () => { draft.mode = value; draft.dirty = true; revision++; rerenderMode(ctx); },
   },
   ui.el('span', { class: 'mode-icon' }, icon(iconName, 20)),
   ui.el('div', {}, ui.el('strong', { text: title }), ui.el('p', { text: description })),
@@ -47,7 +53,7 @@ function modeCard(ctx, update) {
   const timeInput = ui.input(draft.time, {
     type: 'time',
     disabled: draft.mode !== 'scheduled',
-    oninput: (event) => { draft.time = event.target.value; draft.dirty = true; updateSaveState(); },
+    oninput: (event) => { draft.time = event.target.value; draft.dirty = true; revision++; updateSaveState(); },
   });
   const presets = [[1, '每天'], [3, '每 3 天'], [7, '每周'], [30, '每月'], [180, '每半年']];
   const custom = !presets.some(([value]) => value === Number(draft.days));
@@ -57,7 +63,7 @@ function modeCard(ctx, update) {
     (value) => {
       if (value === 'custom') { draft.days = Number(draft.days) || 7; }
       else { draft.days = Number(value); }
-      draft.dirty = true;
+      draft.dirty = true; revision++;
       rerenderMode(ctx);
       updateSaveState();
     },
@@ -67,13 +73,13 @@ function modeCard(ctx, update) {
     type: 'number', min: 1, max: 365, disabled: draft.mode !== 'scheduled',
     oninput: (event) => {
       draft.days = event.target.value;
-      draft.dirty = true;
+      draft.dirty = true; revision++;
       updateSaveState();
     },
   });
-  const save = ui.button('保存更新方式', { variant: 'ink', disabled: !draft.dirty || ctx.busy, onClick: () => saveSettings(ctx) });
+  const save = ui.button('保存更新方式', { variant: 'ink', disabled: !draft.dirty || ctx.busy || saving, onClick: () => saveSettings(ctx) });
   save.id = 'save-update-settings';
-  return ui.card({ title: '更新方式', subtitle: configured ? '保存后会立即调整 Windows 计划任务。' : '尚未配置网络；此设置会在首次配置时生效。' },
+  const card = ui.card({ title: '更新方式', subtitle: configured ? '保存后会立即调整 Windows 计划任务。' : '尚未配置网络；此设置会在首次配置时生效。' },
     ui.el('div', { class: 'mode-grid' },
       option('manual', '手动更新', '不注册后台任务。打开软件后在「规则更新」点击立即更新；不会在后台自动联网。', 'clock'),
       option('scheduled', '定时更新', '注册当前用户的 Windows 计划任务：每隔 1–365 天，在指定时间运行。', 'refresh')),
@@ -91,6 +97,8 @@ function modeCard(ctx, update) {
     draft.mode === 'manual' && update.task?.installed
       ? ui.note('当前方式为手动，但检测到旧的计划任务。保存后会移除该任务。', 'warn')
       : null);
+  card.dataset.preserveKey = 'update-settings';
+  return card;
 }
 
 function rerenderMode(ctx) {
@@ -98,7 +106,7 @@ function rerenderMode(ctx) {
   const state = ctx.state;
   const root = document.querySelector('.stack');
   if (!root) return;
-  const old = root.querySelector('.card');
+  const old = root.querySelector('[data-preserve-key="update-settings"]');
   if (!old) return;
   const fresh = modeCard(ctx, state.update || {});
   old.replaceWith(fresh);
@@ -145,10 +153,11 @@ function lastResultCard(ctx, update) {
 
 function updateSaveState() {
   const button = document.getElementById('save-update-settings');
-  if (button) button.disabled = !draft.dirty;
+  if (button) button.disabled = !draft.dirty || saving || currentCtx.busy;
 }
 
 async function saveSettings(ctx) {
+  if (saving || ctx.busy) return;
   if (!draft.time || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(draft.time)) {
     ui.toast('请输入 00:00–23:59 之间的时间。', 'warn');
     return;
@@ -158,13 +167,20 @@ async function saveSettings(ctx) {
     ui.toast('更新间隔必须是 1–365 天。', 'warn');
     return;
   }
+  saving = true;
+  updateSaveState();
+  const sentRevision = revision;
   try {
-    await ctx.api.post('/api/update-settings', { mode: draft.mode, time: draft.time, days });
-    draft.dirty = false;
+    const result = await ctx.api.post('/api/update-settings', { mode: draft.mode, time: draft.time, days });
+    ctx.acceptState('update', result);
+    if (revision === sentRevision) draft.dirty = false;
     ui.toast('规则更新方式已保存。', 'ok');
     await ctx.refresh(true);
   } catch (error) {
     ui.toast(error.message || '保存更新方式失败。', 'bad');
+  } finally {
+    saving = false;
+    updateSaveState();
   }
 }
 

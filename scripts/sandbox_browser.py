@@ -657,7 +657,15 @@ def reset(local=None, confirm=''):
     trash = browser_root(local) / ('trash-' + time.strftime('%Y%m%d-%H%M%S'))
     if trash.exists():
         trash = browser_root(local) / ('trash-' + time.strftime('%Y%m%d-%H%M%S') + '-' + str(os.getpid()))
-    target.replace(trash)
+    for attempt in range(5):
+        try:
+            target.replace(trash)
+            break
+        except OSError as exc:
+            if attempt == 4:
+                raise RuntimeError('无法重置沙箱资料：目录被占用或没有权限；原资料仍保留。'
+                                   '请关闭沙箱后重试，并检查目录权限。') from exc
+            time.sleep(0.2 * (attempt + 1))
     _clear_cache(target)
     try:
         shutil.rmtree(trash)

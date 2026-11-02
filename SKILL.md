@@ -7,6 +7,8 @@ description: Configure/restore a Windows Clash Verge Rev/Mihomo network with one
 
 Windows 11 only. Read [README.md](README.md), [INSTALL.md](INSTALL.md), and [references/windows.md](references/windows.md) before changing a machine.
 
+禁止连接 Claude 进行测试：开发、回归和验收只允许对 Claude/Anthropic 使用离线样例和 mock，不访问真实 HTTP/API/WebSocket，不查询相关域名 DNS，不打开 Claude 网页、桌面程序或登录页，也不为测试启动浏览器。真实 Claude 路由、应用和账号行为一律标为未验证。
+
 - The human supplies an **exact existing node name**. Never invent, replace or guess nodes. Default exit country is SG.
 - The root `一键网络.cmd` opens the GUI; `--menu` is the console fallback.
 - Python 3.13, PyYAML and Node.js live in project `.runtime`; never install them system-wide or modify PATH. Run `scripts/bootstrap.ps1` if `.runtime` is missing.

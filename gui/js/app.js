@@ -1,11 +1,11 @@
 import * as api from './api.js';
 import { icon, logoMark } from './icons.js';
 import * as ui from './ui.js';
-import { render as overview } from './pages/overview.js';
+import { render as overview, refreshStatus as refreshOverview } from './pages/overview.js';
 import { render as network } from './pages/network.js';
-import { render as browser } from './pages/browser.js';
+import { render as browser, hasDraft as browserHasDraft } from './pages/browser.js';
 import { render as snapshots } from './pages/snapshots.js';
-import { render as updates } from './pages/updates.js';
+import { render as updates, hasDraft as updatesHasDraft } from './pages/updates.js';
 import { render as logs } from './pages/logs.js';
 import { render as help } from './pages/help.js';
 
@@ -27,6 +27,12 @@ const ACTION_LABELS = {
   reconfigure: '恢复最早状态并重新配置',
   update: '更新分流规则',
   verify: '检查连通性',
+  'browser-open': '打开沙箱浏览器',
+  'browser-check': '打开环境自检页',
+  'browser-close': '关闭沙箱浏览器',
+  'browser-reset': '重置沙箱资料',
+  'browser-register': '注册默认浏览器',
+  'settings-recover': '恢复原设置',
 };
 
 const app = {
@@ -39,14 +45,19 @@ const app = {
   nodesLoading: false,
   pendingLog: '',
   fatal: '',
+  jobConnectionError: '',
+  startingJob: false,
 };
 let shell = null;
+let refreshPromise = null;
+let forceRefreshPending = false;
+let stateRevision = 0;
 
 const ctx = {
   api,
   ui,
   get state() { return app.data; },
-  get busy() { return Boolean(app.jobId); },
+  get busy() { return Boolean(app.jobId) || app.startingJob || Boolean(app.data?.operation?.settings_busy); },
   get nodes() { return app.nodes; },
   navigate,
   refresh,
@@ -56,6 +67,10 @@ const ctx = {
   loadNodes,
   showLog,
   page: () => app.page,
+  acceptState(section, value) {
+    stateRevision++;
+    app.data[section] = value;
+  },
 };
 
 function h(tag, props, ...children) { return ui.el(tag, props, ...children); }
@@ -163,6 +178,17 @@ function renderBanners() {
   const host = document.getElementById('banners');
   if (!host || !app.data) return;
   const rows = [];
+  const labels = { browser: '浏览器状态', preview: '系统设置', update: '规则更新', service: 'Clash 服务' };
+  for (const [name, status] of Object.entries(app.data.collection || {})) {
+    if (status.error || status.stale) {
+      const last = status.read_at ? '上次读取：' + ui.formatTime(status.read_at) + '。' : '尚无成功读取记录。';
+      rows.push(ui.note((labels[name] || name) + '：' + (status.error ||
+        (status.refreshing ? '正在读取，当前值未验证。' : '结果已过期，当前值未验证。')) + last, 'warn'));
+    }
+  }
+  if (app.data.operation?.settings_pending?.length) {
+    rows.push(ui.note('检测到未完成的设置保存，请到「快照与恢复」恢复原设置后再继续操作。', 'bad'));
+  }
   if (app.data.admin) {
     rows.push(ui.note('界面以管理员权限运行，界面浏览器和沙箱浏览器也会继承管理员权限。建议关闭后从普通用户终端重新运行「一键网络.cmd」。', 'warn'));
   }
@@ -259,13 +285,62 @@ function navigate(page, options = {}) {
   window.scrollTo({ top: 0, behavior: 'instant' });
 }
 
-async function refresh(force = false) {
+function refresh(force = false) {
+  forceRefreshPending ||= force;
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = (async () => {
+    do {
+      const requestedForce = forceRefreshPending;
+      forceRefreshPending = false;
+      await refreshState(requestedForce);
+    } while (forceRefreshPending && !app.fatal);
+  })().finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
+// Keep form nodes, focus, selections and open logs while replacing status cards.
+function refreshPage() {
+  const content = document.getElementById('content');
+  const stack = content?.firstElementChild;
+  if (!stack || !stack.classList.contains('stack') || stack.classList.contains('startup-loading')) {
+    renderPage();
+    return;
+  }
+  if (app.page === 'help') return;
+  if (app.page === 'overview') { refreshOverview(ctx); return; }
+  const preserveForm = (app.page === 'browser' && browserHasDraft()) ||
+    (app.page === 'updates' && updatesHasDraft());
+  const keep = [...stack.querySelectorAll('[data-preserve-key]')]
+    .filter(node => node.dataset.preserveKey === 'open-log' || preserveForm);
+  const active = document.activeElement;
+  const scroll = window.scrollY;
+  renderPage();
+  for (const node of keep) {
+    const replacement = content.querySelector('[data-preserve-key="' + node.dataset.preserveKey + '"]');
+    if (!replacement) continue;
+    for (const button of node.querySelectorAll('button[id]')) {
+      const next = replacement.querySelector('#' + button.id);
+      if (next) button.disabled = next.disabled;
+    }
+    for (const [index, control] of [...node.querySelectorAll('input,select,textarea')].entries()) {
+      const next = replacement.querySelectorAll('input,select,textarea')[index];
+      if (next) control.disabled = next.disabled;
+    }
+    replacement.replaceWith(node);
+  }
+  if (active?.isConnected) active.focus({ preventScroll: true });
+  window.scrollTo(0, scroll);
+}
+
+async function refreshState(force = false) {
   try {
+    const revision = stateRevision;
     const data = await api.getState(force);
+    if (revision !== stateRevision) return;
     app.data = data;
     updateChrome();
     if (data.operation?.job && !app.jobId) resumeJob(data.operation.job.id);
-    if (force || !document.querySelector('#content > *')) renderPage();
+    refreshPage();
   } catch (error) {
     if (error instanceof api.SessionError) {
       renderFatal(error.message);
@@ -298,35 +373,50 @@ async function loadNodes(force = false) {
 }
 
 async function startJob(payload) {
-  if (app.jobId) {
+  if (ctx.busy) {
     ui.toast('另一个操作正在进行，请等待完成。', 'warn');
     return;
   }
+  app.startingJob = true;
   try {
     const job = await api.startJob(payload);
     app.jobId = job.id;
     app.job = job;
+    app.jobConnectionError = '';
     renderJobDock();
     updateChrome();
     pollJob();
   } catch (error) {
     ui.toast(error.message || '无法开始操作。', 'bad');
+  } finally {
+    app.startingJob = false;
   }
 }
 
 function resumeJob(id) {
   if (app.jobId === id) return;
   app.jobId = id;
-  api.getJob(id).then((job) => {
-    app.job = job;
-    renderJobDock();
-    updateChrome();
-    if (job.state === 'running') pollJob();
-    else if (job.state !== 'success') ui.toast(job.error || '上次操作未完成。', 'bad');
-  }).catch(() => {
-    app.jobId = null;
-    app.job = null;
-  });
+  pollJob();
+}
+
+async function finishJob(job) {
+  app.jobId = null;
+  clearTimeout(app.jobTimer);
+  updateChrome();
+  if (job.state === 'success' && job.action === 'update' && job.result?.skipped) {
+    ui.toast(job.result?.reason || '规则更新已跳过：订阅或脚本关联已变化。', 'warn', 8000);
+  } else if (job.state === 'success' && job.action === 'browser-open') {
+    const result = job.result || {};
+    const engine = result.engine === 'edge' ? 'Edge' : result.engine === 'chrome' ? 'Chrome' : '浏览器';
+    const fallback = result.requested_engine && result.requested_engine !== 'auto' && result.requested_engine !== result.engine;
+    ui.toast((fallback ? '所选引擎启动失败，已改用 ' : '已打开 ') + engine + ' 沙箱浏览器。', fallback ? 'warn' : 'ok', 8000);
+  } else if (job.state === 'success' && job.action === 'browser-register') {
+    ui.toast('已注册沙箱浏览器，请在 Windows 默认应用设置中手动确认。', 'ok', 8000);
+  } else if (job.state === 'success') ui.toast(ACTION_LABELS[job.action] + '已完成。', 'ok', 6000);
+  else if (job.state === 'cancelled') ui.toast(job.error || '操作已取消，请检查日志确认当前状态。', 'warn', 6000);
+  else ui.toast(job.error || '操作未完成，请查看日志。', 'bad', 9000);
+  // Do not await an existing refresh which may itself have resumed this job.
+  refresh(true);
 }
 
 async function pollJob() {
@@ -337,24 +427,33 @@ async function pollJob() {
     const job = await api.getJob(id);
     if (id !== app.jobId) return;
     app.job = job;
+    app.jobConnectionError = '';
     renderJobDock();
     updateChrome();
     if (job.state === 'running') {
       app.jobTimer = setTimeout(pollJob, 900);
       return;
     }
-    app.jobId = null;
-    updateChrome();
-    if (job.state === 'success' && job.action === 'update' && job.result?.skipped) {
-      ui.toast(job.result?.reason || '规则更新已跳过：订阅或脚本关联已变化。', 'warn', 8000);
-    } else if (job.state === 'success') ui.toast(ACTION_LABELS[job.action] + '已完成。', 'ok', 6000);
-    else if (job.state === 'cancelled') ui.toast(job.error || '操作已取消，没有修改设置。', 'warn', 6000);
-    else ui.toast(job.error || '操作未完成，请查看日志。', 'bad', 9000);
-    await refresh(true);
+    await finishJob(job);
   } catch (error) {
-    if (id === app.jobId) {
-      app.jobTimer = setTimeout(pollJob, 1800);
+    if (id !== app.jobId) return;
+    if (error instanceof api.SessionError) {
+      clearTimeout(app.jobTimer);
+      renderFatal(error.message);
+      return;
     }
+    if (error.status === 404) {
+      app.jobId = null;
+      app.job = null;
+      renderJobDock();
+      updateChrome();
+      ui.toast('任务记录不存在，无法确认操作结果。请查看日志和当前设置。', 'warn', 9000);
+      refresh(true);
+      return;
+    }
+    app.jobConnectionError = '连接中断，暂时无法确认任务状态；正在重试。请勿重复操作。';
+    renderJobDock();
+    app.jobTimer = setTimeout(pollJob, 3000);
   }
 }
 
@@ -370,6 +469,11 @@ function renderJobDock() {
   const dock = document.getElementById('job-dock');
   if (!dock) return;
   const job = app.job;
+  if (!job && app.jobConnectionError) {
+    dock.hidden = false;
+    dock.replaceChildren(ui.note(app.jobConnectionError, 'warn'));
+    return;
+  }
   if (!job) {
     dock.hidden = true;
     dock.replaceChildren();
@@ -423,6 +527,8 @@ function renderJobDock() {
       job.exit_code !== null && job.exit_code !== undefined ? h('span', { text: '退出码 ' + job.exit_code }) : null),
     details.length ? h('div', { class: 'job-events' }, details) : null,
     job.error && !running ? h('div', { class: 'job-error' }, ui.note(job.error, 'bad')) : null,
+    job.record_warning ? ui.note(job.record_warning, 'warn') : null,
+    app.jobConnectionError ? ui.note(app.jobConnectionError, 'warn') : null,
     logDetails,
     h('div', { class: 'job-actions' }, actions)));
 }
@@ -477,7 +583,7 @@ async function openLogInline(name) {
 }
 
 async function shutdown() {
-  if (app.jobId) {
+  if (ctx.busy) {
     ui.toast('操作仍在进行，完成后再退出界面。', 'warn');
     return;
   }
@@ -499,6 +605,8 @@ async function shutdown() {
 }
 
 function renderFatal(message) {
+  app.fatal = message || '会话已失效';
+  clearTimeout(app.jobTimer);
   document.body.replaceChildren(h('div', { class: 'fatal' },
     logoMark(36),
     h('h1', { text: '无法连接本地界面服务' }),
@@ -521,7 +629,7 @@ async function init() {
   await refresh(true);
   window.scrollTo(0, 0);
   setInterval(() => { api.heartbeat().catch(() => {}); }, 8000);
-  setInterval(() => { if (!app.jobId && document.visibilityState === 'visible') refresh(false); }, 9000);
+  setInterval(() => { if (!app.fatal && !app.jobId && document.visibilityState === 'visible') refresh(false); }, 9000);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       api.heartbeat().catch(() => {});

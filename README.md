@@ -11,6 +11,8 @@ Windows 11 + Clash Verge Rev / Mihomo 的本地网络配置工具：国内域名
 
 > 本项目不安装或登录 Claude，不处理账号，不保证账号可用性，不伪造浏览器指纹。仅支持 Windows。
 
+**禁止连接 Claude 进行测试。** 开发、回归及验收不得访问真实 Claude/Anthropic 服务（包括 HTTP/API、WebSocket、相关域名 DNS），不得打开 Claude 网页、桌面程序或登录页，也不得为了测试启动浏览器。相关规则只用离线样例和 mock 验证，真实路由、应用与账号行为均标为未验证；此限制不影响用户另行授权的正常使用。
+
 ## 安装
 
 详见 [INSTALL.md](INSTALL.md)。
@@ -21,6 +23,8 @@ Windows 11 + Clash Verge Rev / Mihomo 的本地网络配置工具：国内域名
 4. 界面打开后选择节点、确认影响并配置。
 
 浏览器沙箱使用本机已安装的 Edge 或 Chrome，不下载、不修改其默认资料。
+
+运行环境下载已固定 Python 3.13.17、Node.js v26.13.0 及 get-pip.py 的 SHA256；缓存和新下载文件均在解压或执行前校验，不匹配时停止安装。校验值已于 2026-11-02 与官方 HTTPS 来源独立核对：Python 官方发布记录中的摘要、Node.js 官方 SHA256 清单、PyPA 官方脚本内容均匹配。来源、校验方式和固定摘要记录在 `assets/runtime-provenance.json`，安装器读取该清单；开发核对工具 `scripts/runtime_provenance.py` 只有显式传入 `--online` 才联网，且只允许上述官方域名。此核对依赖官方 HTTPS，不声称独立验证了发布签名。升级版本或上游 get-pip.py 发生变化时，需先审核并更新清单。
 
 ## 图形界面
 
@@ -37,6 +41,8 @@ Windows 11 + Clash Verge Rev / Mihomo 的本地网络配置工具：国内域名
 | 使用说明 | 操作边界和故障处理 |
 
 界面服务只监听 `127.0.0.1` 的随机端口，使用一次性令牌、`SameSite=Strict` 会话 Cookie、CSRF 头、同源 `Origin` 和 CSP。界面以普通用户运行；配置/补充/恢复/快照/重配置在点击后请求管理员权限。
+
+系统和浏览器状态在后台读取，查询失败或结果过期时会显示提示与上次成功读取时间，不把缓存结果当作当前实测。自动刷新通过固定区域标识保留未保存表单和已打开日志；保存期间新增的编辑仍保留为待保存草稿。旧查询结果不会覆盖已保存的新状态。
 
 一键配置页在节点选择之前展示当前系统配置与完整变更说明；选择节点或修改出口地区后，动态显示“配置后会：当前值 → 目标值”。现值只读采集（最多缓存 30 秒），无法读取的项目标为未验证；代理只显示字段数量等摘要，不显示凭据。系统显示语言保持原样，区域格式与沙箱浏览器语言按地区同步。
 
@@ -85,6 +91,8 @@ Windows「设置 → 时间和语言 → 语言和区域 → 区域格式」也�
 
 配置流程读取界面选择；恢复流程移除任务；界面可立即更新并显示上次结果和下次运行时间。
 
+保存更新方式与配置、恢复等操作共用互斥保护，保存及恢复期间不能退出界面。修改前将原设置及计划任务的 XML、权限保存到 `.local/gui/settings-transactions/`，并持久化记录操作阶段及备份校验值；失败时一起恢复，原本不存在的文件或任务仍恢复为不存在。断电或进程中断后，重启界面会发现未完成的保存，暂停新的修改；在「快照与恢复 → 未完成的设置保存」点击「恢复原设置」后可继续。备份校验失败时不重放，恢复失败可重试。这些记录独立于网络快照，不改变首次基线或旧快照格式；没有阶段记录的旧版历史备份不会被猜测为中断操作并自动重放。
+
 ## 浏览器沙箱
 
 Claude 使用独立资料目录：
@@ -107,6 +115,12 @@ Claude 使用独立资料目录：
 这是资料目录隔离，不是操作系统级沙箱，也不是指纹伪装。扩展、其他浏览器、Docker/WSL、虚拟机和账号行为仍需另行验证。
 
 启动后会确认浏览器确实创建了可见窗口；只有后台进程残留不算打开成功。所选引擎在时限内没有窗口时会改用另一个已安装引擎，并在界面提示实际使用的引擎和退出代码。
+
+浏览器打开、自检、关闭、重置及默认应用注册均使用可查询的后台任务。界面先取得任务编号，再显示实际执行结果；连接暂时中断时继续保留任务，避免把请求超时当作启动失败，也避免重复执行。任务结束前不能退出界面。
+
+任务创建时先保存必要记录，再登记忙碌状态并启动工作线程；记录或线程创建失败会撤销登记。子进程启动后立即保留跟踪信息，运行记录写入失败时会提示并继续等待进程结束；结果无法落盘时保留当前会话中的结果，不提前解除忙碌状态。未完成的设置恢复由共用操作锁保护，定时更新、独立验证和控制台配置同样会停止；设置恢复通道只豁免设置记录检查，仍受防火墙回滚和并发保护约束。
+
+进程查询区分运行中、已退出和无法确认；查询超时、异常或输出无效时，不会解除任务保护。手动结束后还会确认进程退出。启动时只清理超出最近 30 条保留范围的已结束任务记录；运行中、状态不明及损坏的记录均保留，不自动结束进程。来源核对在读取清单前先记录本次未成功状态，清单缺失、损坏、格式无效或联网失败都会生成本次失败报告，不继续使用旧成功结果。
 
 ### 浏览器首页与环境自检
 
@@ -169,7 +183,7 @@ icacls . /setintegritylevel "(OI)(CI)Medium"
 
 - 国内网站 HTTP 200；
 - 海外出口国家与所选地区一致；
-- DNS A 有结果，64/65 为空；`claude.ai` 得到 fake-IP；
+- DNS A 有结果，64/65 为空；通用测试域名 `example.com` 得到 fake-IP（不探测 Claude 域名）；
 - 公网 IPv6 不可达；
 - UDP STUN 出口与节点路由；
 - Git/npm 出口；
@@ -179,6 +193,7 @@ icacls . /setintegritylevel "(OI)(CI)Medium"
 不测试或需人工确认：
 
 - Claude 网页/账号可用性；不安装、不登录 Claude；
+- Claude/Anthropic 真实域名 DNS、HTTP/API 及真实流量分流；禁止为测试访问；
 - 沙箱浏览器实际 WebRTC/DNS/指纹和扩展行为；
 - Docker/WSL/虚拟机内部出口；
 - 任意应用自带加密 DNS。
@@ -194,6 +209,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_firewall_rules.
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_system_logic.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_location_logic.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_region_time_logic.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_update_task_logic.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_bootstrap_logic.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_operation_guard.ps1
 .\.runtime\python313\python.exe scripts/check_project.py
 ```
 

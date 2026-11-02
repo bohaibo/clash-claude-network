@@ -2,6 +2,7 @@
 import argparse,ctypes,json,os,subprocess,sys,time,uuid
 from pathlib import Path
 import baseline,client
+from operation_lock import check_pending_settings
 
 def save(folder,name,value):client.write(folder/name,value)
 
@@ -169,6 +170,7 @@ def worker(folder,action):
  return subprocess.call(command(job,action))
 
 def reconfigure():
+ check_pending_settings(client.LOCAL)
  if os.name!='nt' or not ctypes.windll.shell32.IsUserAnAdmin():raise RuntimeError('Administrator required')
  active=client.LOCAL/'reconfigure-active.json'
  if active.exists():raise RuntimeError('Another reconfigure/recovery is unresolved; inspect its local job before retrying')

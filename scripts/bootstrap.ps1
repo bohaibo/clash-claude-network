@@ -16,7 +16,26 @@ try{[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls1
 
 function Say([string]$text,[string]$color='White'){if(!$Quiet){Write-Host $text -ForegroundColor $color}}
 function Fail([string]$text){throw $text}
+# Pins independently checked against official HTTPS sources; see the manifest for trust limits.
+$provenance=Get-Content -LiteralPath (Join-Path $project 'assets/runtime-provenance.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if($provenance.version -ne 1){Fail '运行环境来源清单版本无效。'}
+$downloadHashes=@{}
+foreach($entry in $provenance.files){
+ if($entry.name -notmatch '^[A-Za-z0-9._-]+$' -or $entry.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or $downloadHashes.ContainsKey($entry.name)){Fail '运行环境来源清单无效。'}
+ $downloadHashes[$entry.name]=[string]$entry.sha256
+}
+function Assert-DownloadHash([string]$target){
+ $name=Split-Path -Leaf $target
+ $expected=$downloadHashes[$name]
+ if(!$expected){Fail ('下载文件没有固定的 SHA256：'+$name)}
+ if((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $expected){
+  Fail ('下载文件 SHA256 不匹配，已停止安装：'+$name)
+ }
+}
 function Download([string]$url,[string]$target){
+ if(Test-Path -LiteralPath $target){
+  try{Assert-DownloadHash $target;return}catch{Remove-Item -LiteralPath $target -Force}
+ }
  Say ('  下载 '+$url) 'DarkGray'
  $curl=Join-Path $env:SystemRoot 'System32\curl.exe'
  if(Test-Path -LiteralPath $curl){
@@ -27,6 +46,7 @@ function Download([string]$url,[string]$target){
   try{Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $target -TimeoutSec 600}finally{$ProgressPreference=$old}
  }
  if(!(Test-Path -LiteralPath $target) -or (Get-Item -LiteralPath $target).Length -lt 1024){Fail ('下载失败：'+$url)}
+ Assert-DownloadHash $target
 }
 
 function Test-Python313 {
@@ -39,17 +59,7 @@ function Ensure-Python {
  if(Test-Python313){Say ('  Python 3.13 已就绪：'+$python) 'Green';return}
  if($NoInstall){Fail '缺少项目内 Python 3.13。请运行 一键网络.cmd 自动安装到 .runtime。'}
  Say '  安装项目内 Python 3.13（不修改系统 PATH，不安装到系统目录）…' 'Yellow'
- $page=$null
- try{$page=(Invoke-WebRequest -UseBasicParsing -Uri 'https://www.python.org/ftp/python/' -TimeoutSec 60).Content}catch{}
  $version='3.13.17'
- if($page){
-  $matches=[regex]::Matches([string]$page,'href="(3\.13\.\d+)/"')
-  $candidates=@($matches | ForEach-Object {$_.Groups[1].Value} | Sort-Object {[version]$_} -Descending)
-  foreach($candidate in $candidates){
-   $probe='https://www.python.org/ftp/python/'+$candidate+'/python-'+$candidate+'-embed-amd64.zip'
-   try{Invoke-WebRequest -UseBasicParsing -Method Head -Uri $probe -TimeoutSec 30 | Out-Null;$version=$candidate;break}catch{}
-  }
- }
  $zip=Join-Path $downloads ('python-'+$version+'-embed-amd64.zip')
  Download ('https://www.python.org/ftp/python/'+$version+'/python-'+$version+'-embed-amd64.zip') $zip
  $temp=Join-Path $runtime 'python-temp'
@@ -119,13 +129,7 @@ function Ensure-Node {
  if(Test-Node){Say ('  Node.js 已就绪：'+$node) 'Green';return}
  if($NoInstall){Fail '缺少项目内 Node.js。请运行 一键网络.cmd 自动安装到 .runtime。'}
  Say '  安装项目内 Node.js（不修改系统 PATH）…' 'Yellow'
- $index=$null
- try{$index=Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 60}catch{}
  $version='v26.13.0'
- if($index){
-  $lts=@($index | Where-Object {$_.lts -ne $false} | Select-Object -First 1)
-  if($lts.Count -and $lts[0].version){$version=[string]$lts[0].version}
- }
  $name='node-'+$version+'-win-x64'
  $zip=Join-Path $downloads ($name+'.zip')
  Download ('https://nodejs.org/dist/'+$version+'/'+$name+'.zip') $zip

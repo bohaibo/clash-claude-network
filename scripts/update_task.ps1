@@ -1,4 +1,4 @@
-﻿param([ValidateSet('install','remove','status')][string]$Action,[string]$Python,[string]$At='13:00',[ValidateRange(1,365)][int]$DaysInterval=1)
+﻿param([ValidateSet('install','remove','status','snapshot','rollback')][string]$Action,[string]$Python,[string]$At='13:00',[ValidateRange(1,365)][int]$DaysInterval=1,[string]$StateFile)
 $ErrorActionPreference='Stop'
 $project=Split-Path -Parent $PSScriptRoot
 $digest=[Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($project))
@@ -53,7 +53,49 @@ if($Action -eq 'status'){
  return
 }
 
-if($Action -eq 'remove'){if($existing){Unregister-ScheduledTask -TaskName $name -Confirm:$false};return}
+function Assert-OwnedUpdateTask($task){
+ if(!$task){return}
+ if(@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -ne $expectedAction -or $task.Actions[0].Execute -ne $Python -or [int]$task.Principal.RunLevel -ne 0){throw 'Unexpected update task definition; task unchanged.'}
+ $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+ $sid=([Security.Principal.NTAccount]::new($task.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier])
+ if($sid.Value -ne $identity.User.Value){throw 'Update task belongs to another user; task unchanged.'}
+}
+
+function Get-UpdateTaskRegistration {
+ $scheduler=New-Object -ComObject 'Schedule.Service';$scheduler.Connect()
+ return $scheduler.GetFolder('\').GetTask($name)
+}
+
+if($Action -in @('snapshot','rollback')){
+ $target=[IO.Path]::GetFullPath($StateFile)
+ $allowed=[IO.Path]::GetFullPath((Join-Path $project '.local')).TrimEnd('\')+'\'
+ if(!$target.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase)){throw 'Task recovery records must stay under project .local.'}
+ Assert-OwnedUpdateTask $existing
+ if($Action -eq 'snapshot'){
+  if(Test-Path -LiteralPath $target){throw 'Task recovery point already exists; refusing to overwrite.'}
+  $record=[ordered]@{version=1;name=$name;installed=[bool]$existing;xml='';sddl=''}
+  if($existing){
+   $record.xml=Export-ScheduledTask -TaskName $name -ErrorAction Stop
+   $record.sddl=(Get-UpdateTaskRegistration).GetSecurityDescriptor(4)
+  }
+  $record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $target -Encoding UTF8
+  return
+ }
+ $record=Get-Content -LiteralPath $target -Raw -Encoding UTF8 | ConvertFrom-Json
+ if($record.version -ne 1 -or $record.name -ne $name -or $record.installed -isnot [bool]){throw 'Invalid task recovery record.'}
+ if($record.installed){
+  if(!$record.xml -or !$record.sddl){throw 'Incomplete task recovery record.'}
+  Register-ScheduledTask -TaskName $name -Xml $record.xml -Force -ErrorAction Stop | Out-Null
+  (Get-UpdateTaskRegistration).SetSecurityDescriptor($record.sddl,0)
+  if((Get-UpdateTaskRegistration).GetSecurityDescriptor(4) -ne $record.sddl){throw 'Task access recovery verification failed.'}
+  $actual=Export-ScheduledTask -TaskName $name -ErrorAction Stop
+  $before=[xml]$record.xml;$after=[xml]$actual
+  if($before.Task.Triggers.OuterXml -ne $after.Task.Triggers.OuterXml -or $before.Task.Settings.Enabled -ne $after.Task.Settings.Enabled){throw 'Task recovery verification failed.'}
+ } elseif($existing){Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop}
+ return
+}
+
+if($Action -eq 'remove'){Assert-OwnedUpdateTask $existing;if($existing){Unregister-ScheduledTask -TaskName $name -Confirm:$false};return}
 
 if($At -notmatch '^(?:[01]\d|2[0-3]):[0-5]\d$'){throw '定时更新时间须为 HH:MM（00:00–23:59）。'}
 if($DaysInterval -lt 1 -or $DaysInterval -gt 365){throw '更新间隔必须是 1–365 天。'}
