@@ -1,4 +1,4 @@
-function Assert-NoPendingSettings([string]$LocalDir) {
+﻿function Assert-NoPendingSettings([string]$LocalDir) {
  $root=Join-Path $LocalDir 'gui/settings-transactions'
  foreach($folder in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)){
   if($folder.Name -notmatch '^[a-f0-9]{32}$'){continue}

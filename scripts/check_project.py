@@ -21,6 +21,12 @@ def check():
   relative=path.relative_to(PROJECT)
   require('.local' not in relative.parts,'Local machine data is tracked')
   if path.suffix=='.py':py_compile.compile(str(path),doraise=True)
+  # Windows PowerShell 5.1 decodes BOM-less scripts using the system ANSI code
+  # page. Chinese text can then become quote tokens and stop parsing at import.
+  if path.suffix.lower()=='.ps1':
+   raw=path.read_bytes()
+   require(raw.isascii() or raw.startswith(b'\xef\xbb\xbf'),
+           'Non-ASCII PowerShell script requires UTF-8 BOM for Windows PowerShell 5.1: '+str(relative))
   text=path.read_text(encoding='utf-8-sig')
   require(not re.search(r'(?:gh[pousr]_[A-Za-z0-9]{25,}|github_pat_[A-Za-z0-9_]{35,}|-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----)',text),'Credential-like material found in '+str(relative))
   require(not any(value in text for value in banned),'Original machine data found in '+str(relative))
