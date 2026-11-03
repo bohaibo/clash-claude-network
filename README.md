@@ -24,7 +24,9 @@ Windows 11 + Clash Verge Rev / Mihomo 的本地网络配置工具：国内域名
 
 浏览器沙箱使用本机已安装的 Edge 或 Chrome，不下载、不修改其默认资料。
 
-运行环境下载已固定 Python 3.13.17、Node.js v26.13.0 及 get-pip.py 的 SHA256；缓存和新下载文件均在解压或执行前校验，不匹配时停止安装。校验值已于 2026-11-02 与官方 HTTPS 来源独立核对：Python 官方发布记录中的摘要、Node.js 官方 SHA256 清单、PyPA 官方脚本内容均匹配。来源、校验方式和固定摘要记录在 `assets/runtime-provenance.json`，安装器读取该清单；开发核对工具 `scripts/runtime_provenance.py` 只有显式传入 `--online` 才联网，且只允许上述官方域名。此核对依赖官方 HTTPS，不声称独立验证了发布签名。升级版本或上游 get-pip.py 发生变化时，需先审核并更新清单。
+需要安装时，运行环境自动解析官方最新兼容版本：Python 选择 3.13 系列中提供 Windows x64 嵌入包的最新稳定版（跳过仅发布源码的版本），Node.js 选择提供 Windows x64 ZIP 的最新 LTS，PyYAML 按 `requirements.txt` 选择最新兼容版本。Python 从官方 Sigstore 记录读取 SHA256，Node.js 从官方 SHASUMS256.txt 读取 SHA256；缓存及新下载包均在解压前校验。缺少 pip 时下载 PyPA 官方当前 get-pip.py，记录内容 SHA256 并校验落盘文件，不再被旧脚本摘要锁住。官方元数据请求仅允许指定官方 HTTPS 主机且拒绝重定向；无法获取或校验失败时停止，不绕过校验。此信任基于官方 HTTPS，不声称独立验证了发布签名；PyPA 脚本无独立摘要来源。
+
+已正常工作的环境继续复用，不在每次启动时强制联网或升级。安装中断后再次运行可修复缺失的 pip 和依赖，无需删除运行环境。实际下载来源、版本文件名及摘要保存在 `.local/runtime-downloads.json`。`assets/runtime-provenance.json` 保留历史审核参考，安装器不再用它锁定版本；`scripts/runtime_provenance.py --online` 仅核对该历史清单，不代表当前自动选择结果。
 
 ## 图形界面
 

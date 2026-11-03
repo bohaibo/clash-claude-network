@@ -12,6 +12,7 @@ Windows 11 only. Read [README.md](README.md), [INSTALL.md](INSTALL.md), and [ref
 - The human supplies an **exact existing node name**. Never invent, replace or guess nodes. Default exit country is SG.
 - The root `一键网络.cmd` opens the GUI; `--menu` is the console fallback.
 - Python 3.13, PyYAML and Node.js live in project `.runtime`; never install them system-wide or modify PATH. Run `scripts/bootstrap.ps1` if `.runtime` is missing.
+- Missing runtimes resolve latest compatible official releases (Python 3.13 Windows embedded, Node LTS x64, requirements-constrained PyYAML). Verify archive SHA256 against official release metadata; fetch current get-pip over official HTTPS when pip is missing. Reuse working runtimes. Actual source/digest records belong in `.local/runtime-downloads.json`; `assets/runtime-provenance.json` is historical reference only.
 - Apply/supplement may write only the managed, restorable WebRTC policies for Chrome/Edge/Firefox. Never edit default browser preferences or language fields, and never close the default browser. Claude uses `.local/browser/profile`; the GUI uses `.local/gui/browser-profile`.
 - The GUI is loopback-only and non-admin; admin actions are delegated to `scripts/run.ps1` with UAC. Keep it bound to `127.0.0.1`.
 

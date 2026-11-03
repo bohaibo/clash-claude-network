@@ -16,13 +16,86 @@ try{[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls1
 
 function Say([string]$text,[string]$color='White'){if(!$Quiet){Write-Host $text -ForegroundColor $color}}
 function Fail([string]$text){throw $text}
-# Pins independently checked against official HTTPS sources; see the manifest for trust limits.
-$provenance=Get-Content -LiteralPath (Join-Path $project 'assets/runtime-provenance.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if($provenance.version -ne 1){Fail '运行环境来源清单版本无效。'}
+# Resolve current compatible releases only when installation is needed. Historical
+# pins in assets/runtime-provenance.json remain a reference, not an update lock.
 $downloadHashes=@{}
-foreach($entry in $provenance.files){
- if($entry.name -notmatch '^[A-Za-z0-9._-]+$' -or $entry.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or $downloadHashes.ContainsKey($entry.name)){Fail '运行环境来源清单无效。'}
- $downloadHashes[$entry.name]=[string]$entry.sha256
+$resolvedFiles=@{}
+function Get-OfficialBytes([string]$url){
+ $uri=[uri]$url
+ if($uri.Scheme -ne 'https' -or $uri.Host -notin @('www.python.org','nodejs.org','bootstrap.pypa.io') -or $uri.Port -ne 443 -or $uri.UserInfo){Fail '运行环境来源必须是允许的官方 HTTPS 地址。'}
+ # No redirects: never follow metadata or executable code to another host.
+ $response=Invoke-WebRequest -UseBasicParsing -Uri $uri -MaximumRedirection 0 -TimeoutSec 60
+ if($response.StatusCode -ne 200){Fail '官方来源响应异常。'}
+ $bytes=$response.RawContentStream.ToArray()
+ if(!$bytes.Length -or $bytes.Length -gt 8MB){Fail '官方来源内容为空或过大。'}
+ return ,$bytes
+}
+function Get-OfficialText([string]$url){
+ return [Text.Encoding]::UTF8.GetString((Get-OfficialBytes $url))
+}
+function Register-Download([string]$name,[string]$url,[string]$source,[string]$digest,[string]$method){
+ if($name -notmatch '^[A-Za-z0-9._-]+$' -or $digest -notmatch '^[a-fA-F0-9]{64}$'){Fail '官方文件名或 SHA256 无效。'}
+ $downloadHashes[$name]=$digest
+ $resolvedFiles[$name]=[ordered]@{name=$name;download_url=$url;source_url=$source;sha256=$digest.ToLowerInvariant();method=$method;resolved_at=(Get-Date).ToUniversalTime().ToString('o')}
+ # Machine-local record of actual selections; never rewrite the shipped reference.
+ @($resolvedFiles.Values) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'runtime-downloads.json') -Encoding UTF8
+}
+function Select-PythonVersion([string]$listing){
+ $versions=@([regex]::Matches($listing,'href="(3\.13\.\d+)/"') | ForEach-Object {$_.Groups[1].Value} | Sort-Object {[version]$_} -Descending -Unique)
+ if(!$versions.Count){Fail '官方目录中没有 Python 3.13 稳定版。'}
+ return $versions[0]
+}
+function Select-NodeVersion($releases){
+ $versions=@($releases | Where-Object {$_.version -cmatch '^v\d+\.\d+\.\d+$' -and $_.lts -is [string] -and $_.lts -and $_.files -contains 'win-x64-zip'} | Sort-Object {[version]$_.version.Substring(1)} -Descending)
+ if(!$versions.Count){Fail '官方目录中没有 Windows x64 Node.js LTS 稳定版。'}
+ return [string]$versions[0].version
+}
+function Resolve-PythonDownload {
+ $listing=Get-OfficialText 'https://www.python.org/ftp/python/'
+ $null=Select-PythonVersion $listing
+ $versions=@([regex]::Matches($listing,'href="(3\.13\.\d+)/"') | ForEach-Object {$_.Groups[1].Value} | Sort-Object {[version]$_} -Descending -Unique)
+ $version=$null
+ foreach($candidate in $versions){
+  $candidateName='python-'+$candidate+'-embed-amd64.zip'
+  $base='https://www.python.org/ftp/python/'+$candidate+'/'
+  $files=Get-OfficialText $base
+  # Security-only Python releases can contain source archives without Windows
+  # binaries. Select the newest release actually providing our embedded package.
+  if($files.Contains('href="'+$candidateName+'"') -and $files.Contains('href="'+$candidateName+'.sigstore"')){
+   $version=$candidate;$name=$candidateName;$url=$base+$name;break
+  }
+ }
+ if(!$version){Fail '官方目录中没有可校验的 Python 3.13 Windows x64 嵌入包。'}
+ $source=$url+'.sigstore'
+ $record=(Get-OfficialText $source | ConvertFrom-Json).messageSignature.messageDigest
+ if($record.algorithm -ne 'SHA2_256'){Fail 'Python 官方摘要算法无效。'}
+ $bytes=[Convert]::FromBase64String($record.digest)
+ if($bytes.Length -ne 32){Fail 'Python 官方摘要长度无效。'}
+ $digest=([BitConverter]::ToString($bytes)).Replace('-','').ToLowerInvariant()
+ Register-Download $name $url $source $digest 'sigstore-published-digest'
+ return [pscustomobject]@{version=$version;name=$name;url=$url}
+}
+function Resolve-NodeDownload {
+ $version=Select-NodeVersion (Get-OfficialText 'https://nodejs.org/dist/index.json' | ConvertFrom-Json)
+ $name='node-'+$version+'-win-x64.zip'
+ $base='https://nodejs.org/dist/'+$version+'/'
+ $source=$base+'SHASUMS256.txt'
+ $pattern='(?m)^([a-fA-F0-9]{64})\s+'+[regex]::Escape($name)+'\s*$'
+ $matches=[regex]::Matches((Get-OfficialText $source),$pattern)
+ if($matches.Count -ne 1){Fail 'Node.js 官方摘要缺失或重复。'}
+ Register-Download $name ($base+$name) $source $matches[0].Groups[1].Value 'shasums256'
+ return [pscustomobject]@{version=$version;name=$name;url=($base+$name)}
+}
+function Save-LatestGetPip([string]$target){
+ $url='https://bootstrap.pypa.io/get-pip.py'
+ $bytes=Get-OfficialBytes $url
+ $sha=[Security.Cryptography.SHA256]::Create()
+ try{$digest=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+ # PyPA publishes this script over HTTPS without a separate checksum. Record
+ # that trust explicitly, then verify the saved bytes before execution.
+ Register-Download 'get-pip.py' $url $url $digest 'official-https-content-sha256'
+ [IO.File]::WriteAllBytes($target,$bytes)
+ Assert-DownloadHash $target
 }
 function Assert-DownloadHash([string]$target){
  $name=Split-Path -Leaf $target
@@ -59,9 +132,9 @@ function Ensure-Python {
  if(Test-Python313){Say ('  Python 3.13 已就绪：'+$python) 'Green';return}
  if($NoInstall){Fail '缺少项目内 Python 3.13。请运行 一键网络.cmd 自动安装到 .runtime。'}
  Say '  安装项目内 Python 3.13（不修改系统 PATH，不安装到系统目录）…' 'Yellow'
- $version='3.13.17'
- $zip=Join-Path $downloads ('python-'+$version+'-embed-amd64.zip')
- Download ('https://www.python.org/ftp/python/'+$version+'/python-'+$version+'-embed-amd64.zip') $zip
+ $release=Resolve-PythonDownload
+ $zip=Join-Path $downloads $release.name
+ Download $release.url $zip
  $temp=Join-Path $runtime 'python-temp'
  Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
  Expand-Archive -LiteralPath $zip -DestinationPath $temp -Force
@@ -72,10 +145,6 @@ function Ensure-Python {
  if($pth){
   @('python313.zip','.','Lib\site-packages','..\..\scripts','import site') | Set-Content -LiteralPath $pth.FullName -Encoding ASCII
  }
- $getpip=Join-Path $downloads 'get-pip.py'
- Download 'https://bootstrap.pypa.io/get-pip.py' $getpip
- & $python $getpip --no-warn-script-location --disable-pip-version-check
- if($LASTEXITCODE -ne 0){Fail '项目内 Python 安装 pip 失败。'}
 }
 
 function Ensure-Pth {
@@ -111,9 +180,26 @@ function Test-Yaml {
  try{& $python -c 'import yaml' 2>$null;return ($LASTEXITCODE -eq 0)}catch{return $false}
 }
 
+function Test-Pip {
+ try{& $python -m pip --version 2>$null | Out-Null;return ($LASTEXITCODE -eq 0)}catch{return $false}
+}
+
+function Ensure-Pip {
+ # Python can survive an interrupted first install without pip. Repair independently
+ # after configuring its import paths, using the current official bootstrap.
+ if(Test-Pip){return}
+ if($NoInstall){Fail '缺少项目内 pip。请运行 一键网络.cmd 自动修复 .runtime。'}
+ Say '  安装/修复项目内 pip…' 'Yellow'
+ $getpip=Join-Path $downloads 'get-pip.py'
+ Save-LatestGetPip $getpip
+ & $python $getpip --no-user --no-warn-script-location --disable-pip-version-check
+ if($LASTEXITCODE -ne 0 -or !(Test-Pip)){Fail '项目内 pip 安装/修复失败；请检查上方输出及 .runtime 目录权限后重试。'}
+}
+
 function Ensure-Yaml {
  if(Test-Yaml){Say '  PyYAML 已就绪' 'Green';return}
  if($NoInstall){Fail '缺少项目内 PyYAML。请运行 一键网络.cmd 自动安装。'}
+ Ensure-Pip
  Say '  安装 PyYAML 到项目内 Python…' 'Yellow'
  & $python -m pip install --no-warn-script-location --disable-pip-version-check --no-user -r (Join-Path $project 'requirements.txt')
  if($LASTEXITCODE -ne 0 -or !(Test-Yaml)){Fail 'PyYAML 安装失败；请检查网络或 .runtime 目录权限。'}
@@ -129,10 +215,9 @@ function Ensure-Node {
  if(Test-Node){Say ('  Node.js 已就绪：'+$node) 'Green';return}
  if($NoInstall){Fail '缺少项目内 Node.js。请运行 一键网络.cmd 自动安装到 .runtime。'}
  Say '  安装项目内 Node.js（不修改系统 PATH）…' 'Yellow'
- $version='v26.13.0'
- $name='node-'+$version+'-win-x64'
- $zip=Join-Path $downloads ($name+'.zip')
- Download ('https://nodejs.org/dist/'+$version+'/'+$name+'.zip') $zip
+ $release=Resolve-NodeDownload
+ $zip=Join-Path $downloads $release.name
+ Download $release.url $zip
  $temp=Join-Path $runtime 'node-temp'
  Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
  Expand-Archive -LiteralPath $zip -DestinationPath $temp -Force

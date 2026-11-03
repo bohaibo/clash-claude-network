@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "checked_on": "2026-11-02",
+  "checked_on": "2026-11-03",
   "trust": "Official HTTPS sources; detached release signatures are not independently verified.",
   "files": [
     {
@@ -19,7 +19,7 @@
     },
     {
       "name": "get-pip.py",
-      "sha256": "f4448a01e3ab2914c65f4ca59d4cacba6b2dbde19a483fbac46587f8bbaff424",
+      "sha256": "356e0d0de21cdc348c3394084d90939b85e4246c4d14c76aee6ca4f46646ea98",
       "download_url": "https://bootstrap.pypa.io/get-pip.py",
       "source_url": "https://bootstrap.pypa.io/get-pip.py",
       "method": "official-content-sha256"

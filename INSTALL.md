@@ -22,9 +22,9 @@
 双击项目根目录的 **一键网络.cmd**。首次启动会：
 
 1. 检查 Clash Verge 服务和数据目录；缺失时停止并给出安装链接。
-2. 下载 Python 3.13 embeddable 包到 `.runtime/python313/`。
-3. 安装 pip 和 `PyYAML>=6.0.3` 到项目 Python。
-4. 下载 Node.js LTS win-x64 zip 到 `.runtime/node/`。
+2. 从官方目录选择最新可用的 Python 3.13 Windows x64 embeddable 包，读取官方 SHA256 并校验，安装到 `.runtime/python313/`；仅有源码包的版本会跳过。
+3. 缺少 pip 时从 PyPA 官方获取当前引导脚本，再安装 `requirements.txt` 允许的最新兼容 PyYAML 到项目 Python；中断后重试会自动修复。
+4. 从官方版本列表选择最新 Node.js LTS win-x64 ZIP，读取官方 SHA256 并校验，安装到 `.runtime/node/`。
 5. 写入 `.local/env.json`，记录项目内解释器路径。
 6. 打开 GUI。
 
@@ -36,6 +36,8 @@
 - 安装 Clash Verge 或替换它的内核。
 
 首次下载约 50 MB；网络较慢时可能需要几分钟。下载支持断点续传，失败后再次运行 `一键网络.cmd` 会继续。
+
+官方发布新兼容版本或更新 get-pip.py 后，新安装自动使用官方当前版本，无需手动更新固定版本号或摘要。已有可用环境继续复用；不会每次启动都强制升级。官方源不可达、缺少校验信息或文件校验失败时会停止并显示原因，重试仍需网络可用。实际来源及摘要记录在 `.local/runtime-downloads.json`，PyPA 脚本基于官方 HTTPS 信任，不另行声称发布签名验证。
 
 ## 3. 验证项目环境
 
@@ -121,6 +123,7 @@ import site
 |---|---|
 | 提示未检测到 Clash Verge | 先安装 Clash Verge Rev，启动服务，导入订阅后再运行 |
 | Python 下载失败/很慢 | 重新运行 `一键网络.cmd` 继续断点续传；或按第 5 节手动放入 `.runtime/python313` |
+| `No module named pip` | 重新运行 `一键网络.cmd`；安装器会检测并修复项目 Python 中缺失的 pip，再安装 PyYAML，无需删除 `.runtime` |
 | `python313._pth` 缺少 `..\..\scripts` | 按第 5 节重写该文件，否则 Python 找不到 `checks.py` |
 | PyYAML 装到了用户目录 | 确认设置了 `PYTHONNOUSERSITE=1`；删除用户目录中的 `Python313\site-packages\yaml`，重新运行 bootstrap |
 | Node 下载失败 | 按第 5 节手动放入 `.runtime/node/node.exe` |
