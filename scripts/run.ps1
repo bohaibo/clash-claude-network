@@ -145,11 +145,22 @@ function Read-Selection([string]$prompt,[int]$maximum){
 }
 function Stop-ClashClient {
  $stopping=@(Get-Process clash-verge -ErrorAction SilentlyContinue)
- $ids=@($stopping | Where-Object {$_.Id} | Select-Object -ExpandProperty Id)
- $stopping | Stop-Process -Force
- foreach($processId in $ids){
-  Wait-Process -Id $processId -Timeout 15 -ErrorAction SilentlyContinue
-  if(Get-Process -Id $processId -ErrorAction SilentlyContinue){throw 'Clash 旧进程尚未退出，未继续写入；请检查客户端后重试。'}
+ try{
+  # 固定原进程句柄，等待该进程的退出信号；PID 查询仍返回对象不代表进程存活。
+  # 保留句柄直到等待结束，也避免把复用的 PID 当成原进程。
+  foreach($process in $stopping){$null=$process.Handle}
+  $stopping | Stop-Process -Force
+  foreach($process in $stopping){
+   if(!$process.WaitForExit(15000)){throw 'Clash 旧进程尚未退出，未继续写入；请检查客户端后重试。'}
+  }
+  # 原进程退出后，新的客户端同样可能写配置；无法确认其退出时必须停止。
+  foreach($process in @(Get-Process clash-verge -ErrorAction SilentlyContinue)){
+   try{
+    if(!$process.HasExited){throw 'Clash 客户端在关闭后仍有运行进程或被重新启动，未继续写入；请退出客户端及其自动启动程序后重试。'}
+   }finally{$process.Dispose()}
+  }
+ }finally{
+  foreach($process in $stopping){$process.Dispose()}
  }
 }
 function Start-ClashClient {
