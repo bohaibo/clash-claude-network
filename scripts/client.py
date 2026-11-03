@@ -207,11 +207,15 @@ def build(root,item,node,data=None):
  candidate=json.loads(result.stdout);validate(candidate,original,node)
  text=yaml.safe_dump(candidate,allow_unicode=True,sort_keys=False);check=LOCAL/'candidate.yaml';check.write_text(text,encoding='utf-8')
  result=subprocess.run([core,'-t','-d',str(root),'-f',str(check)],capture_output=True,timeout=45)
- require(result.returncode==0,'Mihomo validation failed; candidate retained locally for agent review')
+ # Keep native diagnostics local: they may include subscription or node details.
+ (LOCAL/'candidate-validation.stdout.log').write_bytes(result.stdout)
+ (LOCAL/'candidate-validation.stderr.log').write_bytes(result.stderr)
+ require(result.returncode==0,'Mihomo validation failed; see .local/candidate-validation.stdout.log and .local/candidate-validation.stderr.log')
  return wrapper,text,candidate,entry
 def validate(config,original,node):
  require(config['proxies']==original['proxies'],'Node definitions changed')
  require(config.get('mode')=='rule','Only rule mode is allowed; direct/global mode rejected')
+ require(config.get('find-process-mode')=='strict','Process matching must use strict mode')
  audit_ingress(config,GROUP)
  require(set(config.get('proxy-providers',{}))==set(original.get('proxy-providers',{})),'Subscription provider removed')
  for name,provider in original.get('proxy-providers',{}).items():

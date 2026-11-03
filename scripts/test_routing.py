@@ -82,6 +82,15 @@ class Routing(unittest.TestCase):
   for mode in ('direct','global',None):
    config=self.render();config['mode']=mode
    with self.subTest(mode=mode),self.assertRaises(AssertionError):client.validate(config,self.base,'Chosen')
+ def test_process_mode_is_explicit_and_supports_process_rules(self):
+  for mode in (False,True,'off','always','strict',None):
+   original=dict(self.base,**{'find-process-mode':mode})
+   config=self.render(original)
+   self.assertEqual(config['find-process-mode'],'strict')
+   client.validate(config,original,'Chosen')
+  for mode in (False,'off',None):
+   config=self.render();config['find-process-mode']=mode
+   with self.subTest(mode=mode),self.assertRaises(AssertionError):client.validate(config,self.base,'Chosen')
  def source(self,provider):
   (self.root/'profiles').mkdir()
   original=copy.deepcopy(self.base);original['rule-providers']['office-private']=provider

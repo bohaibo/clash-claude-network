@@ -25,6 +25,9 @@ function secureMain(config,data,node,group) {
     }
   }
   config.mode = 'rule';
+  // Process rules need process lookup. PyYAML may decode an upstream bare
+  // `off` as false; always publish Mihomo's explicit, supported strict mode.
+  config['find-process-mode'] = 'strict';
   // Keep existing groups untouched: this project only guarantees that its own pinned
   // group has no DIRECT/REJECT. Rebuilding every subscription-owned group would
   // rewrite structure the user did not authorize changing.

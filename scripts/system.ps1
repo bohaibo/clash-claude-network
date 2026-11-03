@@ -360,6 +360,17 @@ if(Test-Path -LiteralPath $docker){
 $plan=Get-Content -LiteralPath (Join-Path $project '.local\plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $tun=Get-NetAdapter | Where-Object {$_.Name -eq 'Meta'}
 if(@($tun).Count -ne 1){throw '找不到 Meta TUN 网卡，或者存在多个同名网卡。改防火墙之前必须先确认实际网卡。'}
+# Arm immediately before the first firewall mutation, under the entry's guard
+# mutex. Legacy pending records retain their original timeout behavior.
+$pendingFile=Join-Path $localDir 'pending-firewall.json'
+if(Test-Path -LiteralPath $pendingFile){
+  $pending=Get-Content -LiteralPath $pendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  if($pending.wait_for_firewall){
+    if([string]$pending.token -notmatch '^guard-[a-f0-9]{32}$' -or
+       [IO.Path]::GetFullPath([string]$pending.snapshot) -ine [IO.Path]::GetFullPath($stateDir)){throw '防火墙保护记录与当前恢复点不一致，未修改防火墙。'}
+    Set-Content -LiteralPath (Join-Path $localDir ([string]$pending.token+'.armed')) -Value 'Firewall writes starting' -Encoding UTF8
+  }
+}
 Disable-NonProjectOutboundRules $saved $stateDir
 Get-ProjectFirewallRules | Remove-NetFirewallRule
 New-NetFirewallRule -Name ($prefix+'SharedAccess-Block') -DisplayName 'Claude network SharedAccess-Block outbound' -Direction Outbound -Action Block -Service SharedAccess -Profile Any | Out-Null

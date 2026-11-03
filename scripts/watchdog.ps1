@@ -1,10 +1,18 @@
-﻿param([Parameter(Mandatory=$true)][string]$Token,[Parameter(Mandatory=$true)][string]$Python)
+﻿param([Parameter(Mandatory=$true)][string]$Token,[Parameter(Mandatory=$true)][string]$Python,[switch]$WaitForFirewall)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'operation_guard.ps1')
 $project=Split-Path -Parent $PSScriptRoot
 $local=Join-Path $project '.local'
 $commit=Join-Path $local ($Token+'.commit')
 $deadline=(Get-Date).AddSeconds(180)
+if($WaitForFirewall){
+ # Preparation and firewall writes each have a bounded 180-second window.
+ $armed=Join-Path $local ($Token+'.armed')
+ while((Get-Date) -lt $deadline -and !(Test-Path -LiteralPath $armed)){
+  if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2
+ }
+ if(Test-Path -LiteralPath $armed){$deadline=(Get-Date).AddSeconds(180)}
+}
 while((Get-Date) -lt $deadline){if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2}
 try{
  Resolve-PendingFirewall -LocalDir $local -Python $Python -ExpectedToken $Token

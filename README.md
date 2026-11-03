@@ -54,6 +54,7 @@ Windows 11 + Clash Verge Rev / Mihomo 的本地网络配置工具：国内域名
 |---|---|
 | 固定节点 | 创建只包含指定节点的 select 组，不含 DIRECT 或自动轮换 |
 | Claude 优先 | 核心/补充域名、Claude 进程和官方入站 IP 先于国内规则 |
+| 进程匹配 | 明确使用 Mihomo 的 `strict` 模式，避免继承关闭状态或 YAML 布尔值导致校验失败 |
 | 国内分流 | 已审核国内域名、国内 IP 与 GEOIP,CN 直连；IP 规则使用 no-resolve |
 | 海外兜底 | MATCH 指向固定节点组，不回落 DIRECT |
 | DNS | fake-IP；默认海外 DoH，国内名单使用国内 DoH；所有真实解析路径附加 Type 64/65 过滤 |
@@ -66,6 +67,8 @@ Windows 11 + Clash Verge Rev / Mihomo 的本地网络配置工具：国内域名
 | 区域与时区 | 按所选节点地区设置系统国家或地区、区域格式和时区，沙箱浏览器语言同步；不修改 Windows 显示语言 |
 
 严格防火墙下：节点故障但核心仍在运行时，国内网站保持直连；**核心停止时所有公网（包括国内）都会被阻断**。这是保护行为。
+
+防火墙看门狗分别限制准备阶段和防火墙阶段：准备阶段最多 180 秒；首次修改防火墙前开始另一个 180 秒计时窗口，覆盖防火墙写入和网络验收。任一阶段超时都会请求回滚，等待当前互斥写入完成后执行。
 
 ## 出口地区自动识别
 
@@ -168,6 +171,7 @@ icacls . /setintegritylevel "(OI)(CI)Medium"
 | 取消管理员授权 | 不执行操作；重新点击并在 UAC 确认 |
 | 节点不存在或重名 | 在「一键配置」重新选择；不会自动替换 |
 | 预检失败 | 查看界面错误和 `.local/last-error.log`；通常无需恢复 |
+| 候选配置校验失败 | 查看 `.local/client-error.log` 和 `.local/candidate-validation.stdout.log`、`.local/candidate-validation.stderr.log`；日志可能包含节点信息，仅供本地排查 |
 | 写入后失败 | 在「快照与恢复」恢复关联快照 |
 | 防火墙回滚失败 | 公网可能仍被阻断；在「快照与恢复」重试，见 `.local/rollback-error.log` |
 | 网络验收失败 | 查看失败项；不使用上一次成功记录 |

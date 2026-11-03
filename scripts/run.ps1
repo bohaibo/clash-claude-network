@@ -484,11 +484,11 @@ try {
   Write-Step '写入 Clash 客户端配置：增强脚本、固定节点组、分流规则'
   $settingsTouched=$true
   & $python (Join-Path $PSScriptRoot 'client.py') apply-client;if($LASTEXITCODE -ne 0){throw '客户端配置写入失败。'}
-  Write-Step '启动防火墙保护：180 秒未确认成功则进入回滚，正在写入的步骤会先完成'
+  Write-Step '启动防火墙保护：准备阶段限时 180 秒，开始修改防火墙后另计 180 秒；超时则等待当前写入完成后回滚'
   $watchToken='guard-'+[Guid]::NewGuid().ToString('N')
-  [ordered]@{token=$watchToken;snapshot=$env:CCN_SNAPSHOT} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $local 'pending-firewall.json.new') -Encoding UTF8
+  [ordered]@{token=$watchToken;snapshot=$env:CCN_SNAPSHOT;wait_for_firewall=$true} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $local 'pending-firewall.json.new') -Encoding UTF8
   Move-Item -LiteralPath (Join-Path $local 'pending-firewall.json.new') -Destination (Join-Path $local 'pending-firewall.json') -Force
-  $watchArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'watchdog.ps1')+'"'),'-Token',$watchToken,'-Python',('"'+$python+'"'))
+  $watchArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'watchdog.ps1')+'"'),'-Token',$watchToken,'-Python',('"'+$python+'"'),'-WaitForFirewall')
   Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $watchArgs | Out-Null
   Write-Step '应用系统设置：严格防火墙、关闭 IPv6/定位/自动时间、国家/区域格式/时区、代理环境变量'
   $applyMutex=New-Object Threading.Mutex($false,('Global\CCN-'+$watchToken))

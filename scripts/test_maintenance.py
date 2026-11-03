@@ -25,9 +25,14 @@ foreach($name in @('Stop-ClashClient','Start-ClashClient')){
  Invoke-Expression $function.Extent.Text
 }
 $script:events=New-Object 'System.Collections.Generic.List[string]'
-function Get-Process {param($Name,$Id) if($Id){if(!$script:events.Contains('wait')){throw 'queried before waiting'};return};[pscustomobject]@{Id=4242} }
+function Get-Process {param($Name,$Id)
+ if($script:events.Contains('wait')){return}
+ $p=[pscustomobject]@{Id=4242;Handle=4242}
+ $p | Add-Member ScriptMethod WaitForExit {param($timeout) if($timeout -ne 15000){throw 'wrong process wait'};$script:events.Add('wait');return $true}
+ $p | Add-Member ScriptMethod Dispose {}
+ return $p
+}
 function Stop-Process {param([switch]$Force) $script:events.Add('stop') }
-function Wait-Process {param($Id,$Timeout) if($Id -ne 4242 -or $Timeout -ne 15){throw 'wrong process wait'};$script:events.Add('wait') }
 function Test-Path {param($LiteralPath) return $true }
 function Start-Process {param($FilePath,$WindowStyle) if($FilePath -ne 'observed.exe' -or $WindowStyle -ne 'Hidden'){throw 'wrong executable'};$script:events.Add('start') }
 function Get-ScheduledTask {throw 'Task trigger must not replace observed executable'}

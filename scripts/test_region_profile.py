@@ -39,7 +39,7 @@ class RegionProfile(unittest.TestCase):
 
     def test_cli_returns_json(self):
         result = subprocess.run(
-            [sys.executable, str(Path(region_profile.__file__)), '--region', 'JP'],
+            [sys.executable, '-X', 'utf8', str(Path(region_profile.__file__)), '--region', 'JP'],
             capture_output=True, text=True, encoding='utf-8', check=True,
         )
         value = json.loads(result.stdout)

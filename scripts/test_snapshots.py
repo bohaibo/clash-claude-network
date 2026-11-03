@@ -160,7 +160,13 @@ try {try {$stream.Lock(0,1)} catch {exit 23}} finally {$stream.Dispose()}
   source=source[:start]+source[end:] # Fixture bypasses elevation; it never requests UAC.
   sentinel=project/'unexpected-process-action'
   mocks='''
-function Get-Process { [pscustomobject]@{ProcessName='fixture';Path='fixture.exe'} }
+function Get-Process {
+ if(Test-Path -LiteralPath (Join-Path $PSScriptRoot '../unexpected-process-action')){return}
+ $p=[pscustomobject]@{ProcessName='fixture';Path='fixture.exe';Handle=4242}
+ $p | Add-Member ScriptMethod WaitForExit {param($timeout) return $true}
+ $p | Add-Member ScriptMethod Dispose {}
+ return $p
+}
 function Stop-Process { 'stopped' | Set-Content -LiteralPath (Join-Path $PSScriptRoot '../unexpected-process-action') }
 function Get-ScheduledTask { 'queried' | Set-Content -LiteralPath (Join-Path $PSScriptRoot '../unexpected-process-action') }
 function Start-Process { throw 'Unexpected process start' }

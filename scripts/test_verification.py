@@ -62,7 +62,7 @@ class Verification(unittest.TestCase):
    return {'exit':7,'http':0,'body':'','error':'timeout'} if url=='https://ipinfo.io/json' else self.fake_curl(url,head)
   with patch.object(verify,'curl',side_effect=probe),patch.object(verify.time,'sleep'):
    with self.assertRaises(AssertionError):verify.verify(stage='post-recovery')
-  report=json.loads((self.local/'verification.json').read_text())
+  report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
   self.assertFalse(report['success']);self.assertEqual(len(report['egress_attempts']),3)
  def test_failed_required_checks_cannot_pass(self):
   for name in ('stun','git','npm'):
@@ -70,7 +70,7 @@ class Verification(unittest.TestCase):
     mock=getattr(self,name);old=mock.return_value;mock.return_value={'tested':True,'ok':False}
     try:
      with self.assertRaisesRegex(AssertionError,name):verify.verify()
-     report=json.loads((self.local/'verification.json').read_text())
+     report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
      self.assertFalse(report['success']);self.assertEqual(report[name]['status'],'failed')
     finally:mock.return_value=old
  def test_failed_checkpoint_is_saved_without_guessing_from_error_text(self):
@@ -80,7 +80,7 @@ class Verification(unittest.TestCase):
   for expected,name,value in cases:
    with self.subTest(check=expected),patch.object(verify,name,return_value=value):
     with self.assertRaises(AssertionError):verify.verify()
-    report=json.loads((self.local/'verification.json').read_text())
+    report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
     self.assertEqual(report['failed_check'],expected);self.assertFalse(report['success'])
  def test_tool_timeout_is_saved_and_other_checks_still_run(self):
   with patch.object(verify,'run_tool_attempt',return_value={'ok':False,'error':'timeout','process_tree_stopped':True}) as run:
@@ -88,7 +88,7 @@ class Verification(unittest.TestCase):
   self.assertFalse(result['ok']);self.assertEqual(result['error'],'timeout');self.assertEqual(run.call_count,2)
   self.git.return_value=result
   with self.assertRaisesRegex(AssertionError,'git'):verify.verify()
-  report=json.loads((self.local/'verification.json').read_text())
+  report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
   self.assertEqual(report['git']['status'],'failed');self.assertEqual(len(report['git']['attempts']),2)
   self.assertEqual(report['npm']['status'],'passed');self.assertFalse(report['success'])
  def test_tool_retry_can_recover_without_hiding_first_failure(self):
@@ -153,7 +153,7 @@ class Verification(unittest.TestCase):
   verify.verify(True)
   verification_reports.save_report({'success':True,'domestic_also_blocked':True},'core-exit')
   verify.verify(stage='post-recovery')
-  report=json.loads((self.local/'verification.json').read_text())
+  report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
   self.assertTrue(report['success']);self.assertEqual(set(report['stages']),{'node-outage','core-exit','post-recovery'})
   self.assertTrue(report['stages']['node-outage']['node_failure_blocks_foreign_preserves_domestic'])
   self.assertTrue(report['stages']['node-outage']['recovered'])
@@ -163,11 +163,11 @@ class Verification(unittest.TestCase):
   os.environ['CCN_VERIFY_RUN']='b'*32
   verification_reports.save_report({'success':False},'core-exit')
   verify.verify(stage='post-recovery')
-  self.assertFalse(json.loads((self.local/'verification.json').read_text())['success'])
+  self.assertFalse(json.loads((self.local/'verification.json').read_text(encoding='utf-8'))['success'])
  def test_new_operation_does_not_inherit_old_success(self):
   os.environ['CCN_VERIFY_RUN']='c'*32;verify.verify(True)
   os.environ['CCN_VERIFY_RUN']='d'*32;verify.verify()
-  report=json.loads((self.local/'verification.json').read_text())
+  report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
   self.assertEqual(set(report['stages']),{'connectivity'})
   self.assertTrue((self.local/'verification-runs'/('c'*32)/'node-outage.json').exists())
  def test_invalid_operation_id_cannot_escape_local(self):
@@ -177,7 +177,7 @@ class Verification(unittest.TestCase):
   with patch.object(verify,'curl',side_effect=lambda url,head=False: {'exit':0,'http':200,'body':json.dumps({'country':'SG'})} if self.broken else self.fake_curl(url,head)):
    with self.assertRaises(AssertionError):verify.verify(True)
   self.assertFalse(self.broken)
-  report=json.loads((self.local/'verification.json').read_text())
+  report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
   self.assertFalse(report['success']);self.assertIn('node-outage',report['stages'])
  def test_live_direct_mode_stops_before_network_probes(self):
   for mode in ('direct','global',None):
@@ -194,7 +194,7 @@ class Verification(unittest.TestCase):
    return self.fake_curl(url,head)
   with patch.object(verify,'curl',side_effect=lookup):
    with self.assertRaisesRegex(AssertionError,'UDP exit'):verify.verify()
-  report=json.loads((self.local/'verification.json').read_text());self.assertFalse(report['udp_egress']['country_matches'])
+  report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'));self.assertFalse(report['udp_egress']['country_matches'])
  def test_different_udp_exit_in_required_region_can_pass(self):
   self.stun.return_value['mapped']='8.8.4.4:1234'
   def lookup(url,head=False):
@@ -238,7 +238,7 @@ class CoreExit(unittest.TestCase):
   self.api=self.enterContext(patch.object(core,'api',return_value={}))
   self.connection=self.enterContext(patch.object(core.socket,'create_connection',side_effect=OSError('fixture blocked')))
   self.enterContext(contextlib.redirect_stdout(io.StringIO()))
- def saved(self):return json.loads((self.local/'verification.json').read_text())['stages']['core-exit']
+ def saved(self):return json.loads((self.local/'verification.json').read_text(encoding='utf-8'))['stages']['core-exit']
  def test_core_outage_and_recovery_are_recorded(self):
   report=core.verify_core_exit();self.assertTrue(report['success']);self.assertTrue(self.saved()['domestic_also_blocked'])
   self.assertTrue(any(text.startswith('Start-Service') for text in self.commands));self.api.assert_called_once()
