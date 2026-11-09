@@ -227,6 +227,8 @@ select.input { appearance: none; padding-right: 30px; background-image: linear-g
   border: 1px solid var(--line); border-left: 3px solid var(--info);
   border-radius: 8px; background: var(--info-bg); color: #24405f; font-size: 12.3px; line-height: 1.55;
 }
+.note-with-action { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
+.note-with-action .btn { flex: none; }
 .note .icon { margin-top: 1px; flex: none; }
 .note-warn { border-left-color: var(--warn); background: var(--warn-bg); color: #5e4307; }
 .note-bad { border-left-color: var(--bad); background: var(--bad-bg); color: #6f1710; }

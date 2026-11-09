@@ -48,10 +48,28 @@ def update():
   except Exception as exc:review[name]={'downloaded':False,'error':type(exc).__name__}
  write(LOCAL/'upstream-review.json',review)
  return {'success':True,'active_profile_reloaded':active,'claude_automatic_merge':False}
+def failure_result(exc):
+ # Only fixed messages are safe for the GUI; parser/controller errors can
+ # include subscription contents. Keep detailed diagnostics local.
+ import traceback
+ write_path=LOCAL/'update-error.log'
+ write_path.write_text(traceback.format_exc(),encoding='utf-8')
+ reasons={
+  'Private/LAN source changed; review before publishing':'私有域名或局域网规则来源发生变化，需要审核后才能发布。',
+  'Large source delta requires manual review':'国内规则变化超过自动更新阈值，需要人工审核。',
+  'New broad direct CIDR requires manual review':'新增的国内直连 IP 网段范围过大，需要人工审核。',
+  'Reviewed Claude policy changed; explicit reconfiguration required':'项目策略已变化，需要重新配置后才能更新规则。',
+ }
+ reason=reasons.get(str(exc))
+ if reason is None:
+  reason='规则下载、校验或写入未完成，具体错误见 .local/update-error.log。'
+ return {'success':False,'error':type(exc).__name__,'reason':reason,
+         'note':'请查看 .local/update-error.log；本次更新未完成。'}
+
 if __name__=='__main__':
  try:
   with operation_lock(LOCAL):result=update()
- except Exception as exc:result={'success':False,'error':type(exc).__name__,'note':'Review .local reports; invalid source changes are not published.'}
+ except Exception as exc:result=failure_result(exc)
  result['time']=datetime.datetime.now().astimezone().isoformat();write(LOCAL/'update-result.json',result)
  print(json.dumps(result,ensure_ascii=False))
  if not result['success']:raise SystemExit(1)

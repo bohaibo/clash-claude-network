@@ -102,6 +102,58 @@ async function main() {
   raceContext.race.respond({browser: {settings: 'old'}, operation: {}});
   await pending;
   assert.equal(raceContext.race.read().settings, 'new', 'old HTTP responses cannot replace saved state');
+  // Banner action uses the real job entry, with no HTTP or browser.
+  const host = { rows: [], replaceChildren(...rows) { this.rows = rows; } };
+  const posts = [];
+  let acceptJob;
+  const bannerContext = vm.createContext({
+    overview() {}, network() {}, browser() {}, snapshots() {}, updates() {}, logs() {}, help() {},
+    document: { getElementById: () => host }, console,
+    api: { startJob: payload => { posts.push(payload); return new Promise(r => acceptJob = r); } },
+    ui: {
+      el: (tag, props, ...children) => ({ tag, props, children }),
+      note: (content, tone) => ({ content, tone }),
+      button: (label, options) => ({ label, ...options }),
+      toast() {},
+    },
+  });
+  vm.runInContext(source + `
+    updateChrome = () => renderBanners();
+    renderJobDock = () => {};
+    pollJob = () => {};
+    app.data = { configured: true, browser: {engine: {name: 'fixture'}},
+      update: { mode: 'scheduled', last: {success: false, time: 'fixture', reason: 'fixture failure'} } };
+    globalThis.banner = { app, renderBanners };
+  `, bannerContext);
+  const banner = bannerContext.banner;
+  const notices = () => host.rows.filter(row => row.content?.props?.class === 'note-with-action');
+  const button = () => notices()[0].content.children[1];
+  banner.renderBanners();
+  assert.equal(button().label, '立即手动更新');
+  assert.equal(button().disabled, false);
+  const click = button().onClick();
+  assert.equal(button().disabled, true, 'disable immediately while submitting');
+  await button().onClick();
+  assert.equal(posts.length, 1, 'duplicate click must not start a second update');
+  assert.equal(posts[0].action, 'update');
+  assert.equal(posts[0].confirm, 'UPDATE');
+  acceptJob({id: 'fixture-update', state: 'running', action: 'update'});
+  await click;
+  assert.equal(button().disabled, true, 'running job keeps update action disabled');
+  banner.app.jobId = null;
+  banner.app.data.update.last = {success: false, time: 'fixture', reason: 'failed again'};
+  banner.renderBanners();
+  assert.equal(notices().length, 1, 'failure retains warning');
+  banner.app.data.update.last = {success: true, skipped: true, time: 'fixture', reason: 'association changed'};
+  banner.renderBanners();
+  assert.equal(notices().length, 1, 'skipped update does not dismiss warning');
+  banner.app.data.update.last = {success: true, time: 'fixture'};
+  banner.renderBanners();
+  assert.equal(notices().length, 0, 'successful refreshed result dismisses warning');
+  banner.app.data.update.last = {success: false, time: 'fixture'};
+  banner.app.data.configured = false;
+  banner.renderBanners();
+  assert.equal(button().disabled, true, 'unconfigured project cannot update');
   console.log('GUI task lifecycle offline checks passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

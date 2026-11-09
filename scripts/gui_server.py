@@ -392,6 +392,8 @@ class App:
         last = read_json(self.local / 'update-result.json', {})
         if not isinstance(last, dict):
             last = {}
+        if last.get('note') == 'Review .local reports; invalid source changes are not published.' and not last.get('reason'):
+            last['reason'] = '上次规则更新失败；旧版记录未保存具体失败原因，请重新更新以获取详细报告。'
         clean_last = {
             'success': bool(last.get('success')),
             'skipped': bool(last.get('skipped')),

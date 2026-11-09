@@ -226,16 +226,27 @@ function renderBanners() {
   if (app.data.app?.gui_browser_fallback) {
     rows.push(ui.note('界面已在默认浏览器中打开（隔离的界面浏览器未能启动）。这只影响界面窗口；Claude 的沙箱浏览器仍需从「浏览器沙箱」单独打开，默认浏览器设置不会被修改。', 'warn'));
   }
-  if (app.data.update?.last?.success === false && app.data.update?.last?.time) {
-    rows.push(ui.note('上次规则更新未完成：' + (app.data.update.last.reason || app.data.update.last.error || '请查看规则更新页。'), 'warn'));
+  if ((app.data.update?.last?.success === false || app.data.update?.last?.skipped) && app.data.update?.last?.time) {
+    rows.push(ruleUpdateNotice('上次规则更新未完成：' + (app.data.update.last.reason || app.data.update.last.error || '请查看规则更新页。'), 'warn'));
   }
   if (app.data.update?.mode === 'manual' && app.data.update?.stale) {
-    rows.push(ui.note('手动更新模式：上次成功更新已超过 24 小时或尚无记录。打开软件后可在「规则更新」点击「立即更新」。', 'info'));
+    rows.push(ruleUpdateNotice('手动更新模式：上次成功更新已超过 24 小时或尚无记录。', 'info'));
   }
   if (app.data.update?.mode === 'scheduled' && app.data.update?.task?.installed === false && app.data.configured) {
     rows.push(ui.note('定时更新已选择，但当前没有检测到计划任务。请在「规则更新」保存一次，或重新配置以注册任务。', 'warn'));
   }
   host.replaceChildren(...rows);
+}
+
+function ruleUpdateNotice(message, tone) {
+  return ui.note(h('div', { class: 'note-with-action' },
+    h('span', { text: message }),
+    ui.button('立即手动更新', {
+      variant: 'secondary', size: 'small', icon: 'download',
+      disabled: !app.data.configured || ctx.busy,
+      title: app.data.configured ? '更新已审核的规则来源，完成后自动刷新结果' : '请先完成网络配置',
+      onClick: () => startJob({ action: 'update', confirm: 'UPDATE' }),
+    })), tone);
 }
 
 function renderPage() {
@@ -378,6 +389,7 @@ async function startJob(payload) {
     return;
   }
   app.startingJob = true;
+  updateChrome();
   try {
     const job = await api.startJob(payload);
     app.jobId = job.id;
@@ -390,6 +402,7 @@ async function startJob(payload) {
     ui.toast(error.message || '无法开始操作。', 'bad');
   } finally {
     app.startingJob = false;
+    updateChrome();
   }
 }
 
@@ -494,7 +507,7 @@ function renderJobDock() {
     if (item.type === 'step') details.push(h('div', { class: 'job-event' },
       h('span', { class: 'job-event-index', text: String(item.index || '') }),
       h('div', {}, h('strong', { text: item.title || '' }), item.note ? h('small', { text: item.note }) : null)));
-    else if (item.type === 'elevation') details.push(h('div', { class: 'job-event muted', text: item.message || '等待管理员授权…' }));
+    else if (item.type === 'elevation' && running && !step) details.push(h('div', { class: 'job-event muted', text: item.message || '等待管理员授权…' }));
     else if (item.type === 'done') details.push(h('div', { class: 'job-event ok', text: item.message || '已完成。' }));
     else if (item.type === 'error') details.push(h('div', { class: 'job-event bad', text: item.message || '操作未完成。' }));
     else if (item.type === 'cancelled') details.push(h('div', { class: 'job-event warn', text: item.message || '已取消。' }));

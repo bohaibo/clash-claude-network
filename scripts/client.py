@@ -1,7 +1,7 @@
 """Clash Verge Rev Windows adapter. Secrets and backups stay under .local/."""
 from checks import require
 from pathlib import Path
-import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.request,uuid
+import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.error,urllib.request,uuid
 import yaml
 from atomic_files import replace_file
 from baseline import is_runtime_snapshot_file,verify_incremental_files,default_snapshot,pin_baseline
@@ -88,10 +88,34 @@ def select(root,node,subscription=None):
           (subscription is None or subscription in (r['name'],r['uid']))]
  require(len(matches)==1,'节点不存在或有重名。请指定订阅名称或 UID；不要猜测。')
  return next(x for x in load(root/'profiles.yaml')['items'] if x['uid']==matches[0]['uid'])
+def rule_source_bytes(url):
+ # Only the fixed public rule sources may use this download path. Never inherit
+ # environment/system proxies or forward controller/subscription credentials.
+ require(url in SOURCES.values(),'Unapproved rule source')
+ routes=[{}]
+ try:
+  config=load(root_path()/'clash-verge.yaml') or {}
+  if not config.get('authentication'):
+   for key in ('mixed-port','port'):
+    port=config.get(key)
+    if type(port) is int and 0<port<65536:
+     route={'https':f'http://127.0.0.1:{port}'}
+     if route not in routes:routes.append(route)
+ except (OSError,ValueError,KeyError,yaml.YAMLError):pass
+ for route in routes:
+  for attempt in range(2):
+   try:
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler(route))
+    with opener.open(url,timeout=15) as response:raw=response.read(4_000_001)
+   except (OSError,urllib.error.URLError):continue
+   require(len(raw)<=4_000_000,'Oversized rule source')
+   return raw
+ raise RuntimeError('规则下载失败：直连及可用的本机 Clash HTTP 代理均未成功。请检查 Clash 后台服务与 GitHub 访问后重试；未使用旧规则缓存。') from None
+
 def download_rules():
- data={};metadata={};opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+ data={};metadata={}
  for name,url in SOURCES.items():
-  with opener.open(url,timeout=30) as response:raw=response.read(4_000_001)
+  raw=rule_source_bytes(url)
   require(len(raw)<=4_000_000,'Oversized rule source')
   if name=='domains':
    values=[]

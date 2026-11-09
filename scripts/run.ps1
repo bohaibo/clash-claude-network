@@ -474,7 +474,7 @@ try {
   Stop-ClashClient
   $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region)
   if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
-  $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw '候选配置/备份生成失败，未改动任何系统设置。'}
+  $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw '候选配置/备份生成失败，未改动任何系统设置。规则下载或内核检查详情见 .local/client-error.log。'}
   $planState=($prepared | Select-Object -Last 1) | ConvertFrom-Json
   $env:CCN_SNAPSHOT=$planState.snapshot
   Write-Step ('首次保存系统原值；已有记录则沿用，不覆盖。关联快照：'+$planState.snapshot)
