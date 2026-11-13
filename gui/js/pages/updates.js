@@ -28,7 +28,7 @@ export function render(ctx) {
   root.append(modeCard(ctx, update));
   root.append(statusCard(ctx, update));
   root.append(lastResultCard(ctx, update));
-  root.append(ui.card({ title: '边界与审核', subtitle: '自动更新不等于无条件接受远程变化。' },
+  root.append(ui.card({ title: '更新校验', subtitle: '远程变更会先校验，再应用。' },
     ui.el('ul', { class: 'check-list' },
       ui.el('li', {}, '只更新项目配置中已审核的国内域名、国内 IP、私有域名和 LAN 地址来源。'),
       ui.el('li', {}, '来源发生较大变化、私有/LAN 内容变化或 Claude 策略变化时会停止，保留旧配置等待人工审核。'),

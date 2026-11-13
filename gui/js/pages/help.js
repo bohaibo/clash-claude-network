@@ -6,7 +6,7 @@ export function render(ctx) {
   root.append(ui.pageHeader({
     eyebrow: 'GUIDE',
     title: '使用说明',
-    description: '适用于 Windows 11 的本地网络配置工具。读取已有 Clash 订阅，不安装或登录 Claude，也不保证账号可用性。',
+    description: '适用于 Windows 11 的本地网络配置工具，使用已有 Clash 订阅。',
   }));
   root.append(ui.card({ title: '第一次使用' },
     ui.el('ol', { class: 'steps' },
@@ -32,7 +32,7 @@ export function render(ctx) {
       ui.el('li', {}, '恢复会移除项目规则更新任务；如需继续定时更新，请重新保存更新方式。'),
       ui.el('li', {}, '恢复不运行网络验收；IPv6 和语言改动通常需要重启 Windows 才完全生效。'))));
 
-  root.append(ui.card({ title: '浏览器 WebRTC 与外部指纹浏览器' }, ui.el('p', {}, '配置会备份 Chrome、Edge、Firefox 的受管 WebRTC 策略：Firefox 直接禁用；Chrome/Edge 施加路径限制并请求安装各自商店的 WebRTC Control 扩展。扩展实际安装和网页阻断未自动验证，隐私窗口不自动覆盖。恢复会还原策略并撤销本项目新增的扩展强制安装条目，保留其他扩展条目。外部指纹浏览器自行管理；本软件不提供浏览器启动、资料、语言、指纹或默认应用设置。')));
+  root.append(ui.card({ title: '浏览器 WebRTC 与外部指纹浏览器' }, ui.el('p', {}, 'Chrome/Edge 使用路径限制策略与扩展两层保护；Firefox 直接锁定关闭 WebRTC。项目自带离线扩展，配置时准备到网络环境页显示的目录。在 chrome://extensions 或 edge://extensions 选择“加载已解压的扩展”，每份标准资料首次加载一次，后续配置复用。已有商店版保持原状。恢复会还原策略及项目管理的旧版扩展条目；手动加载的扩展可在浏览器扩展页移除。外部指纹浏览器自行管理。')));
 
   root.append(ui.card({ title: '不会做的事' },
     ui.el('ul', { class: 'check-list muted' },

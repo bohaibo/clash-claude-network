@@ -27,6 +27,10 @@ class WebRtcPolicyTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name)
         self.registry = FakeRegistry()
+        prepare = rtc.webrtc_bundle.prepare
+        local_prepare = patch.object(rtc.webrtc_bundle, 'prepare', side_effect=lambda: prepare(self.path / 'addon'))
+        local_prepare.start()
+        self.addCleanup(local_prepare.stop)
     def snapshot(self): return rtc.snapshot(self.path, self.registry)
     def test_apply_covers_every_supported_browser_and_restore_removes_new_values(self):
         state = self.snapshot()
@@ -82,9 +86,13 @@ class WebRtcPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):rtc.restore(state,self.registry)
         self.assertEqual(self.registry.values,{})
 
-    def sealed_protection(self):
+    def sealed_protection(self, legacy=False):
         self.snapshot()
-        rtc.snapshot_extensions(self.path,self.registry)
+        extensions = rtc.snapshot_extensions(self.path,self.registry)
+        if legacy:
+            extensions['version'] = 1
+            extensions.pop('read_only', None)
+            (self.path / rtc.EXTENSION_RECORD).write_text(json.dumps(extensions), encoding='utf-8')
         hashes={name:hashlib.sha256((self.path/name).read_bytes()).hexdigest()
                 for name in (rtc.RECORD,rtc.EXTENSION_RECORD)}
         (self.path/'manifest.json').write_text(json.dumps({'extra_sha256':hashes}))
@@ -98,6 +106,8 @@ class WebRtcPolicyTests(unittest.TestCase):
         self.assertEqual(state['entries'][0]['name'],'2')
         before=copy.deepcopy(self.registry.values)
         rtc.apply_protection(self.path,self.registry)
+        self.assertFalse(rtc.protection_status(self.registry)['browsers'][0]['extension_requested'])
+        self.assertEqual(self.registry.list_values(path), {'1': unrelated})
         self.assertEqual(self.registry.read(path,'1'),unrelated)
         later={'exists':True,'kind':1,'value':'b'*32}
         self.registry.write(path,'3',later)
@@ -107,12 +117,12 @@ class WebRtcPolicyTests(unittest.TestCase):
 
     def test_extension_failure_rolls_back_core_policies_and_extensions(self):
         self.sealed_protection();before=copy.deepcopy(self.registry.values)
-        self.registry.fail_once='1'
+        self.registry.fail_once='WebRtcLocalhostIpHandling'
         with self.assertRaises(OSError):rtc.apply_protection(self.path,self.registry)
         self.assertEqual(self.registry.values,before)
 
     def test_changed_slot_stops_apply_before_writes_and_restore_does_not_clobber(self):
-        state=self.sealed_protection();entry=state['entries'][0]
+        state=self.sealed_protection(legacy=True);entry=state['entries'][0]
         self.registry.write(entry['path'],entry['name'],{'exists':True,'kind':1,'value':'c'*32})
         before=copy.deepcopy(self.registry.values)
         with self.assertRaises(ValueError):rtc.apply_protection(self.path,self.registry)
@@ -142,8 +152,90 @@ class WebRtcPolicyTests(unittest.TestCase):
         status=rtc.protection_status(self.registry)
         self.assertFalse(status['runtime_verified'])
         self.assertTrue(all(row['policy_configured'] for row in status['browsers']))
-        self.assertTrue(all(row['extension_requested'] for row in status['browsers'][:2]))
+        self.assertTrue(all(not row['extension_requested'] for row in status['browsers'][:2]))
         self.assertTrue(all(not row['runtime_verified'] for row in status['browsers']))
+
+    def test_installation_requires_registration_and_files_in_each_profile(self):
+        root = self.path / 'user-data'
+        eid = rtc.EXTENSIONS[0][2].split(';')[0]
+        profile = root / 'Default'
+        profile.mkdir(parents=True)
+        (profile / 'Preferences').write_text('{}')
+        addon = profile / 'Extensions' / eid / '0.3.5_0'
+        addon.mkdir(parents=True)
+        (addon / 'manifest.json').write_text('{"version":"0.3.5"}')
+        self.assertEqual(rtc.extension_installation('Chrome', root)['state'], 'missing')
+        record = {'extensions': {'settings': {eid: {'location': 7, 'disable_reasons': []}}}}
+        secure = profile / 'Secure Preferences'
+        secure.write_text(json.dumps(record))
+        before = secure.read_bytes()
+        result = rtc.extension_installation('Chrome', root)
+        self.assertEqual(result['state'], 'installed')
+        self.assertFalse(result['runtime_verified'])
+        self.assertEqual(before, secure.read_bytes())
+        other = root / 'Profile 1'
+        other.mkdir()
+        (other / 'Preferences').write_text('{}')
+        self.assertEqual(rtc.extension_installation('Chrome', root)['state'], 'partial')
+        record['extensions']['settings'][eid]['disable_reasons'] = [1]
+        secure.write_text(json.dumps(record))
+        self.assertEqual(rtc.extension_installation('Chrome', root)['state'], 'disabled')
+        secure.write_text('broken')
+        self.assertEqual(rtc.extension_installation('Chrome', root)['state'], 'unknown')
+
+    def test_missing_browser_profiles_are_not_reported_installed(self):
+        result = rtc.extension_installation('Edge', self.path / 'absent')
+        self.assertEqual(result['state'], 'no_profiles')
+        self.assertFalse(result['runtime_verified'])
+
+    def test_bundle_integrity_failure_stops_before_policy_changes(self):
+        self.sealed_protection()
+        before = copy.deepcopy(self.registry.values)
+        with patch.object(rtc.webrtc_bundle, 'prepare', side_effect=ValueError('corrupted local add-on')):
+            with self.assertRaises(ValueError):
+                rtc.apply_protection(self.path, self.registry)
+        self.assertEqual(before, self.registry.values)
+
+    def test_offline_restore_never_owns_unused_force_install_slot(self):
+        state = self.sealed_protection()
+        self.assertEqual(state['version'], 2)
+        entry = state['entries'][0]
+        later = {'exists': True, 'kind': 1, 'value': 'd' * 32}
+        self.registry.write(entry['path'], entry['name'], later)
+        rtc.apply_protection(self.path, self.registry)
+        rtc.restore_extensions(state, self.registry)
+        self.assertEqual(self.registry.read(entry['path'], entry['name']), later)
+
+    def test_configuration_complete_requires_both_layers_for_chromium(self):
+        self.sealed_protection()
+        rtc.apply_protection(self.path, self.registry)
+        with patch.object(rtc, 'extension_installation', return_value={'state': 'missing', 'label': '待加载本地扩展'}):
+            rows = rtc.protection_status(self.registry)['browsers']
+            self.assertFalse(rows[0]['configuration_complete'])
+            self.assertTrue(rows[2]['configuration_complete'])
+        with patch.object(rtc, 'extension_installation', return_value={'state': 'installed', 'label': '已安装'}):
+            rows = rtc.protection_status(self.registry)['browsers']
+            self.assertTrue(all(row['configuration_complete'] for row in rows))
+            self.assertTrue(all(row['configuration_state'] == '配置完成' for row in rows))
+
+    def test_local_install_requires_expected_directory_and_verified_files(self):
+        project = self.path / 'fixture-project'
+        addon = project / '.local/webrtc-addon/1.0.0'
+        addon.mkdir(parents=True)
+        for name, raw in rtc.webrtc_bundle.payload().items():
+            (addon / name).write_bytes(raw)
+        root = self.path / 'profiles'
+        profile = root / 'Default'
+        profile.mkdir(parents=True)
+        record = {'extensions': {'settings': {rtc.LOCAL_EXTENSION_ID: {
+            'path': str(addon.resolve()), 'location': 4, 'disable_reasons': []}}}}
+        (profile / 'Preferences').write_text(json.dumps(record))
+        with patch.object(rtc.webrtc_bundle, 'PROJECT', project):
+            status = rtc.extension_installation('Chrome', root)
+            self.assertEqual(status['state'], 'installed')
+            self.assertEqual(status['local_installed_profiles'], 1)
+            (addon / 'block.js').write_text('changed')
+            self.assertEqual(rtc.extension_installation('Chrome', root)['state'], 'missing')
 
     def test_missing_sealed_backups_are_not_recaptured(self):
         self.sealed_protection()

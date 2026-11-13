@@ -97,11 +97,17 @@ Windows「设置 → 时间和语言 → 语言和区域 → 区域格式」也�
 
 本软件不再提供内置浏览器、指纹配置、环境检测页、语言同步或默认浏览器注册。请自行安装和管理浏览器。管理界面仍通过本机已有的 Edge/Chrome 显示，只允许打开本机管理地址。
 
-配置和补充配置会管理标准 Chrome、Edge、Firefox 的 WebRTC 策略：Firefox 将 `media.peerconnection.enabled` 锁定为 false；Chrome/Edge 设置 `disable_non_proxied_udp`，并请求从各自官方扩展商店安装 WebRTC Control。Chrome 扩展 ID 为 `fjkmabmdepjfammlpliljpnbhleegehm`，Edge 为 `eepeadgljpkkjpbfecfkijnnliikglpl`。不修改默认浏览器资料，不启动浏览器，不管理外部指纹浏览器。
+配置和补充配置会管理标准 Chrome、Edge、Firefox 的 WebRTC 策略：Firefox 锁定 `media.peerconnection.enabled=false`；Chrome/Edge 设置 `disable_non_proxied_udp`，并直接准备项目自带的“本地 WebRTC 保护”离线扩展，不新增商店下载请求。不修改默认浏览器资料，不启动浏览器，不管理外部指纹浏览器。
 
-Chrome/Edge 的策略限制不是内核完全禁用。扩展需要浏览器正常启动、可访问商店后下载，现有扩展开关、网站权限及实际阻断均不自动验证；强制安装策略不自动覆盖隐私窗口。网络环境页分别显示策略状态和未验证边界，不把写入策略显示成全部关闭。网页语音、视频和点对点功能可能受影响。
+离线扩展完整文件存放在仓库的 `assets/webrtc-addon/`，随 Git 提交和安装包一起提供。新机器克隆或拉取最新项目即可取得，不需要从扩展商店另行下载。使用项目 MIT 许可，不是商店版 WebRTC Control。配置直接读取这些项目文件，先核对 `bundle.json` 内的文件摘要，再准备到 `.local/webrtc-addon/1.0.0`；后续配置直接复用，文件被改动时停止，避免覆盖用户修改。扩展无下载地址、远程代码、统计或账号功能。
 
-改动前记录 `webrtc-policies.json` 和 `webrtc-extensions.json` 并封存到关联快照；旧基线首次补存新增项目，不覆盖原系统基线。扩展策略使用空闲编号，不覆盖其他扩展条目；编号被后续用户修改时停止。恢复还原原策略及本项目使用的扩展条目，保留其他扩展条目的后续变化；撤销强制安装条目可能使浏览器自动卸载该扩展。旧快照没有相关记录时保留当前设置并提示。
+普通非域管理 Windows 的 Chrome/Edge 不支持从本地文件静默安装进现有资料。首次在 `chrome://extensions` 或 `edge://extensions` 启用开发者模式，点击“加载已解压的扩展”，选择网络环境页显示的目录；每份标准资料加载一次，后续直接复用。加载后刷新已有网页。不要删除或移动该目录。已有商店版及历史强制安装策略保持原状，避免自动卸载；浏览器自身可能继续安装或更新商店版，项目配置不再新增相关请求。Firefox 不需要扩展。
+
+“网络保护”展示策略、扩展和目标配置结果：Chrome/Edge 的策略齐全，且标准资料均有未被禁用的扩展文件和注册记录时，显示“配置完成”；Firefox 禁用策略齐全时显示“配置完成”。缺项显示待完成的操作。内部报告仍分别记录配置证据及运行测试状态。
+
+离线扩展通过 MAIN world 的 document_start 脚本阻止网页创建 RTCPeerConnection，并补充非代理 UDP 限制。隐私窗口须另行允许；浏览器内部页、受限页、扩展页及 Worker 等环境不保证覆盖，实际浏览器行为未验证。网页语音、视频及点对点连接可能受影响。
+
+改动前记录 `webrtc-policies.json` 和 `webrtc-extensions.json` 并封存到关联快照；旧基线只补存新增记录，不覆盖原系统基线。恢复还原受管策略及旧版管理的扩展条目，保留其他扩展条目后续变化；撤销旧强制安装条目可能触发浏览器卸载商店版。手动加载的离线扩展由用户在扩展页移除，本地目录保留。旧快照没有相关记录时保留当前设置。
 
 ## 快照与恢复
 
@@ -189,7 +195,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_operation_guard
 
 网络环境页显示配置生成版本、进程匹配、IPv6 绑定、国家/区域格式/时区的当前值与目标值。不一致时分别使用重新配置或补充配置。完整配置在内核重启后再次关闭并核对 IPv6 绑定；恢复记录累积在原恢复点内，不替换首次基线。验收记录标为历史结果并显示时间，本地配置一致不等于实际网络通过。
 
-新配置不再管理浏览器策略；旧版 WebRTC 策略备份仍可通过原快照恢复。旧版 .local/browser 资料不会自动删除，避免丢失用户数据。浏览器、虚拟网络、Claude 服务与账号可用性未验证。
+除上述受管 WebRTC 策略外，新配置不管理其他浏览器设置；旧版 WebRTC 策略备份仍可通过原快照恢复。旧版 .local/browser 资料不会自动删除，避免丢失用户数据。浏览器、虚拟网络、Claude 服务与账号可用性未验证。
 
 国内域名统一使用 Loyalsoldier/clash-rules 的 direct.txt，国内 IP、私有域名、局域网地址分别使用 cncidr.txt、private.txt、lancidr.txt；不融合其他直连名单。保留精确域名与 +. 后缀的原始语义。首次切换来源请在规则更新页点击「立即更新」，定时任务会提示等待手动迁移。
 

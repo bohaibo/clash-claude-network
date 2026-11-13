@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "本地 WebRTC 保护",
+  "version": "1.0.0",
+  "description": "项目自带的离线 WebRTC 保护扩展；可能影响网页通话。",
+  "minimum_chrome_version": "119",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv6pXmO+oPuz8QrW08AO8EWKgkM1ZoXREm66vJn5pcUq6i2WyVOB8y0AIhQ5424EEEKHNe7G1zdcIUrIrU3Fp0IHx11OdgeaMpigzxbacte4wW6C33MAx4+KJtEx7Y+pLb682OFhZZQysJIo4ulym+PD9P1Pz103Ehbu4DSkdAWXBug2dOiicYdm5PPxGvyTpmHIdFyRRV+J4XJ1sx/PRCuFMYQtQCcqkjysep8lCK9+m1UljygLzQubsfyqtho9SQf5nj1mTXpx9H2D72R5edaEl801i9sRVRZMjlST4x5TMVPDUdNPoB7NO38igpKBcSMCTELff3Psqles/zVjaqwIDAQAB",
+  "permissions": [
+    "privacy"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "block.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true,
+      "match_origin_as_fallback": true
+    }
+  ]
+}

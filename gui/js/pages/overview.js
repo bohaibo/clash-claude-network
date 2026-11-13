@@ -8,7 +8,7 @@ const IMPACT = [
   { title: '系统自动定位', text: '通过 Windows 策略关闭系统定位，地图、天气等定位功能会受影响；恢复时还原原有策略。' },
   { title: '区域与时区', text: '关闭自动时区和自动校时，按所选节点地区设置系统国家、Windows 语言和区域页面中的区域格式（日期和数字）及时区。区域格式可能需注销后重新登录或重启生效；恢复会还原原格式和时间设置。长期关闭校时可能产生误差。' },
   { title: '代理清理', text: '清理系统、WinHTTP、环境变量与 Git/npm/Docker 的代理覆盖，普通流量交给 TUN；已打开的终端需要重启。' },
-  { title: '常用浏览器 WebRTC', text: '备份 Chrome、Edge、Firefox 的受管策略；Firefox 锁定禁用，Chrome/Edge 限制路径并请求安装官方商店的 WebRTC Control。扩展下载、开关、隐私窗口及实际阻断需确认，可能影响网页通话。外部指纹浏览器自行管理。' },
+  { title: '常用浏览器 WebRTC', text: '备份 Chrome、Edge、Firefox 的受管策略；Firefox 锁定禁用，Chrome/Edge 限制路径并准备项目自带离线扩展。首次手动加载一次，后续复用；已有商店版保留。外部指纹浏览器自行管理。' },
 ];
 
 const REGIONS = [
@@ -102,7 +102,7 @@ function statusGrid(ctx) {
     },
     {
       label: '上次验收',
-      value: verification.available ? (verification.success ? '历史通过' : '历史未通过') : '未验证',
+      value: verification.available ? (verification.success ? '历史通过' : '历史未通过') : '待检查',
       tone: verification.available ? (verification.success ? 'ok' : 'bad') : 'neutral',
       detail: verification.available ? ui.relativeTime(verification.time) : '配置完成后自动运行',
       action: () => ctx.navigate('logs'),
@@ -210,7 +210,14 @@ function renderImpact(ctx) {
   const groups = [
     ['系统与地区', rows.slice(0, 7)],
     ['网络保护', [...rows.slice(7, 9),
-      ['DNS 防泄露', now.dns_protection, '开启', '防止域名查询绕过代理']], '开启表示已写入保护策略；实际效果需检测，Edge 个人账号资料可能不采用策略。'],
+      ['DNS 防泄露', now.dns_protection, '开启', '防止域名查询绕过代理'],
+      ...(now.webrtc?.browsers || ['Chrome', 'Edge', 'Firefox'].map(browser => ({ browser }))).flatMap(row => [
+        [row.browser + ' WebRTC 策略', row.policy_configured === true ? '已配置' : row.policy_configured === false ? '未完整配置' : unknown,
+          row.browser === 'Firefox' ? '锁定关闭 WebRTC' : '限制非代理 UDP'],
+        ...(row.browser === 'Firefox' ? [] : [[row.browser + ' WebRTC 扩展', row.installation?.label || '尚未读取安装记录',
+          '复用已有扩展或准备本地包；首次需手动加载']]),
+        [row.browser + ' WebRTC 目标配置', row.configuration_state || '正在读取', '配置完成'],
+      ])], 'Chrome/Edge 使用策略与扩展两层保护，Firefox 使用原生禁用策略。配置复用项目自带离线扩展。'],
     ['代理设置', rows.slice(9, 15), '关闭之前分散在各处的代理设置，统一由 TUN 模式接管网络。'],
     ['网站访问', rows.slice(15)],
   ];
@@ -231,7 +238,7 @@ function renderImpact(ctx) {
           ui.el('th', { scope: 'row' }, ui.el('span', { text: label }), description ? ui.el('small', { class: 'config-explanation', text: description }) : null),
           ui.el('td', { 'data-label': '当前' }, valueBadge(current)),
           ui.el('td', { 'data-label': '配置后', class: 'config-target' }, valueBadge(desired))))))),
-    ui.note('本地设置检查不代表实际网络通过；外部浏览器由用户自行管理。', 'info')));
+    ui.el('p', { class: 'muted small', text: '外部指纹浏览器由用户自行管理。' })));
 }
 
 async function loadChoices(ctx) {

@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "license": "MIT",
+  "source": "Project-maintained offline WebRTC add-on",
+  "sha256": {
+    "manifest.json": "779243f59264134c9aaf1e6101a46d53232abd8411734f35f4321564fd950dfb",
+    "background.js": "67ea6051619e555bf6be2983b5658da6daceb05559b3b20d3c1a5c690dda2ed5",
+    "block.js": "4b81373f6e8a89e2e328c73237679aa6990f40b8b1e1b8c8716a64b43532f10b",
+    "README.md": "a12da7f533a807c1094de04ad9f94cff90ee256b4b8fcf0410ced48f7e789ad9"
+  }
+}

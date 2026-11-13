@@ -11,6 +11,8 @@ def tracked_files():
  return [p for p in PROJECT.rglob('*') if p.is_file() and not any(v in p.relative_to(PROJECT).parts for v in ('.local','.git','__pycache__'))]
 
 def check():
+ from webrtc_bundle import payload
+ payload()
  tracked=tracked_files();missing=[p for p in tracked if not p.is_file()]
  require({p.name for p in missing}<={'browser_settings.py','browser_languages.py','test_browser_settings.py','sandbox_browser.py','test_sandbox_browser.py','browser.js','sandbox-check.html','sandbox-check.js','sandbox-check.css'},
          'Unexpected tracked file is missing: '+','.join(p.name for p in missing))

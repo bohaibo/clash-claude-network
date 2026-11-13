@@ -1,4 +1,4 @@
-"""Machine-wide, reversible WebRTC policies. Never reads browser profiles."""
+"""Reversible WebRTC policies; installation inspection is strictly read-only."""
 import argparse
 import copy
 import hashlib
@@ -6,6 +6,9 @@ import json
 import os
 import re
 from pathlib import Path
+import webrtc_bundle
+
+LOCAL_EXTENSION_ID = 'emjiefookpomoonibkiaighloejfambf'
 
 RECORD = 'webrtc-policies.json'
 VALUE = 'disable_non_proxied_udp'
@@ -134,8 +137,10 @@ def load_sealed(directory):
 
 
 def validate_extensions(state):
-    if state.get('version') != 1 or len(state.get('entries', [])) != len(EXTENSIONS):
+    if state.get('version') not in (1, 2) or len(state.get('entries', [])) != len(EXTENSIONS):
         raise ValueError('Invalid WebRTC extension recovery record')
+    if state['version'] == 2 and state.get('read_only') is not True:
+        raise ValueError('Offline extension record must be read-only')
     for entry, (browser, path, value) in zip(state['entries'], EXTENSIONS):
         if (entry.get('browser') != browser or entry.get('path') != path or entry.get('managed') != value
                 or not re.fullmatch(r'[1-9][0-9]{0,4}', entry.get('name', ''))):
@@ -166,7 +171,7 @@ def snapshot_extensions(directory, registry):
         name = matches[0] if matches else next(str(i) for i in range(1, 10000) if str(i) not in values)
         entries.append(dict(browser=browser, path=path, name=name, managed=value,
                             before=registry.read(path, name)))
-    state = validate_extensions({'version': 1, 'entries': entries})
+    state = validate_extensions({'version': 2, 'read_only': True, 'entries': entries})
     with file.open('x', encoding='utf-8') as stream:
         json.dump(state, stream, ensure_ascii=False, indent=2)
     return state
@@ -190,13 +195,19 @@ def apply_protection(directory, registry):
     if extensions is None:
         raise ValueError('Missing extension recovery point; capture and seal before applying')
     registry.preflight()
+    # Browser installation still requires a user action on unmanaged Windows.
+    # Prepare a verified local package; never request another store download.
+    webrtc_bundle.prepare()
     changes = [(p, n, desired(n, registry.read(p, n))) for _, p, n in TARGETS]
     for entry in extensions['entries']:
+        if extensions['version'] == 2:
+            continue
         current = registry.read(entry['path'], entry['name'])
         after = {'exists': True, 'kind': 1, 'value': entry['managed']}
         if current not in (entry['before'], after):
             raise ValueError('Extension policy slot changed; refusing to replace another add-on')
-        changes.append((entry['path'], entry['name'], after))
+        # Preserve legacy force-install entries to avoid automatically removing
+        # an installed store extension. Fresh applies do not add these entries.
     before = [(p, n, registry.read(p, n)) for p, n, _ in changes]
     try:
         for p, n, value in changes:
@@ -212,6 +223,9 @@ def apply_protection(directory, registry):
 
 def restore_extensions(state, registry):
     validate_extensions(state)
+    # New offline configurations never own a force-install registry slot.
+    if state['version'] == 2:
+        return
     failures = []
     for entry in state['entries']:
         try:
@@ -223,6 +237,88 @@ def restore_extensions(state, registry):
         except Exception: failures.append(entry['browser'])
     if failures:
         raise RuntimeError('WebRTC extension restoration incomplete: ' + ', '.join(failures))
+
+
+def extension_installation(browser, root=None):
+    """Inspect only the managed add-on's metadata, never modify a profile.
+
+    Disk/registration evidence is not proof that an extension ran on a page.
+    Do not return profile names, unrelated settings or any browsing data.
+    """
+    vendor = {'Chrome': 'Google/Chrome', 'Edge': 'Microsoft/Edge'}[browser]
+    if root is None:
+        local = os.environ.get('LOCALAPPDATA')
+        if not local:
+            return {'state': 'unknown', 'label': '安装记录未能读取'}
+        root = Path(local) / vendor / 'User Data'
+    root = Path(root)
+    store_id = next(value.split(';')[0] for name, _, value in EXTENSIONS if name == browser)
+    ids = (store_id, LOCAL_EXTENSION_ID)
+    total = installed = disabled = errors = 0
+    local_installed = 0
+    try:
+        profiles = sorted(root.iterdir()) if root.exists() else []
+        for profile in profiles:
+            if not (profile.name == 'Default' or re.fullmatch(r'Profile [0-9]+', profile.name)):
+                continue
+            if profile.is_symlink() or not profile.is_dir():
+                continue
+            if not (profile / 'Preferences').exists():
+                continue
+            total += 1
+            try:
+                registrations = {}
+                for name in ('Preferences', 'Secure Preferences'):
+                    path = profile / name
+                    if not path.exists():
+                        continue
+                    if path.stat().st_size > 32 * 1024 * 1024:
+                        raise ValueError('Metadata too large')
+                    data = json.loads(path.read_text(encoding='utf-8'))
+                    settings = data.get('extensions', {}).get('settings', {})
+                    for eid in ids:
+                        entry = settings.get(eid)
+                        if isinstance(entry, dict) and entry:
+                            registrations[eid] = entry
+                found = []
+                for eid, registered in registrations.items():
+                    if eid == LOCAL_EXTENSION_ID:
+                        expected = (webrtc_bundle.PROJECT / '.local' / 'webrtc-addon' / '1.0.0').resolve()
+                        recorded = registered.get('path', '')
+                        local_valid = False
+                        if isinstance(recorded, str) and Path(recorded).is_absolute() and Path(recorded).resolve() == expected:
+                            raw = webrtc_bundle.payload()
+                            local_valid = all((expected / n).is_file() and (expected / n).read_bytes() == v for n, v in raw.items())
+                        if not local_valid:
+                            continue
+                        local_installed += 1
+                    else:
+                        manifests = (profile / 'Extensions' / eid).glob('*/manifest.json')
+                        if not any(isinstance(json.loads(p.read_text(encoding='utf-8')).get('version'), str) for p in manifests):
+                            continue
+                    found.append(not (registered.get('disable_reasons') or registered.get('state') == 0))
+                if found:
+                    installed += 1
+                    if not any(found):
+                        disabled += 1
+            except (OSError, ValueError, TypeError, AttributeError):
+                errors += 1
+    except OSError:
+        errors += 1
+    if errors:
+        state, label = 'unknown', '安装记录未完整读取'
+    elif not total:
+        state, label = 'no_profiles', '尚无可检查的标准浏览器资料'
+    elif disabled:
+        state, label = 'disabled', '发现已安装但被禁用的扩展记录'
+    elif installed == total:
+        state, label = 'installed', '已安装'
+    elif installed:
+        state, label = 'partial', f'仅 {installed}/{total} 份标准资料有安装记录'
+    else:
+        state, label = 'missing', '待加载本地扩展'
+    return dict(state=state, label=label, profiles=total, installed_profiles=installed,
+                local_installed_profiles=local_installed, disabled_profiles=disabled, runtime_verified=False)
 
 
 def protection_status(registry=None):
@@ -237,14 +333,21 @@ def protection_status(registry=None):
                 _, path, value = next(e for e in EXTENSIONS if e[0] == browser)
                 requested = any(e.get('kind') == 1 and e.get('value') == value for e in registry.list_values(path).values())
             except (OSError, ValueError): requested = False
+        installation = extension_installation(browser) if browser != 'Firefox' else None
+        complete = policy and (browser == 'Firefox' or installation['state'] == 'installed')
         rows.append(dict(browser=browser, policy_configured=policy, extension_requested=requested,
+                         installation=installation,
+                         configuration_complete=complete,
+                         configuration_state='配置完成' if complete else '待应用策略' if not policy else '待完成扩展配置',
                          runtime_verified=False,
-                         state=('已写入禁用策略；实际行为未验证' if policy else '禁用策略未完整配置') if browser == 'Firefox'
-                         else '限制与扩展安装策略已配置；安装及阻断未验证' if policy and requested
-                         else '限制或扩展安装策略未完整配置'))
+                         state=('WebRTC 已锁定关闭' if policy else '禁用策略未完整配置') if browser == 'Firefox'
+                         else '路径限制策略已配置' if policy
+                         else '路径限制策略未完整配置'))
     return {'browsers': rows, 'runtime_verified': False,
             'scope': '仅管理标准 Chrome、Edge、Firefox 策略；外部指纹浏览器不在配置范围内',
-            'note': 'Chrome/Edge 扩展不能视为内核完全禁用，隐私窗口不自动覆盖。扩展实际安装、开关、权限和阻断效果需人工确认。'}
+            'bundle': webrtc_bundle.status(),
+            'note': 'Chrome/Edge 使用策略与扩展两层保护；Firefox 使用原生禁用策略。',
+            'installation_help': '配置直接准备项目随附的离线扩展。在 chrome://extensions 或 edge://extensions 启用开发者模式，选择“加载已解压的扩展”，选取下方目录；每份标准资料首次手动加载一次，再刷新网页和软件状态。后续配置复用该目录。已有商店版保持原状。'}
 
 
 def apply(state, registry):

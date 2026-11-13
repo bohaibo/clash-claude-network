@@ -183,7 +183,7 @@ function renderBanners() {
     if (status.error || status.stale) {
       const last = status.read_at ? '上次读取：' + ui.formatTime(status.read_at) + '。' : '尚无成功读取记录。';
       rows.push(ui.note((labels[name] || name) + '：' + (status.error ||
-        (status.refreshing ? '正在读取，当前值未验证。' : '结果已过期，当前值未验证。')) + last, 'warn'));
+        (status.refreshing ? '正在更新状态。' : '请刷新状态。')) + last, 'warn'));
     }
   }
   if (app.data.operation?.settings_pending?.length) {
@@ -195,16 +195,16 @@ function renderBanners() {
   if (app.data.configured_error) rows.push(ui.note(app.data.configured_error, 'warn'));
   const lastRun = app.data.last_run || {};
   if (lastRun.success === false && lastRun.action) {
-    rows.push(ui.note('上次' + (ACTION_LABELS[lastRun.action] || '操作') + '未完成：' + (lastRun.error || '请查看日志。') + ' 当前“配置已写入”不代表恢复/配置成功。', 'bad'));
+    rows.push(ui.note('上次' + (ACTION_LABELS[lastRun.action] || '操作') + '未完成：' + (lastRun.error || '请查看日志。'), 'bad'));
   }
   const verification = app.data.verification || {};
   const verificationAge = verification.time ? (Date.now() - new Date(verification.time).getTime()) / 3600000 : Infinity;
   if (verification.dns_failed) {
     rows.push(ui.note('上次网络验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。请立即重新检查连通性；必要时恢复或重新配置。', 'bad'));
   } else if (verification.available && verification.success === false) {
-    rows.push(ui.note('上次网络验收未通过；“已配置”只表示运行配置中有项目标记，不代表 DNS/出口仍然正确。', 'warn'));
+    rows.push(ui.note('上次网络验收未通过，请查看失败项目并重新检查。', 'warn'));
   } else if (app.data.configured && !verification.available) {
-    rows.push(ui.note('当前配置尚未完成网络验收；侧边栏不会把“配置标记存在”当作“网络已生效”。', 'info'));
+    rows.push(ui.note('请在「网络环境」完成网络验收。', 'info'));
   } else if (app.data.configured && verification.available && verification.success && verificationAge > 24) {
     rows.push(ui.note('上次网络验收已超过 24 小时；请重新检查 DNS/出口后再依赖当前状态。', 'warn'));
   }

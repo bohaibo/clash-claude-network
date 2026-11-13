@@ -26,6 +26,9 @@ def package_files(project):
 
 def build_package(project=PROJECT,local=LOCAL):
  project=Path(project);local=Path(local);info=metadata(project)
+ if (project/'assets/webrtc-addon/bundle.json').exists():
+  from webrtc_bundle import payload as addon_payload
+  addon_payload(project)
  forbidden=[]
  try:forbidden=load(local/'publish-forbidden-values.json')
  except FileNotFoundError:pass

@@ -35,14 +35,21 @@ export function render(ctx) {
     root.append(ui.note('上次验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。请点击「重新检查连通性」；若仍失败，恢复关联快照并重新配置。', 'bad'));
   }
   const health = state.preview?.current?.health;
-  root.append(ui.card({ title: '当前配置一致性', subtitle: (health?.scope || '正在读取；未验证') + '。规则或版本不一致请重新配置；系统地区或新增网卡请补充配置。' },
-    ...(health?.checks || []).map(row => ui.note(row.title + '：' + (row.status === 'passed' ? '一致' : row.status === 'failed' ? '不一致，请' + row.action : '未验证') + '；当前 ' + (row.title === '配置生成版本' ? (row.current ? '已记录版本' : '旧版未记录') : String(row.current ?? '未知')) + ' → ' + (row.title === '配置生成版本' ? '当前软件版本' : String(row.target)), row.status === 'passed' ? 'info' : 'warn'))));
+  root.append(ui.card({ title: '当前配置一致性', subtitle: '核对本地配置文件和系统状态。规则或版本不一致请重新配置；系统地区或新增网卡请补充配置。' },
+    ...(health?.checks || []).map(row => ui.note(row.title + '：' + (row.status === 'passed' ? '一致' : row.status === 'failed' ? '不一致，请' + row.action : '待检查') + '；当前 ' + (row.title === '配置生成版本' ? (row.current ? '已记录版本' : '旧版未记录') : String(row.current ?? '未知')) + ' → ' + (row.title === '配置生成版本' ? '当前软件版本' : String(row.target)), row.status === 'passed' ? 'info' : 'warn'))));
   root.append(flowCard());
   const rtc = state.preview?.current?.webrtc;
   root.append(ui.card({ title: '常用浏览器 WebRTC', subtitle: '配置与补充配置会备份并管理这三款标准浏览器的 WebRTC 策略。' },
+    ui.kv((rtc?.browsers || []).map(row => [row.browser + ' 配置', row.configuration_state || '正在读取'])),
     ui.kv((rtc?.browsers || []).map(row => [row.browser, row.state])),
-    ui.note(rtc?.note || '正在读取策略，尚未验证。', 'warn'),
-    ui.el('p', { class: 'muted small', text: 'Firefox 写入并锁定禁用策略；Chrome/Edge 配置路径限制及各自商店的 WebRTC Control 扩展安装策略。扩展需浏览器正常启动后下载，实际安装、开关及阻断仍需确认。语音、视频通话和点对点功能可能受影响。' })));
+    ui.kv((rtc?.browsers || []).filter(row => row.installation).map(row => [row.browser + ' 扩展安装', row.installation.label])),
+    ui.kv([['离线扩展', rtc?.bundle?.label || '尚未读取'], ['加载目录', rtc?.bundle?.path || '配置时准备']]),
+    rtc?.bundle?.path ? ui.button('复制扩展目录', { variant: 'secondary', size: 'small', onClick: async () => {
+      try { await navigator.clipboard.writeText(rtc.bundle.path); ui.toast('已复制扩展目录', 'success'); }
+      catch { ui.toast('复制失败，请手动复制上方目录', 'error'); }
+    } }) : null,
+    ui.el('p', { class: 'muted small', text: rtc?.installation_help || '配置直接使用项目自带的离线扩展，首次在浏览器扩展页加载显示的本地目录。' }),
+    ui.el('p', { class: 'muted small', text: rtc?.note || '正在读取 WebRTC 配置。' })));
   root.append(verificationCard(ctx));
   root.append(actionsCard(ctx));
   return root;
@@ -54,7 +61,7 @@ function configCard(ctx) {
   const service = state.service || {};
   return ui.card({
     title: '当前固定配置',
-    subtitle: state.configured ? '当前运行配置中检测到项目分流标记；这不等于 DNS/出口仍然通过验收。' : '存在配置记录，但当前运行配置未检测到项目标记；可能已恢复。',
+    subtitle: state.configured ? '项目分流配置正在运行。' : '当前未运行项目分流配置。',
     actions: !state.configured ? ui.badge('未生效', 'warn')
       : state.last_run?.success === false ? ui.badge('上次操作未完成', 'bad')
         : state.verification?.dns_failed ? ui.badge('DNS 验收失败', 'bad')
@@ -98,11 +105,7 @@ function verificationCard(ctx) {
       ui.el('div', {}, ui.el('strong', { text: check.title }), ui.el('small', { text: ui.statusText(check.status) }))))));
     body.push(ui.el('div', { class: 'stage-grid' }, (verification.stages || []).map((stage) => ui.el('div', { class: 'stage-item' },
       ui.el('span', { class: 'status-dot ' + (stage.success ? 'ok' : stage.status === 'unverified' ? 'warn' : stage.tested ? 'bad' : 'warn') }),
-      ui.el('div', {}, ui.el('strong', { text: stage.title }), ui.el('small', { text: stage.success ? '已通过' : stage.status === 'unverified' ? '未验证' : stage.tested ? '未通过' : '未记录' }))))));
-    if (verification.not_tested?.length) {
-      body.push(ui.note('以下项目仍未验证：' + verification.not_tested.join('、') + '。', 'warn'));
-    }
-    body.push(ui.el('p', { class: 'muted small', text: '验收只代表当时观测到的结果，不能证明 Claude 账号可用、浏览器指纹或所有应用路径。' }));
+      ui.el('div', {}, ui.el('strong', { text: stage.title }), ui.el('small', { text: stage.success ? '已通过' : stage.status === 'unverified' ? '待检查' : stage.tested ? '未通过' : '未记录' }))))));
   }
   return ui.card({ title: '上次网络验收', actions: ui.button('查看日志', { variant: 'ghost', size: 'small', icon: 'list', onClick: () => ctx.navigate('logs') }) }, ...body);
 }
@@ -162,7 +165,7 @@ async function audit(ctx) {
     title: '完整复核防火墙并演练故障？',
     description: '将请求管理员权限，检查完整生效策略，分别模拟节点故障、关闭 TUN、内核退出，并验证恢复。公网和正在使用的连接会短暂中断，可能需要数分钟。',
     items: [{title: '独立恢复看护', text: 'TUN 演练前启用本机恢复看护；失败会记录恢复状态。'},
-      {title: '权限或证据不足', text: '明确标为未验证，不沿用历史成功记录。'}],
+      {title: '检查未完成', text: '补齐管理员权限或修复失败项目后重新检查。'}],
     confirmText: '开始完整复核',
   });
   if (ok) ctx.startJob({action: 'audit', confirm: 'AUDIT'});

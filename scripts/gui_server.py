@@ -550,11 +550,11 @@ class App:
             import webrtc_system
             current['webrtc'] = webrtc_system.protection_status()
         except (OSError, ValueError, TypeError):
-            current['webrtc'] = {'browsers': [], 'note': 'WebRTC 策略读取失败，未验证。'}
+            current['webrtc'] = {'browsers': [], 'note': 'WebRTC 配置读取失败，请刷新。'}
         try:
             current['winhttp'] = preview_config.winhttp()
         except (OSError, AttributeError):
-            current['winhttp'] = '读取失败（未验证）'
+            current['winhttp'] = '读取失败'
         # Read only summaries; never serialize node definitions or proxy URLs.
         try:
             import client
@@ -571,7 +571,7 @@ class App:
                 import preview_config
                 current[name] = preview_config.app_proxy(name, Path.home() / relative)
             except (OSError, ValueError, TypeError):
-                current[name] = '未能读取（未验证）'
+                current[name] = '未能读取'
         value = {'current': current, 'regions': region_profile.PROFILES,
                  'read_at': now_iso()}
         self._preview_cache = (time.monotonic(), value)
@@ -592,12 +592,12 @@ class App:
                         self.log('state collection failed: ' + name + ': ' + type(exc).__name__)
                         with self._lock:
                             if entry['generation'] == generation:
-                                entry['error'] = '读取失败（' + type(exc).__name__ + '），显示上次结果，未验证当前状态。'
+                                entry['error'] = '读取失败（' + type(exc).__name__ + '），当前显示上次结果，请刷新。'
                     else:
                         with self._lock:
                             if entry['generation'] == generation:
                                 if issue:
-                                    entry['error'] = issue + '显示上次结果，未验证当前状态。'
+                                    entry['error'] = issue + '当前显示上次结果，请刷新。'
                                 else:
                                     entry['value'] = value
                                     entry['read_at'] = now_iso()
@@ -634,14 +634,14 @@ class App:
     @staticmethod
     def state_issue(name, value):
         if not isinstance(value, dict):
-            return '状态读取失败，当前值未验证。'
+            return '状态读取失败，请刷新。'
         if name == 'service' and value.get('service') == 'Unknown':
             return '无法读取 Clash 服务状态。'
         if name == 'update' and value.get('task', {}).get('error'):
             return '计划任务状态读取失败。'
         if name == 'update' and value.get('settings', {}).get('error'):
             return '更新设置读取失败。'
-        return '状态读取失败，当前值未验证。' if value.get('error') else ''
+        return '状态读取失败，请刷新。' if value.get('error') else ''
 
     def collection_status(self):
         with self._lock:

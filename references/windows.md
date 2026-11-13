@@ -15,7 +15,7 @@ Rollback: use the GUI restore page or the console fallback. Never import another
 
 All-adapter IPv6 handling includes hidden, virtual and disconnected adapters. Record enabled bindings before mutation, recheck all adapters afterward, and restore baseline states plus journaled later adapters. Match exact GUIDs; never substitute a same-name replacement. Use binding instances for mutation. Normal restoration preserves originally disabled states and does not repair driver startup. Binding failures must produce an incomplete result.
 
-Before closing applications, verify the firewall prerequisites or selected restore snapshot. Browser features are removed. Never launch a browser for testing. Retain only legacy WebRTC policy recovery; do not apply new browser policies. Restore only proxy fields in Git/npm/Docker files, preserving later unrelated settings. A pending watchdog rollback is pinned to its recorded snapshot and serialized with firewall writes; resolve it before a new operation. The bounded firewall timeout requests rollback after the current write step. Scheduled updates must skip unresolved guards or changed script associations; honor the GUI interval (1–365 days) and time.
+Before closing applications, verify the firewall prerequisites or selected restore snapshot. Browser features are removed. Never launch a browser for testing. Only the managed, backed-up WebRTC policies may affect standard browsers globally; do not edit browser profiles. Restore only proxy fields in Git/npm/Docker files, preserving later unrelated settings. A pending watchdog rollback is pinned to its recorded snapshot and serialized with firewall writes; resolve it before a new operation. The bounded firewall timeout requests rollback after the current write step. Scheduled updates must skip unresolved guards or changed script associations; honor the GUI interval (1–365 days) and time.
 
 A configured manual snapshot retains its pre-existing project scripts and their current rule updates. Remove only later project additions, preserving current subscriptions and user script choices. Missing required scripts or the exact selected node must stop preflight; do not revive old node-bearing runtime YAML. Validate regenerated configured runtime against current source nodes and routing invariants. Record verification stages under one operation ID, retaining node-outage/core-exit/recovery evidence separately. Failed tested STUN/git/npm checks fail verification; unavailable tools remain explicitly untested.
 
@@ -26,7 +26,7 @@ A configured manual snapshot retains its pre-existing project scripts and their 
 
 网络环境页显示配置生成版本、进程匹配、IPv6 绑定、国家/区域格式/时区的当前值与目标值。不一致时分别使用重新配置或补充配置。完整配置在内核重启后再次关闭并核对 IPv6 绑定；恢复记录累积在原恢复点内，不替换首次基线。验收记录标为历史结果并显示时间，本地配置一致不等于实际网络通过。
 
-配置/补充仅管理标准 Chrome、Edge、Firefox 的 WebRTC 策略并备份恢复。Firefox 直接锁定禁用；Chrome/Edge 限制非代理 UDP 并请求安装各自商店的 WebRTC Control，不能标为内核完全禁用。扩展实际下载、开关、权限和阻断未验证，隐私窗口不自动覆盖。新增恢复记录在首次改动前封存，保留原基线和其他扩展条目；外部指纹浏览器不管理。浏览器实际行为、虚拟网络、Claude 服务和账号未验证。
+配置/补充仅管理标准 Chrome、Edge、Firefox 的 WebRTC 策略并备份恢复。Firefox 直接锁定禁用；Chrome/Edge 限制非代理 UDP 并校验、准备项目自带离线 WebRTC 扩展（首次手动加载，后续复用；不新增商店下载请求，已有历史条目保持原状），不能标为内核完全禁用。扩展实际下载、开关、权限和阻断未验证，隐私窗口不自动覆盖。新增恢复记录在首次改动前封存，保留原基线和其他扩展条目；外部指纹浏览器不管理。浏览器实际行为、虚拟网络、Claude 服务和账号未验证。
 
 完整复核与故障演练：在「网络环境」点击对应操作，经 Windows 管理员授权后检查完整防火墙，再分别演练节点故障、关闭 TUN 但保持同一内核运行、内核退出，并在恢复后复测及再次复核防火墙。不重新配置规则、节点或系统地区，不启动浏览器，不访问 Claude/Anthropic。公网会短暂中断。
 
