@@ -43,6 +43,7 @@ const app = {
   fatal: '',
   jobConnectionError: '',
   startingJob: false,
+  stateLoading: false,
 };
 let shell = null;
 let refreshPromise = null;
@@ -161,9 +162,9 @@ function updateChrome() {
         h('span', { class: 'status-dot ' + statusTone }),
         h('span', { text: statusText })),
       h('small', { text: data.configured ? '节点：' + (data.plan?.node || '—') : '从「一键配置」开始' }),
-      h('small', { text: hasVerification ? '上次验收：' + ui.formatTime(verification.time) : '上次验收：无记录' }),
+      data.configured ? h('small', { text: hasVerification ? '上次验收：' + ui.formatTime(verification.time) : '上次验收：无记录' }) : null,
       lastRunFailed ? h('small', { class: 'warn-text', text: '上次操作：' + (ACTION_LABELS[lastRun.action] || lastRun.action) + '未完成' }) : null,
-      verification.dns_failed ? h('small', { class: 'warn-text', text: 'DNS A/64/65 未通过，存在 DNS 泄漏风险' }) : null,
+      data.configured && verification.dns_failed ? h('small', { class: 'warn-text', text: 'DNS A/64/65 未通过，存在 DNS 泄漏风险' }) : null,
       data.app?.node === false ? h('small', { class: 'warn-text', text: '未找到 Node.js' }) : null,
     ].filter(Boolean));
   }
@@ -172,15 +173,22 @@ function updateChrome() {
 
 function renderBanners() {
   const host = document.getElementById('banners');
-  if (!host || !app.data) return;
+  if (!host) return;
   const rows = [];
+  const labels = { preview: '系统设置', update: '规则更新', service: 'Clash 服务' };
+  const collecting = Object.entries(app.data?.collection || {}).filter(([, status]) => status.refreshing);
+  if (app.stateLoading || collecting.length) {
+    rows.push(h('div', { class: 'note configuration-loading', role: 'status', 'aria-live': 'polite', 'aria-busy': 'true' },
+      h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+      h('span', { text: app.stateLoading ? '正在读取本地配置…' : '正在读取' + collecting.map(([name]) => labels[name] || name).join('、') + '…' })));
+  }
+  if (!app.data) { host.replaceChildren(...rows); return; }
   const softwareUpdate = app.data.software || {};
   if (softwareUpdate.status === 'available') {
     rows.push(ui.note('发现软件新版本 ' + softwareUpdate.latest_version + '，请到「软件更新」查看。', 'info'));
   }
-  const labels = { preview: '系统设置', update: '规则更新', service: 'Clash 服务' };
   for (const [name, status] of Object.entries(app.data.collection || {})) {
-    if (status.error || status.stale) {
+    if (!app.stateLoading && !status.refreshing && (status.error || status.stale)) {
       const last = status.read_at ? '上次读取：' + ui.formatTime(status.read_at) + '。' : '尚无成功读取记录。';
       rows.push(ui.note((labels[name] || name) + '：' + (status.error ||
         (status.refreshing ? '正在更新状态。' : '请刷新状态。')) + last, 'warn'));
@@ -199,17 +207,14 @@ function renderBanners() {
   }
   const verification = app.data.verification || {};
   const verificationAge = verification.time ? (Date.now() - new Date(verification.time).getTime()) / 3600000 : Infinity;
-  if (verification.dns_failed) {
+  if (app.data.configured && verification.dns_failed) {
     rows.push(ui.note('上次网络验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。请立即重新检查连通性；必要时恢复或重新配置。', 'bad'));
-  } else if (verification.available && verification.success === false) {
+  } else if (app.data.configured && verification.available && verification.success === false) {
     rows.push(ui.note('上次网络验收未通过，请查看失败项目并重新检查。', 'warn'));
   } else if (app.data.configured && !verification.available) {
     rows.push(ui.note('请在「网络环境」完成网络验收。', 'info'));
   } else if (app.data.configured && verification.available && verification.success && verificationAge > 24) {
     rows.push(ui.note('上次网络验收已超过 24 小时；请重新检查 DNS/出口后再依赖当前状态。', 'warn'));
-  }
-  if (app.data.plan?.exists && !app.data.configured) {
-    rows.push(ui.note('存在上次配置记录，但当前运行配置中没有检测到本项目的分流标记；可能已恢复。请重新配置后再使用补充或更新。', 'warn'));
   }
   if (app.data.operation?.pending_firewall) {
     rows.push(ui.note('检测到未完成的防火墙回滚记录。请先完成或恢复处理；新的配置和更新会被阻止。', 'bad'));
@@ -337,6 +342,8 @@ function refreshPage() {
 }
 
 async function refreshState(force = false) {
+  app.stateLoading = true;
+  renderBanners();
   try {
     const revision = stateRevision;
     const data = await api.getState(force);
@@ -358,6 +365,9 @@ async function refreshState(force = false) {
           ui.button('重试', { variant: 'ink', onClick: () => refresh(true) }))));
       }
     }
+  } finally {
+    app.stateLoading = false;
+    renderBanners();
   }
 }
 

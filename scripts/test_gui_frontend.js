@@ -87,7 +87,8 @@ async function main() {
   assert.equal(fresh.children[2], form, 'form survives inserted warnings through stable keys');
   assert.equal(fresh.children[3], log, 'open logs must survive status refresh');
   const raceContext = vm.createContext({ software() {}, overview() {}, network() {}, browser() {}, snapshots() {},
-    updates() {}, logs() {}, help() {}, api: {}, ui: {}, console });
+    updates() {}, logs() {}, help() {}, api: {}, ui: {}, console,
+    document: { getElementById: () => null } });
   vm.runInContext(source + `
     let respond;
     api.getState = () => new Promise(resolve => respond = resolve);
@@ -109,7 +110,7 @@ async function main() {
   const bannerContext = vm.createContext({
     software() {}, overview() {}, network() {}, browser() {}, snapshots() {}, updates() {}, logs() {}, help() {},
     document: { getElementById: () => host }, console,
-    api: { startJob: payload => { posts.push(payload); return new Promise(r => acceptJob = r); } },
+    api: { SessionError, startJob: payload => { posts.push(payload); return new Promise(r => acceptJob = r); } },
     ui: {
       el: (tag, props, ...children) => ({ tag, props, children }),
       note: (content, tone) => ({ content, tone }),
@@ -121,9 +122,10 @@ async function main() {
     updateChrome = () => renderBanners();
     renderJobDock = () => {};
     pollJob = () => {};
+    refreshPage = () => {};
     app.data = { configured: true, browser: {engine: {name: 'fixture'}},
       update: { mode: 'scheduled', last: {success: false, time: 'fixture', reason: 'fixture failure'} } };
-    globalThis.banner = { app, renderBanners };
+    globalThis.banner = { app, renderBanners, refreshState };
   `, bannerContext);
   const banner = bannerContext.banner;
   const notices = () => host.rows.filter(row => row.content?.props?.class === 'note-with-action');
@@ -154,6 +156,33 @@ async function main() {
   banner.app.data.configured = false;
   banner.renderBanners();
   assert.equal(button().disabled, true, 'unconfigured project cannot update');
+  // Restored/unconfigured state must not raise warnings from old plan/evidence.
+  banner.app.data = { configured: false, plan: {exists: true}, collection: {},
+    verification: {available: true, success: false, dns_failed: true, time: '2026-11-13T15:16:14'} };
+  banner.renderBanners();
+  assert.equal(host.rows.length, 0, 'unconfigured state needs no historical configuration warning');
+  const loader = () => host.rows.find(row => row.props?.class === 'note configuration-loading');
+  banner.app.data.collection.preview = {refreshing: true, stale: true, error: 'old read error'};
+  banner.renderBanners();
+  assert.ok(loader(), 'background collection displays a loader instead of an old warning');
+  assert.equal(loader().props.role, 'status');
+  assert.ok(loader().children.some(child => child.props?.class === 'spinner'));
+  assert.equal(host.rows.length, 1, 'collectors share one loading banner');
+  banner.app.data.collection = {};
+  banner.renderBanners();
+  assert.equal(loader(), undefined, 'loader disappears after collection completes');
+  let resolveState;
+  bannerContext.api.getState = () => new Promise(resolve => { resolveState = resolve; });
+  banner.app.data = null;
+  const initialRead = banner.refreshState(true);
+  assert.ok(loader(), 'initial request shows the top loader before state exists');
+  resolveState({configured: false, collection: {}});
+  await initialRead;
+  assert.equal(loader(), undefined, 'successful request stops the spinner');
+  bannerContext.api.getState = async () => { throw new Error('fixture read failed'); };
+  await banner.refreshState(true);
+  assert.equal(banner.app.stateLoading, false, 'failed request also clears loading state');
+  assert.equal(loader(), undefined, 'failed request does not leave a stuck spinner');
   console.log('GUI task lifecycle offline checks passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

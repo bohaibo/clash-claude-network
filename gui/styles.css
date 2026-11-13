@@ -256,6 +256,8 @@ select.input { appearance: none; padding-right: 30px; background-image: linear-g
 .note-with-action { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }
 .note-with-action .btn { flex: none; }
 .note .icon { margin-top: 1px; flex: none; }
+.configuration-loading { align-items: center; }
+.configuration-loading .spinner { border-color: rgba(36, 64, 95, 0.2); border-top-color: currentColor; }
 .note-warn { border-left-color: var(--warn); background: var(--warn-bg); color: #5e4307; }
 .note-bad { border-left-color: var(--bad); background: var(--bad-bg); color: #6f1710; }
 .note-ok { border-left-color: var(--ok); background: var(--ok-bg); color: #0e4d2d; }
