@@ -367,11 +367,18 @@ def protection_status(registry=None):
                          state=('WebRTC 已锁定关闭' if policy else '禁用策略未完整配置') if browser == 'Firefox'
                          else '路径限制策略已配置' if policy
                          else '路径限制策略未完整配置'))
+    pending = [r['browser'] for r in rows if r['installation'] and
+               r['installation']['state'] != 'no_profiles' and not r['configuration_complete']]
+    installation_help = '默认静默安装 Chrome、Edge 官方商店扩展，已有扩展复用；浏览器关闭时将在下次正常启动后安装。项目自带离线包仅作手动备用。'
+    if pending:
+        installation_help += '如果正常重启浏览器后仍未安装或已被禁用，请在 chrome://extensions 或 edge://extensions 启用开发者模式，选择“加载已解压的扩展”，加载下方项目离线目录，每份资料一次。离线文件就绪不代表安装成功。'
     return {'browsers': rows, 'runtime_verified': False,
+            'installation_pending': pending,
+            'manual_fallback_available': webrtc_bundle.status().get('prepared') is True,
             'scope': '仅管理标准 Chrome、Edge、Firefox 策略；外部指纹浏览器不在配置范围内',
             'bundle': webrtc_bundle.status(),
             'note': 'Chrome/Edge 使用策略与扩展两层保护；Firefox 使用原生禁用策略。',
-            'installation_help': '一键配置会自动设置 Chrome、Edge 的官方商店扩展安装策略，无需手动添加扩展。浏览器运行时自动完成安装；关闭时将在下次正常启动后完成。已有商店扩展会复用。项目自带的离线扩展作为备用，保留在下方目录。'}
+            'installation_help': installation_help}
 
 
 def apply(state, registry):

@@ -257,6 +257,20 @@ class WebRtcPolicyTests(unittest.TestCase):
             self.assertTrue(all(row['configuration_complete'] for row in rows))
             self.assertTrue(all(row['configuration_state'] == '配置完成' for row in rows))
 
+    def test_pending_store_installation_exposes_manual_fallback_without_claiming_success(self):
+        self.sealed_protection()
+        rtc.apply_protection(self.path,self.registry)
+        with patch.object(rtc,'extension_installation',return_value={'state':'missing','label':'尚未安装','profiles':1}):
+            status=rtc.protection_status(self.registry)
+            self.assertEqual(status['installation_pending'],['Chrome','Edge'])
+            self.assertIn('加载已解压的扩展',status['installation_help'])
+            self.assertTrue(all(r['extension_requested'] for r in status['browsers'][:2]))
+            self.assertFalse(any(r['configuration_complete'] for r in status['browsers'][:2]))
+        with patch.object(rtc,'extension_installation',return_value={'state':'installed','label':'已安装','profiles':1}):
+            status=rtc.protection_status(self.registry)
+            self.assertEqual(status['installation_pending'],[])
+            self.assertNotIn('加载已解压的扩展',status['installation_help'])
+
     def test_local_install_requires_expected_directory_and_verified_files(self):
         project = self.path / 'fixture-project'
         addon = project / '.local/webrtc-addon/1.0.0'

@@ -605,7 +605,17 @@ try {
  if($Action -eq 'restore' -and $result.status -eq 'partial'){throw '该快照缺少系统恢复记录，已处理现有客户端记录，但无法完成系统恢复。'}
  $result.success=$true
  if($Action -eq 'apply'){
-  Write-Done ('配置已完成并生效（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT)
+  $extensionNote=''
+  try{
+   $protectionOutput=& $python (Join-Path $PSScriptRoot 'webrtc_system.py') status
+   if($LASTEXITCODE -ne 0){throw '无法读取扩展安装状态'}
+   $protection=($protectionOutput | Select-Object -Last 1) | ConvertFrom-Json
+   $result.webrtc=[ordered]@{installation_pending=@($protection.installation_pending);manual_fallback_available=[bool]$protection.manual_fallback_available;runtime_verified=$false}
+   if(@($protection.installation_pending).Count){
+    $extensionNote=' '+($protection.installation_pending -join '、')+' 尚有标准资料未完成扩展安装。请正常重启浏览器；仍未安装时，在扩展页启用开发者模式并加载项目 .local\webrtc-addon\1.0.0。'
+   }
+  }catch{$extensionNote=' 扩展安装状态未确认，请查看「网络环境」的网络保护；自动安装失败时可使用项目离线包手动加载。'}
+  Write-Done ('网络配置已完成并生效（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT+$extensionNote)
   Write-Host '  固定节点组 Claude-Overseas-Pinned 只包含你指定的节点。要撤销请在「快照与恢复」中恢复。'
   Write-Host '  已完成自动网络验收；外部浏览器行为、虚拟网络、Claude 与账号可用性未验证。'
   try{
