@@ -65,6 +65,14 @@ class Verification(unittest.TestCase):
    with self.assertRaises(AssertionError):verify.verify(stage='post-recovery')
   report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
   self.assertFalse(report['success']);self.assertEqual(len(report['egress_attempts']),3)
+ def test_initial_connectivity_retries_transport_and_http_failure(self):
+  for failed in ({'exit':28,'http':0,'body':'','error':'timeout'},
+                 {'exit':0,'http':503,'body':'unavailable','error':''}):
+   with self.subTest(failed=failed):
+    responses=[self.fake_curl('domestic'),self.fake_curl('domestic'),failed,self.fake_curl('egress')]
+    with patch.object(verify,'curl',side_effect=lambda *a,**k:responses.pop(0) if responses else self.fake_curl(*a,**k)),patch.object(verify.time,'sleep'):
+     report=verify.verify()
+    self.assertTrue(report['success']);self.assertEqual(len(report['egress_attempts']),2)
  def test_failed_required_checks_cannot_pass(self):
   for name in ('stun','git','npm'):
    with self.subTest(check=name):
@@ -275,7 +283,7 @@ class Stun(unittest.TestCase):
     data=struct.pack('!HHI',0x0101,len(attribute),0x2112A442)+self.request[8:20]+attribute
     return transform(data,self.request),sender
   with patch.object(verify.socket,'socket',return_value=FakeSocket()),patch.object(verify.socket,'gethostbyname',return_value='192.0.2.1'):
-   return verify.stun(route_probe=route_probe)
+   return verify.stun_once(route_probe=route_probe)
  def test_route_sample_collected_before_udp_socket_closes(self):
   def capture(probe):
    self.assertTrue(self.socket_open);self.assertEqual(probe['source_port'],45678)
@@ -293,6 +301,28 @@ class Stun(unittest.TestCase):
  def test_truncated_attribute_rejected(self):self.assertFalse(self.probe(attribute=struct.pack('!HH',0x0020,8))['ok'])
  def test_private_mapping_rejected(self):
   self.assertFalse(self.probe(attribute=struct.pack('!HHBBH',1,8,0,1,4321)+socket.inet_aton('192.168.1.1'))['ok'])
+
+class StunRetries(unittest.TestCase):
+ def test_timeout_retries_same_endpoint_and_preserves_failure(self):
+  with patch.object(verify,'stun_once',side_effect=[{'ok':False,'error':'TimeoutError'},{'ok':True,'mapped':'8.8.8.8:1234'}]) as probe:
+   result=verify.stun()
+  self.assertTrue(result['ok']);self.assertEqual(probe.call_count,2)
+  self.assertEqual(result['attempts'][0]['error'],'TimeoutError')
+ def test_independent_endpoint_recovers_with_verified_route(self):
+  with patch.object(verify,'stun_once',side_effect=[{'ok':False,'error':'TimeoutError'}]*2+[
+       {'ok':True,'mapped':'8.8.8.8:1234','route':{'verified':True}}]) as probe:
+   result=verify.stun(route_probe=lambda p:None)
+  self.assertTrue(result['ok']);self.assertEqual(probe.call_args.args[:2],('stun.cloudflare.com',3478))
+  self.assertEqual(len(result['attempts']),3)
+ def test_exhausted_or_unverified_route_still_fails(self):
+  for value in ({'ok':False,'error':'TimeoutError'},{'ok':True,'route':{'verified':False}}):
+   with self.subTest(value=value),patch.object(verify,'stun_once',return_value=value) as probe:
+    result=verify.stun(route_probe=lambda p:None)
+    self.assertFalse(result['ok']);self.assertEqual(probe.call_count,4)
+ def test_explicit_target_does_not_fall_back(self):
+  with patch.object(verify,'stun_once',return_value={'ok':False}) as probe:
+   self.assertFalse(verify.stun('fixture.invalid',1234)['ok'])
+  self.assertEqual([call.args[:2] for call in probe.call_args_list],[('fixture.invalid',1234)]*2)
 
 class NoClaudeNetworkTests(unittest.TestCase):
  def test_claude_targets_are_rejected_before_network_or_process_io(self):

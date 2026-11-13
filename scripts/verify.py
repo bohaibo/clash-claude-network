@@ -77,6 +77,22 @@ def curl(url,head=False):
  body,_,status=p.stdout.rpartition('\n__CHECK__')
  return {'exit':p.returncode,'http':int(status or 0),'body':body,'error':p.stderr.strip()[:500]}
 def stun(host='stun.l.google.com',port=19302,route_probe=None):
+ """Bounded retries with an independent public endpoint; keep every attempt."""
+ assert_test_host(host)
+ targets=[(host,port)]
+ if (host,port)==('stun.l.google.com',19302):
+  targets.append(('stun.cloudflare.com',3478))
+ attempts=[]
+ for target,service in targets:
+  for _ in range(2):
+   result=stun_once(target,service,route_probe)
+   attempts.append({'host':target,'port':service,**result})
+   if result.get('ok') and (route_probe is None or result.get('route',{}).get('verified') is True):
+    return {**result,'attempts':attempts}
+ # A response without a pinned route must never pass verification.
+ return {**result,'ok':False,'attempts':attempts}
+
+def stun_once(host='stun.l.google.com',port=19302,route_probe=None):
  """Native UDP STUN binding request, bypassing any HTTP proxy."""
  assert_test_host(host)
  transaction=os.urandom(12);cookie=0x2112A442
@@ -221,13 +237,13 @@ def verify(outage=False,stage=None):
   report['domestic']={'baidu':cn['http'],'taobao':taobao['http']}
   check='egress'
   attempts=[]
-  for attempt in range(3 if stage=='post-recovery' else 1):
+  for attempt in range(3):
    egress=curl('https://ipinfo.io/json')
    attempts.append({k:egress.get(k) for k in ('exit','http','error')})
-   if egress['exit']==0:break
-   if stage=='post-recovery' and attempt<2:time.sleep(2)
+   if egress['exit']==0 and egress['http']==200:break
+   if attempt<2:time.sleep(2)
   report['egress_attempts']=attempts
-  require(egress['exit']==0,'海外出口连接失败；详见 egress_attempts')
+  require(egress['exit']==0 and egress['http']==200,'海外出口连接失败；详见 egress_attempts')
   address=json.loads(egress['body']);require(address.get('country')==plan['region'],'Exit country differs from required region')
   report['egress']={k:address.get(k) for k in ('ip','country','city')}
   check='dns'

@@ -187,7 +187,7 @@ function Get-VerificationFailureMessage([string]$fallback){
  try{
   $report=Get-Content -LiteralPath (Join-Path $local 'verification.json') -Raw -Encoding UTF8 | ConvertFrom-Json
   if(!$env:CCN_VERIFY_RUN -or $report.run_id -ne $env:CCN_VERIFY_RUN){return $fallback}
-  $checkTitles=@{runtime='内核运行模式或固定节点组';domestic='国内网站连通性';egress='海外出口及要求地区';dns='DNS A/64/65 过滤';fake_ip='TUN DNS 接管';ipv6='IPv6 公网阻断';tools='Git/npm/UDP STUN';udp_egress='UDP 出口地区及指定节点路由';node_outage='节点故障保护';recovery='节点恢复后出口'}
+  $checkTitles=@{runtime='内核运行模式或固定节点组';domestic='国内网站连通性';egress='海外出口及要求地区';dns='DNS A/64/65 过滤';fake_ip='TUN DNS 接管';ipv6='IPv6 公网阻断';udp_egress='UDP 出口地区及指定节点路由';node_outage='节点故障保护';recovery='节点恢复后出口'}
   foreach($stage in @('node-outage','tun-off','core-exit','post-recovery','firewall-before','firewall-after','connectivity')){
    $evidence=$report.stages.$stage
    if($evidence -and $evidence.success -eq $false){

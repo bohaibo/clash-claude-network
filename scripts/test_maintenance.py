@@ -156,6 +156,10 @@ $function=$ast.Find({param($node) $node -is [System.Management.Automation.Langua
 Invoke-Expression $function.Extent.Text
 $message=Get-VerificationFailureMessage 'fallback'
 if($message -notmatch 'GitHub/Git' -or $message -notmatch '2' -or $message -match 'private-fixture-error'){throw 'Wrong current failure message'}
+$report=@{run_id=('a'*32);stages=@{'node-outage'=@{success=$false;failed_check='tools'}};git=@{status='passed'};npm=@{status='passed'};stun=@{status='failed'}}
+$report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $local 'verification.json') -Encoding UTF8
+$message=Get-VerificationFailureMessage 'fallback'
+if($message -notmatch 'UDP STUN' -or $message -match 'Git|npm'){throw 'Passed tools reported as failed'}
 $report=@{run_id=('a'*32);stages=@{'node-outage'=@{success=$false;failed_check='dns'};'core-exit'=@{success=$false;restart_failed=$true}};error='DO-NOT-ECHO'}
 $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $local 'verification.json') -Encoding UTF8
 $message=Get-VerificationFailureMessage 'fallback'
