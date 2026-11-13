@@ -7,11 +7,19 @@ $script:cases=0
 function Assert($condition,$message){if(!$condition){throw $message};$script:cases++}
 function Get-RegionRegistryValue([string]$Path,[string]$Name){
  $id=$Path+'|'+$Name
+ if($Name -eq 'Locale' -and $script:staleLocaleReads -gt 0){
+  $script:staleLocaleReads--;return [pscustomobject]@{exists=$true;kind='String';value='00000804'}
+ }
  if($script:registry.ContainsKey($id)){return [pscustomobject]@{exists=$true;kind=$script:registry[$id].kind;value=$script:registry[$id].value}}
  return [pscustomobject]@{exists=$false;kind=$null;value=$null}
 }
 # Exercise the real verified registry writer against fake provider cmdlets.
 function New-ItemProperty {param($LiteralPath,$Name,$PropertyType,$Value,[switch]$Force,$ErrorAction)
+ if($Name -eq 'Locale'){
+  $script:localeWrites++
+  $named=$script:registry[$LiteralPath+'|LocaleName']
+  if($script:blockLocale -or ($script:requireLocaleName -and (!$named -or $named.value -ne $script:culture))){$Value='00000804'}
+ }
  $script:writes++;$script:registry[$LiteralPath+'|'+$Name]=@{kind=$PropertyType;value=$Value}
 }
 function Remove-ItemProperty {param($LiteralPath,$Name,$ErrorAction) $script:writes++;$script:registry.Remove($LiteralPath+'|'+$Name)}
@@ -30,6 +38,7 @@ function Set-TimeZone {param($Id,$ErrorAction) $script:writes++;if($script:fail)
 function Get-ItemProperty {param($LiteralPath,$Name,$ErrorAction) [pscustomobject]@{LocaleName=$script:culture;Locale=('{0:x8}' -f ([Globalization.CultureInfo]::GetCultureInfo($script:culture)).LCID)}}
 function Reset-Fixture([int]$Start,[bool]$Running,$Sync,$Delayed){
  $script:writes=0;$script:fail=$false;$script:registry=@{};$script:running=@{tzautoupdate=$Running;W32Time=$Running}
+ $script:staleLocaleReads=0;$script:blockLocale=$false;$script:requireLocaleName=$false;$script:localeWrites=0
  foreach($name in @('tzautoupdate','W32Time')){
   $path='HKLM:\SYSTEM\CurrentControlSet\Services\'+$name
   $script:registry[$path+'|Start']=@{kind='DWord';value=$Start}
@@ -93,4 +102,40 @@ $failed=$false;try{Restore-SystemRegionTime $partial}catch{$failed=$true}
 Assert ($failed -and $script:writes -eq 0) 'corrupt recovery record mutated settings'
 $failed=$false;try{Set-SystemRegionTime $partial 'US' 'en-US' 'Eastern Standard Time'}catch{$failed=$true}
 Assert ($failed -and $script:writes -eq 0) 'corrupt baseline was overwritten during apply'
+# Model a write that requires the name/LCID pair to be coherent.
+Reset-Fixture 3 $false 'NTP' $null
+$script:requireLocaleName=$true
+$paired=Join-Path $root 'paired';[IO.Directory]::CreateDirectory($paired) | Out-Null
+Set-SystemRegionTime $paired 'US' 'en-US' 'Eastern Standard Time'
+Assert ((Get-RegionRegistryValue 'HKCU:\Control Panel\International' 'Locale').value -eq '00000409') 'locale pair was verified before its name was written'
+Assert ($script:localeWrites -eq 1) 'stable regional format performed unnecessary retries'
+Restore-SystemRegionTime $paired
+Assert ($script:culture -eq 'zh-CN') 'paired culture update broke restoration'
+Reset-Fixture 3 $false 'NTP' $null
+$singapore=Join-Path $root 'singapore';[IO.Directory]::CreateDirectory($singapore) | Out-Null
+Set-SystemRegionTime $singapore 'SG' 'zh-SG' 'Singapore Standard Time'
+Assert ((Get-RegionRegistryValue 'HKCU:\Control Panel\International' 'Locale').value -eq '00001004') 'Singapore locale ID was not persisted'
+Assert ((Get-RegionRegistryValue 'HKCU:\Control Panel\International' 'LocaleName').value -eq 'zh-SG') 'Singapore locale name was not persisted'
+Restore-SystemRegionTime $singapore
+Assert ($script:culture -eq 'zh-CN') 'Singapore configuration did not restore original culture'
+# A stale first read must be retried; no real registry or network is used.
+Reset-Fixture 3 $false 'NTP' $null
+$script:staleLocaleReads=1
+$delayed=Join-Path $root 'delayed';[IO.Directory]::CreateDirectory($delayed) | Out-Null
+Set-SystemRegionTime $delayed 'US' 'en-US' 'Eastern Standard Time'
+Assert ($script:localeWrites -eq 2) 'transient locale readback was not retried'
+Assert ($script:zone -eq 'Eastern Standard Time') 'transient readback stopped configuration'
+# Permanent mismatches must still fail, with usable target/current diagnostics.
+Reset-Fixture 2 $true 'NTP' 1
+$script:blockLocale=$true
+$blocked=Join-Path $root 'blocked';[IO.Directory]::CreateDirectory($blocked) | Out-Null
+$message=''
+try{Set-SystemRegionTime $blocked 'US' 'en-US' 'Eastern Standard Time'}catch{$message=$_.Exception.Message}
+Assert ($message -match 'Locale' -and $message -match '00000409' -and $message -match '00000804') 'permanent locale failure omitted target/current values'
+Assert ($script:localeWrites -eq 4) 'locale retry budget was not bounded'
+$original=[IO.File]::ReadAllText((Join-Path $blocked 'region-time.json'))
+$script:blockLocale=$false
+Restore-SystemRegionTime $blocked
+Assert ($script:culture -eq 'zh-CN' -and $script:running.W32Time) 'locale failure was not recoverable'
+Assert ([IO.File]::ReadAllText((Join-Path $blocked 'region-time.json')) -ceq $original) 'retry changed the first recovery point'
 Write-Output ('Offline region/time cases passed: '+$script:cases)

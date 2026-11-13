@@ -4,15 +4,22 @@ function Get-RegionRegistryValue([string]$Path,[string]$Name) {
   $exists=$Name -in @($key.GetValueNames())
   return [pscustomobject]@{exists=$exists;kind=if($exists){$key.GetValueKind($Name).ToString()}else{$null};value=if($exists){$key.GetValue($Name)}else{$null}}
 }
-function Set-RegionRegistryValue([string]$Path,[string]$Name,$Entry) {
+function Assert-RegionRegistryValue([string]$Path,[string]$Name,$Entry) {
+  $current=Get-RegionRegistryValue $Path $Name
+  if($current.exists -ne $Entry.exists -or ($Entry.exists -and ($current.kind -ne $Entry.kind -or $current.value -ne $Entry.value))){
+    $expected=if($Entry.exists){[string]$Entry.kind+' / '+[string]$Entry.value}else{'<missing>'}
+    $actual=if($current.exists){[string]$current.kind+' / '+[string]$current.value}else{'<missing>'}
+    throw "区域/时间注册表设置验证失败：$Name；目标 $expected；实际 $actual"
+  }
+}
+function Set-RegionRegistryValue([string]$Path,[string]$Name,$Entry,[switch]$DeferVerification) {
   if($Entry.exists){
     New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType $Entry.kind -Value $Entry.value -Force -ErrorAction Stop | Out-Null
   }else{
     $current=Get-RegionRegistryValue $Path $Name
     if($current.exists){Remove-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop}
   }
-  $current=Get-RegionRegistryValue $Path $Name
-  if($current.exists -ne $Entry.exists -or ($Entry.exists -and ($current.kind -ne $Entry.kind -or $current.value -ne $Entry.value))){throw "区域/时间注册表设置验证失败：$Name"}
+  if(!$DeferVerification){Assert-RegionRegistryValue $Path $Name $Entry}
 }
 function Get-RegionServiceState([string]$Name) {
   $service=Get-Service -Name $Name -ErrorAction Stop
@@ -65,10 +72,25 @@ function Disable-RegionTimeService([string]$Name) {
 function Set-PersistedRegionCulture([string]$CultureName) {
   $culture=[Globalization.CultureInfo]::GetCultureInfo($CultureName)
   Set-Culture -CultureInfo $CultureName -ErrorAction Stop
-  # Keep the legacy locale ID and locale name consistent for Windows Settings.
-  # A name-only write can leave Regional format displaying the previous region.
-  Set-RegionRegistryValue 'HKCU:\Control Panel\International' 'Locale' ([pscustomobject]@{exists=$true;kind='String';value=('{0:x8}' -f $culture.LCID)})
-  Set-RegionRegistryValue 'HKCU:\Control Panel\International' 'LocaleName' ([pscustomobject]@{exists=$true;kind='String';value=$CultureName})
+  # Persist the name before its legacy ID, then verify the complete pair.
+  # Windows can normalize International settings after Set-Culture; checking
+  # Locale before writing LocaleName can observe an intermediate state.
+  $path='HKCU:\Control Panel\International'
+  $nameEntry=[pscustomobject]@{exists=$true;kind='String';value=$CultureName}
+  $idEntry=[pscustomobject]@{exists=$true;kind='String';value=('{0:x8}' -f $culture.LCID)}
+  $delays=@(50,150,300)
+  for($attempt=0;$attempt -le $delays.Count;$attempt++){
+    Set-RegionRegistryValue $path 'LocaleName' $nameEntry -DeferVerification
+    Set-RegionRegistryValue $path 'Locale' $idEntry -DeferVerification
+    if($attempt -gt 0){Start-Sleep -Milliseconds $delays[$attempt-1]}
+    try{
+      Assert-RegionRegistryValue $path 'LocaleName' $nameEntry
+      Assert-RegionRegistryValue $path 'Locale' $idEntry
+      return
+    }catch{
+      if($attempt -eq $delays.Count){throw}
+    }
+  }
 }
 function Set-SystemRegionTime([string]$Directory,[string]$RegionCode,[string]$CultureName,[string]$TimeZoneId) {
   $region=[Globalization.RegionInfo]::new($RegionCode)
