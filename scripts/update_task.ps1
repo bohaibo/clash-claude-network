@@ -1,5 +1,6 @@
 ﻿param([ValidateSet('install','remove','status','snapshot','rollback')][string]$Action,[string]$Python,[string]$At='13:00',[ValidateRange(1,365)][int]$DaysInterval=1,[string]$StateFile)
 $ErrorActionPreference='Stop'
+if($Python){$Python=[IO.Path]::GetFullPath($Python)}
 $project=Split-Path -Parent $PSScriptRoot
 $digest=[Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($project))
 $suffix=([BitConverter]::ToString($digest)).Replace('-','').Substring(0,12)

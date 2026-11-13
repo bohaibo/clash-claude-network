@@ -7,6 +7,28 @@ from operation_lock import operation_lock
 
 class Maintenance(unittest.TestCase):
  def setUp(self):test_snapshots.Snapshots.setUp(self)
+ def test_task_ownership_accepts_equivalent_interpreter_path_but_rejects_other_files(self):
+  probe=self.local/'task-path-probe.ps1'
+  probe.write_text('''param($Source,$Interpreter)
+$ErrorActionPreference='Stop'
+$global:ccnTestRemoved=$false
+$global:ccnTestExpected=[IO.Path]::GetFullPath($Interpreter)
+$global:ccnTestArguments='"'+(Join-Path (Split-Path -Parent $Source) 'update.py')+'"'
+function Get-ScheduledTask {param($TaskName)
+ [pscustomobject]@{Actions=@([pscustomobject]@{Execute=$global:ccnTestExpected;Arguments=$global:ccnTestArguments});
+ Principal=[pscustomobject]@{RunLevel=0;UserId=[Security.Principal.WindowsIdentity]::GetCurrent().Name}}
+}
+function Unregister-ScheduledTask {param($TaskName,[switch]$Confirm) $global:ccnTestRemoved=$true}
+& $Source -Action remove -Python ($Interpreter.Replace('\\','/'))
+if(!$global:ccnTestRemoved){throw 'Equivalent interpreter path rejected'}
+$global:ccnTestRemoved=$false
+$rejected=$false
+try { & $Source -Action remove -Python (Join-Path (Split-Path -Parent $Interpreter) 'other-python.exe') }
+catch { $rejected=$true }
+if(!$rejected -or $global:ccnTestRemoved){throw 'Foreign interpreter task was accepted'}
+''',encoding='utf-8-sig')
+  run=subprocess.run(['powershell.exe','-NoProfile','-File',str(probe),str(client.PROJECT/'scripts/update_task.ps1'),sys.executable],capture_output=True)
+  self.assertEqual(run.returncode,0,run.stderr.decode('utf-8',errors='replace'))
  def test_runtime_checks_survive_python_optimization(self):
   code="from client import validate\ntry: validate({'proxies':[]},{'proxies':[{}]},'fixture')\nexcept AssertionError: print('rejected')\nelse: raise SystemExit(2)"
   result=subprocess.run([sys.executable,'-O','-c',code],cwd=Path(__file__).parent,capture_output=True)
