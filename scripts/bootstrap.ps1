@@ -1,5 +1,9 @@
 ﻿param([switch]$NoInstall,[switch]$Quiet)
 $ErrorActionPreference='Stop'
+# Avoid ConsoleHost progress repainting over double-width Chinese text.
+$ProgressPreference='SilentlyContinue'
+$OutputEncoding=New-Object System.Text.UTF8Encoding($false)
+try{[Console]::OutputEncoding=$OutputEncoding}catch{}
 $env:PYTHONNOUSERSITE='1'
 $project=Split-Path -Parent $PSScriptRoot
 $runtime=Join-Path $project '.runtime'
@@ -14,7 +18,9 @@ $envFile=Join-Path $local 'env.json'
 New-Item -ItemType Directory -Path $runtime,$local,$downloads -Force | Out-Null
 try{[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12}catch{}
 
-function Say([string]$text,[string]$color='White'){if(!$Quiet){Write-Host $text -ForegroundColor $color}}
+# Plain, whole lines also work when a terminal captures or redirects output.
+# Keep the color argument for existing callers; no cursor/color redraws here.
+function Say([string]$text,[string]$color='White'){if(!$Quiet){[Console]::WriteLine($text)}}
 function Fail([string]$text){throw $text}
 # Resolve current compatible releases only when installation is needed. Historical
 # pins in assets/runtime-provenance.json remain a reference, not an update lock.

@@ -20,7 +20,7 @@ function Show-Failure([string]$message){
 try {
 $bootstrap=Join-Path $PSScriptRoot 'bootstrap.ps1'
 $envFile=Join-Path $project '.local\env.json'
-Write-Host '检查项目内运行环境（Python 3.13 / Node.js / PyYAML）…' -ForegroundColor Cyan
+# bootstrap.ps1 owns the single environment-check banner.
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrap
 if($LASTEXITCODE -ne 0){Show-Failure '项目内环境未就绪。安装过程不会修改系统 PATH；请查看上方错误后重试。'}
 if(!(Test-Path -LiteralPath $envFile)){Show-Failure '缺少 .local\env.json。请重新运行「一键网络.cmd」。'}
