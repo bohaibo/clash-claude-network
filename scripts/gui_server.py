@@ -547,6 +547,11 @@ class App:
             pass
         import preview_config
         try:
+            import webrtc_system
+            current['webrtc'] = webrtc_system.protection_status()
+        except (OSError, ValueError, TypeError):
+            current['webrtc'] = {'browsers': [], 'note': 'WebRTC 策略读取失败，未验证。'}
+        try:
             current['winhttp'] = preview_config.winhttp()
         except (OSError, AttributeError):
             current['winhttp'] = '读取失败（未验证）'

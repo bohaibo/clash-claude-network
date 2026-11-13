@@ -1,6 +1,6 @@
 ---
 name: clash-claude-network
-description: Configure/restore a Windows Clash Verge Rev/Mihomo network with one exact overseas node, Claude-priority routing, TUN, DNS Type 64/65 filtering, IPv6 off, strict firewall, and a local GUI with manual or interval-based rule updates. Does not install Clash or Claude or guarantee account eligibility. Browsers are managed externally; only legacy WebRTC policy restoration is retained.
+description: Configure/restore a Windows Clash Verge Rev/Mihomo network with one exact overseas node, Claude-priority routing, TUN, DNS Type 64/65 filtering, IPv6 off, strict firewall, reversible WebRTC policies for standard browsers, and a local GUI with rule updates. Does not install Clash or Claude or guarantee account eligibility. Fingerprint browsers are managed externally.
 ---
 
 # Windows Claude network environment
@@ -36,7 +36,7 @@ Never install or log in to Claude. HTTP 403 means transport responded, not that 
 
 网络环境页显示配置生成版本、进程匹配、IPv6 绑定、国家/区域格式/时区的当前值与目标值。不一致时分别使用重新配置或补充配置。完整配置在内核重启后再次关闭并核对 IPv6 绑定；恢复记录累积在原恢复点内，不替换首次基线。验收记录标为历史结果并显示时间，本地配置一致不等于实际网络通过。
 
-新配置不再管理浏览器策略；旧版 WebRTC 策略备份仍可通过原快照恢复。旧版 .local/browser 资料不会自动删除，避免丢失用户数据。浏览器、虚拟网络、Claude 服务与账号可用性未验证。
+配置/补充管理标准 Chrome、Edge、Firefox 的受管 WebRTC 策略：Firefox 锁定 media.peerconnection.enabled=false；Chrome/Edge 限制非代理 UDP 并请求安装各自官方商店的 WebRTC Control。改动前将策略及扩展条目分别存入 webrtc-policies.json、webrtc-extensions.json 并封存；旧基线只补存新增记录。使用空闲编号，保留其他扩展及后续变化，冲突停止。恢复撤销本项目新增条目，可能触发扩展卸载。不得把策略写入当作 Chrome/Edge 内核完全关闭或扩展已安装/已启用；隐私窗口不自动覆盖。外部指纹浏览器不管理，浏览器实际行为、虚拟网络、Claude 服务和账号未验证。保留旧版 .local/browser 资料。
 
 国内域名统一使用 Loyalsoldier/clash-rules 的 direct.txt，国内 IP、私有域名、局域网地址分别使用 cncidr.txt、private.txt、lancidr.txt；不融合其他直连名单。保留精确域名与 +. 后缀的原始语义。首次切换来源请在规则更新页点击「立即更新」，定时任务会提示等待手动迁移。
 

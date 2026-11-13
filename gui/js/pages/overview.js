@@ -8,6 +8,7 @@ const IMPACT = [
   { title: '系统自动定位', text: '通过 Windows 策略关闭系统定位，地图、天气等定位功能会受影响；恢复时还原原有策略。' },
   { title: '区域与时区', text: '关闭自动时区和自动校时，按所选节点地区设置系统国家、Windows 语言和区域页面中的区域格式（日期和数字）及时区。区域格式可能需注销后重新登录或重启生效；恢复会还原原格式和时间设置。长期关闭校时可能产生误差。' },
   { title: '代理清理', text: '清理系统、WinHTTP、环境变量与 Git/npm/Docker 的代理覆盖，普通流量交给 TUN；已打开的终端需要重启。' },
+  { title: '常用浏览器 WebRTC', text: '备份 Chrome、Edge、Firefox 的受管策略；Firefox 锁定禁用，Chrome/Edge 限制路径并请求安装官方商店的 WebRTC Control。扩展下载、开关、隐私窗口及实际阻断需确认，可能影响网页通话。外部指纹浏览器自行管理。' },
 ];
 
 const REGIONS = [
@@ -430,7 +431,7 @@ async function beginApply(ctx) {
   const ok = await ctx.confirm({
     title: '开始配置网络？',
     subtitle: form.node + ' · 出口 ' + form.region,
-    description: '生成并校验网络规则，应用系统设置，再运行网络验收；浏览器由用户自行管理。',
+    description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，再运行网络验收；外部指纹浏览器自行管理。',
     items: IMPACT,
     note: 'Mihomo 停止时所有公网（包括国内网站）都会短暂断开；请先保存正在进行的网络工作。',
     noteType: 'warn',
@@ -454,7 +455,7 @@ async function quickReapply(ctx) {
     title: '按当前记录重新配置？',
     subtitle: plan.node + ' · 出口 ' + (plan.region || 'SG'),
     description: '沿用上次配置记录的精确节点、订阅和出口地区；如果该节点已从当前订阅消失，配置会在写入前停止。',
-    description: '生成并校验网络规则，应用系统设置，再运行网络验收；浏览器由用户自行管理。',
+    description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，再运行网络验收；外部指纹浏览器自行管理。',
     items: IMPACT,
     confirmText: '重新配置',
     requireCheck: '我已了解重新配置会关闭 Clash 并短暂中断网络。',

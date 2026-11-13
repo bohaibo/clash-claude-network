@@ -20,7 +20,7 @@ export function render(ctx) {
   root.append(ui.pageHeader({
     eyebrow: 'NETWORK',
     title: '网络环境',
-    description: '查看当前固定节点、分流顺序、上次验收结果与高级维护动作。这里不会修改浏览器设置。',
+    description: '查看当前固定节点、分流顺序、上次验收结果与高级维护动作。',
     actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) })],
   }));
 
@@ -38,6 +38,11 @@ export function render(ctx) {
   root.append(ui.card({ title: '当前配置一致性', subtitle: (health?.scope || '正在读取；未验证') + '。规则或版本不一致请重新配置；系统地区或新增网卡请补充配置。' },
     ...(health?.checks || []).map(row => ui.note(row.title + '：' + (row.status === 'passed' ? '一致' : row.status === 'failed' ? '不一致，请' + row.action : '未验证') + '；当前 ' + (row.title === '配置生成版本' ? (row.current ? '已记录版本' : '旧版未记录') : String(row.current ?? '未知')) + ' → ' + (row.title === '配置生成版本' ? '当前软件版本' : String(row.target)), row.status === 'passed' ? 'info' : 'warn'))));
   root.append(flowCard());
+  const rtc = state.preview?.current?.webrtc;
+  root.append(ui.card({ title: '常用浏览器 WebRTC', subtitle: '配置与补充配置会备份并管理这三款标准浏览器的 WebRTC 策略。' },
+    ui.kv((rtc?.browsers || []).map(row => [row.browser, row.state])),
+    ui.note(rtc?.note || '正在读取策略，尚未验证。', 'warn'),
+    ui.el('p', { class: 'muted small', text: 'Firefox 写入并锁定禁用策略；Chrome/Edge 配置路径限制及各自商店的 WebRTC Control 扩展安装策略。扩展需浏览器正常启动后下载，实际安装、开关及阻断仍需确认。语音、视频通话和点对点功能可能受影响。' })));
   root.append(verificationCard(ctx));
   root.append(actionsCard(ctx));
   return root;
@@ -107,7 +112,7 @@ function actionsCard(ctx) {
   const unavailable = !state.configured;
   return ui.card({ title: '维护与恢复', subtitle: '这些动作会修改系统设置或短暂中断网络，执行前会再次确认。' },
     ui.el('div', { class: 'action-grid' },
-      actionRow('补充配置', '安装新软件或新增网卡后，扫描新增出站放行规则和启用 IPv6 的网卡，并累积恢复记录。不会关闭浏览器或运行网络测试。',
+      actionRow('补充配置', '补充防火墙、IPv6、地区和常用浏览器 WebRTC 策略，累积恢复记录。不会关闭浏览器或运行网络测试。',
         ui.button('补充配置', { variant: 'secondary', icon: 'shield', disabled: unavailable || ctx.busy, onClick: () => supplement(ctx) })),
       actionRow('重新检查连通性', '运行一次连通性验收（不模拟节点故障或停核），检查出口地区、DNS、IPv6 与工具出口。',
         ui.button('检查连通性', { variant: 'secondary', icon: 'refresh', disabled: unavailable || ctx.busy, onClick: () => verify(ctx) })),
@@ -131,7 +136,7 @@ async function supplement(ctx) {
     subtitle: '不重新选择节点，不关闭浏览器',
     description: '会扫描当前本地防火墙规则与全部网卡，禁用非项目的出站放行规则、关闭启用的 IPv6 绑定、系统定位、自动时区和自动校时，按所选节点地区设置国家/区域格式/时区，将改动记录到关联快照。入站规则保留。',
     items: [
-      { title: '可能影响', text: '新软件、其他 VPN、Docker/WSL、远程控制和依赖 IPv6 的内网资源可能失效。' },
+      { title: '可能影响', text: '新软件、其他 VPN、Docker/WSL、远程控制和依赖 IPv6 的内网资源可能失效；三款标准浏览器的 WebRTC 策略和扩展安装策略也会补充，网页通话可能受影响。' },
       { title: '不运行测试', text: '补充配置不会运行网络或断网测试；需要时请另行检查连通性。' },
     ],
     note: '需要已有完整配置记录和可校验的原始快照；缺失时会停止，不会覆盖首次基线。',

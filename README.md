@@ -97,6 +97,12 @@ Windows「设置 → 时间和语言 → 语言和区域 → 区域格式」也�
 
 本软件不再提供内置浏览器、指纹配置、环境检测页、语言同步或默认浏览器注册。请自行安装和管理浏览器。管理界面仍通过本机已有的 Edge/Chrome 显示，只允许打开本机管理地址。
 
+配置和补充配置会管理标准 Chrome、Edge、Firefox 的 WebRTC 策略：Firefox 将 `media.peerconnection.enabled` 锁定为 false；Chrome/Edge 设置 `disable_non_proxied_udp`，并请求从各自官方扩展商店安装 WebRTC Control。Chrome 扩展 ID 为 `fjkmabmdepjfammlpliljpnbhleegehm`，Edge 为 `eepeadgljpkkjpbfecfkijnnliikglpl`。不修改默认浏览器资料，不启动浏览器，不管理外部指纹浏览器。
+
+Chrome/Edge 的策略限制不是内核完全禁用。扩展需要浏览器正常启动、可访问商店后下载，现有扩展开关、网站权限及实际阻断均不自动验证；强制安装策略不自动覆盖隐私窗口。网络环境页分别显示策略状态和未验证边界，不把写入策略显示成全部关闭。网页语音、视频和点对点功能可能受影响。
+
+改动前记录 `webrtc-policies.json` 和 `webrtc-extensions.json` 并封存到关联快照；旧基线首次补存新增项目，不覆盖原系统基线。扩展策略使用空闲编号，不覆盖其他扩展条目；编号被后续用户修改时停止。恢复还原原策略及本项目使用的扩展条目，保留其他扩展条目的后续变化；撤销强制安装条目可能使浏览器自动卸载该扩展。旧快照没有相关记录时保留当前设置并提示。
+
 ## 快照与恢复
 
 - 第一次配置前自动保存原始恢复点到 `.local/snapshots/<时间戳>/`，之后沿用同一个首次恢复点，不覆盖。
