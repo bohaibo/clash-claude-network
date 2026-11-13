@@ -1,9 +1,30 @@
-import tempfile,unittest,urllib.error
+import tempfile,threading,unittest,urllib.error
 from pathlib import Path
 from unittest.mock import patch,MagicMock
 import client
 
 class RuleDownload(unittest.TestCase):
+ def test_four_downloads_overlap_and_publish_only_after_all_validate(self):
+  barrier=threading.Barrier(4,timeout=5)
+  def fetch(url):barrier.wait();return url.encode()
+  counts={'domains':10001,'ips':8001,'privateDomains':31,'lanCidrs':1}
+  with tempfile.TemporaryDirectory(dir=client.LOCAL) as folder:
+   root=Path(folder)
+   with patch.object(client,'LOCAL',root),patch.object(client,'rule_source_bytes',side_effect=fetch),patch.object(client,'parse_rule_source',side_effect=lambda name,raw:['fixture']*counts[name]):
+    result=client.download_rules()
+   self.assertEqual(list(result['ruleSources']),list(client.SOURCES))
+   self.assertTrue((root/'sources-candidate.json').exists())
+ def test_parallel_download_failure_preserves_existing_candidate(self):
+  barrier=threading.Barrier(4,timeout=5)
+  def fetch(url):
+   barrier.wait()
+   if url==client.SOURCES['ips']:raise RuntimeError('fixture failure')
+   return b'fixture'
+  with tempfile.TemporaryDirectory(dir=client.LOCAL) as folder:
+   root=Path(folder);record=root/'sources-candidate.json';record.write_text('original')
+   with patch.object(client,'LOCAL',root),patch.object(client,'rule_source_bytes',side_effect=fetch),patch.object(client,'parse_rule_source',return_value=['fixture']):
+    with self.assertRaisesRegex(RuntimeError,'fixture failure'):client.download_rules()
+   self.assertEqual(record.read_text(),'original')
  def test_direct_tls_failure_uses_only_loopback_proxy(self):
   with tempfile.TemporaryDirectory(dir=client.LOCAL) as folder:
    root=Path(folder);(root/'clash-verge.yaml').write_text('mixed-port: 7890\n')

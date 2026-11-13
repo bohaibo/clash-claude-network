@@ -409,7 +409,7 @@ $clashProgram=@(Get-Process clash-verge -ErrorAction SilentlyContinue | Select-O
 $result=[ordered]@{success=$false;action=$Action}
 # 先按本次实际会跑的分支确定步骤总数，进度条才能显示「第几步/共几步」。
 if($Action -eq 'apply'){
- $plan=@('检查运行环境','选择节点','生成候选配置与备份','备份系统状态','封存快照','写入 Clash 客户端配置','启动防火墙看门狗','应用系统设置','网络验证','配置规则更新方式')
+ $plan=@('检查运行环境','选择节点','生成候选配置与备份','备份系统状态','封存快照','写入 Clash 客户端配置','启动防火墙看门狗','应用系统设置','确认配置写入','配置规则更新方式')
 } else {
  $plan=@('校验快照','移除规则更新任务','还原系统设置','还原 Clash 客户端')
 }
@@ -514,16 +514,7 @@ try {
    $firewallPlan=Get-Content -LiteralPath (Join-Path $local 'plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
    Assert-StrictFirewall -coreProgram ([string]$firewallPlan.core_program)
   }finally{$applyMutex.ReleaseMutex();$applyMutex.Dispose()}
-  Write-Step '即将短暂中断代理及全部公网，分别验证节点故障、停核保护和恢复；多项检测可能需要数分钟'
-  $env:CCN_VERIFY_RUN=[Guid]::NewGuid().ToString('N')
-  # This coordinator already owns operation.lock; call the internal verifier.
-  & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from firewall_audit import verify_firewall;sys.exit(0 if verify_firewall()[''success''] else 1)' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw '防火墙完整复核未通过，未开始故障演练。'}
-  & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from verify import verify;verify(outage=True)' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '网络验证未通过。')}
-  & $python (Join-Path $PSScriptRoot 'verify_tun.py');if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage 'TUN 关闭保护或恢复未通过。')}
-  Write-Host '  节点及 TUN 关闭阶段已通过；开始停核测试，国内公网也会暂时断开。' -ForegroundColor Cyan
-  & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '内核退出保护/重启验证未通过。')}
-  Write-Host '  停核测试已通过；开始恢复后的连通性复测。' -ForegroundColor Cyan
-  & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from verify import verify;verify(stage=''post-recovery'')' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '内核退出测试之后网络没有恢复。')}
+  Write-Step '确认本机内核已加载规则和固定节点组；不访问测试网站，不进行故障演练'
   $guardMutex=New-Object Threading.Mutex($false,('Global\CCN-'+$watchToken))
   try{[void]$guardMutex.WaitOne()}catch [Threading.AbandonedMutexException]{}
   try {
@@ -532,8 +523,14 @@ try {
    Assert-StrictFirewall -coreProgram ([string]$firewallPlan.core_program)
    & (Join-Path $PSScriptRoot 'system.ps1') -Action recheck-ipv6 -Python $python
    if($LASTEXITCODE -ne 0){throw '内核重启后的 IPv6 绑定复查未通过。'}
-   & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from firewall_audit import verify_firewall;sys.exit(0 if verify_firewall(''firewall-after'')[''success''] else 1)' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw '最终防火墙完整复核未通过。'}
-   Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Verified'
+   & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from client import api,root_path,load,LOCAL,GROUP;from config_health import assert_live;p=load(LOCAL/''plan.json'');r=root_path(p[''root'']);assert_live(api(r,''GET'',''/configs''),api(r,''GET'',''/rules''));g=api(r,''GET'',''/proxies'')[''proxies''][GROUP];assert g[''all'']==[p[''node'']] and g[''now'']==p[''node'']' $PSScriptRoot
+   if($LASTEXITCODE -ne 0){throw '本机内核配置写入确认未通过。'}
+   $result.configuration_verified=$true
+   $result.network_tested=$false
+   $result.configuration_id=[Guid]::NewGuid().ToString('N')
+   $result.configuration_time=(Get-Date).ToString('o')
+   $result.node=$Node;$result.region=$Region;$result.snapshot=(Split-Path -Leaf $env:CCN_SNAPSHOT)
+   Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Configured'
   } finally {$guardMutex.ReleaseMutex();$guardMutex.Dispose()}
   $updateMode='scheduled';$updateTime='13:00';$updateDays=1
   try{
@@ -615,15 +612,10 @@ try {
     $extensionNote=' '+($protection.installation_pending -join '、')+' 尚有标准资料未完成扩展安装。请正常重启浏览器；仍未安装时，在扩展页启用开发者模式并加载项目 .local\webrtc-addon\1.0.0。'
    }
   }catch{$extensionNote=' 扩展安装状态未确认，请查看「网络环境」的网络保护；自动安装失败时可使用项目离线包手动加载。'}
-  Write-Done ('网络配置已完成并生效（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT+$extensionNote)
+  Write-Done ('配置写入已完成，网络未验收（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT+$extensionNote)
   Write-Host '  固定节点组 Claude-Overseas-Pinned 只包含你指定的节点。要撤销请在「快照与恢复」中恢复。'
-  Write-Host '  已完成自动网络验收；外部浏览器行为、虚拟网络、Claude 与账号可用性未验证。'
-  try{
-   $verification=Get-Content -LiteralPath (Join-Path $local 'verification.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-   foreach($tool in @('git','npm')){
-    if($verification.$tool.status -eq 'not-tested'){Write-Host ('  '+$tool+' 未测试：未安装此工具；不能视为该项已通过。') -ForegroundColor Yellow}
-   }
-  }catch{Write-Host '  无法读取验收摘要，请检查 .local/verification-runs 中本次记录。' -ForegroundColor Yellow}
+  Write-Host '  配置写入已确认；未运行联网检查或故障演练。需要时请在「网络环境」点击独立检查按钮。'
+
  } else {
   Write-Done ('恢复已完成（共 '+$planCount+' 步）。使用的快照：'+$env:CCN_SNAPSHOT)
   Write-Host '  已还原记录中的设置；恢复流程未运行网络验收，请自行确认联网。'

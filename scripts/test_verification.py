@@ -1,5 +1,5 @@
 """Offline verification regressions. All network/process I/O is mocked."""
-import contextlib,io,json,os,socket,struct,subprocess,sys,tempfile,time,unittest
+import contextlib,io,json,os,socket,struct,subprocess,sys,tempfile,threading,time,unittest
 from pathlib import Path
 from unittest.mock import patch
 import client,verify,verify_core_exit as core,verification_reports
@@ -30,17 +30,24 @@ class Verification(unittest.TestCase):
   self.api.assert_not_called()
   self.assertFalse((self.local/'verification.json').exists())
   self.assertTrue(verify.main([])['success'])
- def test_coordinator_verification_commands_work_with_windows_quoting(self):
+ def test_apply_does_not_invoke_network_checks_or_drills(self):
   source=(client.PROJECT/'scripts/run.ps1').read_text(encoding='utf-8-sig')
-  commands=[line.strip().split(';if($LASTEXITCODE')[0] for line in source.splitlines()
-            if '& $python -c' in line and 'from verify import verify;' in line]
-  self.assertEqual(len(commands),2)
-  (self.local/'verify.py').write_text('def verify(outage=False,stage=None): print("OUTAGE" if outage else stage)')
+  start=source.index("  Write-Step '确认本机内核已加载")
+  end=source.index("  $updateMode=",start)
+  block=source[start:end]
+  for forbidden in ('from verify import','verify_tun.py','verify_core_exit.py','from firewall_audit import'):
+   self.assertNotIn(forbidden,block)
+  commands=[line.strip() for line in block.splitlines() if '& $python -c' in line]
+  self.assertEqual(len(commands),1)
+  (self.local/'client.py').write_text("LOCAL=None;GROUP='Group'\ndef load(p):return {'root':'fixture','node':'Chosen'}\ndef root_path(p):return None\ndef api(r,m,p):return {'proxies':{'Group':{'all':['Chosen'],'now':'Chosen'}}}\n")
+  (self.local/'config_health.py').write_text('def assert_live(*a):pass')
+  # The actual command must survive Windows PowerShell quoting. Replace only
+  # LOCAL for this synthetic fixture; no controller or network is contacted.
+  (self.local/'client.py').write_text((self.local/'client.py').read_text().replace('LOCAL=None','from pathlib import Path;LOCAL=Path()'))
   probe=self.local/'probe.ps1'
-  probe.write_text('param($python,$scripts)\n$PSScriptRoot=$scripts\n'+'\n'.join(commands),encoding='utf-8-sig')
+  probe.write_text('param($python,$scripts)\n$PSScriptRoot=$scripts\n'+commands[0],encoding='utf-8-sig')
   result=subprocess.run(['powershell.exe','-NoProfile','-File',str(probe),sys.executable,str(self.local)],capture_output=True,timeout=15)
   self.assertEqual(result.returncode,0,result.stderr)
-  self.assertEqual(result.stdout.decode().split(),['OUTAGE','post-recovery'])
  def fake_api(self,root,method,path,body=None):
   if method=='PUT':self.broken=client.yaml.safe_load(body['payload'])['proxies'][0]['port']==1;return {}
   if path=='/configs':return {'mode':'rule','find-process-mode':'strict'}
@@ -73,6 +80,46 @@ class Verification(unittest.TestCase):
     with patch.object(verify,'curl',side_effect=lambda *a,**k:responses.pop(0) if responses else self.fake_curl(*a,**k)),patch.object(verify.time,'sleep'):
      report=verify.verify()
     self.assertTrue(report['success']);self.assertEqual(len(report['egress_attempts']),2)
+ def test_dns_and_tool_probes_overlap_before_any_outage_mutation(self):
+  dns_barrier=threading.Barrier(6,timeout=5);tool_barrier=threading.Barrier(3,timeout=5)
+  finished=[]
+  def dns(*args,**kwargs):
+   if kwargs.get('host')!='example.com':dns_barrier.wait()
+   return {'passed':True,'ips':['198.18.0.1']}
+  def tool(name,value):
+   def run(*args,**kwargs):tool_barrier.wait();finished.append(name);return value
+   return run
+  def api(*args,**kwargs):
+   if args[1]=='PUT':self.assertEqual(set(finished),{'git','npm','stun'})
+   return self.fake_api(*args,**kwargs)
+  with patch.object(verify,'query',side_effect=dns),patch.object(verify,'api',side_effect=api):
+   self.stun.side_effect=tool('stun',self.stun.return_value)
+   self.git.side_effect=tool('git',{'tested':True,'ok':True})
+   self.npm.side_effect=tool('npm',{'tested':True,'ok':True})
+   self.assertTrue(verify.verify(outage=True)['success'])
+ def test_node_recovery_retries_and_retains_transient_failures(self):
+  good=self.fake_curl('egress')
+  for failure in ({'exit':28,'http':0,'body':'','error':'timeout'},
+                  {'exit':0,'http':503,'body':'unavailable'},
+                  {'exit':0,'http':200,'body':'invalid json'}):
+   with self.subTest(failure=failure):
+    responses=[good,{'exit':7,'http':0,'body':''},failure,good]
+    def probe(url,head=False):return responses.pop(0) if url=='https://ipinfo.io/json' else self.fake_curl(url,head)
+    with patch.object(verify,'curl',side_effect=probe),patch.object(verify.time,'sleep'):
+     report=verify.verify(outage=True)
+    self.assertTrue(report['recovered']);self.assertEqual(len(report['recovery_attempts']),2)
+    self.assertEqual(report['recovery_attempts'][-1]['country'],'SG')
+ def test_node_recovery_persistent_failure_or_wrong_country_still_fails(self):
+  for failure,count in (({'exit':28,'http':0,'body':'','error':'timeout'},3),
+                         ({'exit':0,'http':200,'body':'{"country":"US"}'},1)):
+   with self.subTest(failure=failure):
+    responses=[self.fake_curl('egress'),{'exit':7,'http':0,'body':''}]+[failure]*3
+    def probe(url,head=False):return responses.pop(0) if url=='https://ipinfo.io/json' else self.fake_curl(url,head)
+    with patch.object(verify,'curl',side_effect=probe),patch.object(verify.time,'sleep'):
+     with self.assertRaises(AssertionError):verify.verify(outage=True)
+    report=json.loads((self.local/'verification.json').read_text(encoding='utf-8'))
+    self.assertFalse(report['success']);self.assertEqual(report['failed_check'],'recovery')
+    self.assertEqual(len(report['recovery_attempts']),count)
  def test_failed_required_checks_cannot_pass(self):
   for name in ('stun','git','npm'):
    with self.subTest(check=name):

@@ -23,7 +23,7 @@ Workflow:
 4. Apply: `scripts/run.ps1 -Action apply -Node "<exact>" -Acknowledged` (or the GUI). Use `-Subscription` for duplicate names and `-Region` when the hint is wrong.
 5. Apply/supplement block all non-project outbound allows, close IPv6 bindings, set strict firewall and system region/language. Node failure keeps domestic direct; core failure blocks all public traffic. Explain this before acting.
 6. Rule updates: manual, or scheduled every 1–365 days at HH:MM (current user task). Read `.local/ui-settings.json`; do not replace a manual choice with a scheduled task.
-7. Verify with `scripts/verify.py`: domestic HTTP, foreign exit region, DNS 1/64/65, fake-IP, IPv6 block, UDP STUN/route, Git/npm, node outage, core outage. Report passed/failed/not tested.
+7. Optional, user-triggered verification only (never part of apply/reconfigure): `scripts/verify.py`: domestic HTTP, foreign exit region, DNS 1/64/65, fake-IP, IPv6 block, UDP STUN/route, Git/npm, node outage, core outage. Report passed/failed/not tested.
 9. Restore: use the GUI snapshot page or `-Action restore`. Restore keeps current subscriptions/node updates and removes the project update task; it restores the managed WebRTC policies without editing browser profiles.
 10. Report what changed, evidence, and untested items. Never commit `.local`, `.runtime`, credentials, real profiles or IP logs.
 
@@ -50,6 +50,8 @@ TUN 演练先确认正常状态可连接通用测试 IP，再启用独立本机�
 
 防火墙复核必须验证管理员权限、核心文件可读、实际运行路径、三个有效配置文件、PersistentStore/ActiveStore 中五条项目规则的全部筛选条件，以及其他有效放行规则。权限不足、核心不可读或证据不足不得标记完整复核通过。仅同一操作中包含节点故障、TUN 关闭、停核、恢复后复测、前后两次完整防火墙复核，才显示完整网络验收；旧三阶段报告显示部分阶段。
 
-完整配置的看护准备阶段仍为 180 秒，首次防火墙修改后的写入与扩展验收窗口为 360 秒；超时仍请求回滚，不允许无限延期。独立完整复核不修改防火墙规则，TUN 切换另有 60 秒恢复看护。
+完整配置的看护准备阶段仍为 180 秒，首次防火墙修改后的写入与本地确认窗口为 360 秒；超时仍请求回滚，不允许无限延期。独立完整复核不修改防火墙规则，TUN 切换另有 60 秒恢复看护。
 
 软件版本由 assets/app-release.json 统一管理。打包严格遵守 assets/package-files.json，不包含 .local、.runtime、节点、密钥、日志或基线；包输出放 .local/packages/。软件更新只检查指定 GitHub Releases 并提示，不自动执行下载文件或覆盖程序；网络失败或私有来源不得显示已是最新。打包授权不等于提交、推送或发布授权。
+
+默认完整配置和恢复并重新配置只执行配置，不自动运行联网检查或故障演练。保留候选内核校验、本机控制通道写入确认、防火墙写入核对、IPv6 绑定核对及超时回滚。独立「检查连通性」和「完整复核与演练」由用户按需触发；配置完成不等于网络已验收，历史验收不得冒充本次结果。

@@ -50,6 +50,7 @@ export function render(ctx) {
     } }) : null,
     ui.el('p', { class: 'muted small', text: rtc?.installation_help || '一键配置会自动安排 Chrome、Edge 安装官方商店扩展，已有扩展直接复用。' }),
     ui.el('p', { class: 'muted small', text: rtc?.note || '正在读取 WebRTC 配置。' })));
+  root.append(diagnosticsCard(ctx));
   root.append(verificationCard(ctx));
   root.append(actionsCard(ctx));
   return root;
@@ -59,11 +60,14 @@ function configCard(ctx) {
   const state = ctx.state;
   const plan = state.plan || {};
   const service = state.service || {};
+  const awaitingVerification = state.last_run?.network_tested === false &&
+    (!state.verification?.available || (Date.parse(state.verification.time) || 0) < (Date.parse(state.last_run.configuration_time) || Infinity));
   return ui.card({
     title: '当前固定配置',
     subtitle: state.configured ? '项目分流配置正在运行。' : '当前未运行项目分流配置。',
     actions: !state.configured ? ui.badge('未生效', 'warn')
       : state.last_run?.success === false ? ui.badge('上次操作未完成', 'bad')
+        : awaitingVerification ? ui.badge('配置完成 · 网络未验收', 'warn')
         : state.verification?.dns_failed ? ui.badge('DNS 验收失败', 'bad')
           : state.verification?.available && state.verification.success ? ui.badge('历史验收通过', 'ok')
             : ui.badge('配置已写入', 'warn'),
@@ -93,9 +97,9 @@ function verificationCard(ctx) {
   const verification = ctx.state.verification || {};
   const body = [];
   if (!verification.available) {
-    body.push(ui.empty('还没有验收结果', '完整配置成功后会自动运行网络验收，结果显示在这里。'));
+    body.push(ui.empty('还没有验收结果', '配置不自动运行检查。需要时点击“检查连通性”或“完整复核与演练”，结果显示在这里。'));
   } else {
-    if (!verification.source_matches_current) body.push(ui.note('该历史报告未对应当前软件版本，请重新配置后验收。', 'warn'));
+    if (!verification.source_matches_current) body.push(ui.note('该历史报告未对应当前软件版本；需要时请重新检查或演练。', 'warn'));
     body.push(ui.el('div', { class: 'verification-head' },
       ui.badge(verification.success ? (verification.coverage === 'partial' ? '已记录阶段通过，验收不完整' : '历史验收通过') : '验收未通过', verification.success ? 'ok' : 'bad'),
       ui.el('span', { class: 'muted', text: '记录时间 ' + ui.formatTime(verification.time) + ' · ' + ({'full-network':'完整网络验收','connectivity':'仅连通性检查','partial':'部分阶段'}[verification.coverage] || '旧版记录，范围待核对') }),
@@ -117,11 +121,7 @@ function actionsCard(ctx) {
     ui.el('div', { class: 'action-grid' },
       actionRow('补充配置', '补充防火墙、IPv6、地区和常用浏览器 WebRTC 策略，累积恢复记录。不会关闭浏览器或运行网络测试。',
         ui.button('补充配置', { variant: 'secondary', icon: 'shield', disabled: unavailable || ctx.busy, onClick: () => supplement(ctx) })),
-      actionRow('重新检查连通性', '运行一次连通性验收（不模拟节点故障或停核），检查出口地区、DNS、IPv6 与工具出口。',
-        ui.button('检查连通性', { variant: 'secondary', icon: 'refresh', disabled: unavailable || ctx.busy, onClick: () => verify(ctx) })),
-      actionRow('完整防火墙复核与故障演练', '以管理员权限完整检查防火墙，分别演练节点故障、关闭 TUN 但保持内核运行、内核退出，并在恢复后复测。公网会短暂中断。',
-        ui.button('完整复核与演练', { variant: 'secondary', icon: 'shield', disabled: unavailable || ctx.busy, onClick: () => audit(ctx) })),
-      actionRow('恢复最早状态并重新配置', '先恢复固定首次恢复点并确认联网，再沿用当前精确节点完整配置。需要独立本机看护；失败或超时会尝试恢复网络。', 
+      actionRow('恢复最早状态并重新配置', '先恢复固定首次恢复点，再沿用当前精确节点完整配置。需要独立本机看护；失败或超时会尝试恢复网络。',
         ui.button('恢复并重新配置', { variant: 'danger', icon: 'alert', disabled: !state.baseline || !state.plan.node || ctx.busy, onClick: () => reconfigure(ctx) })),
     ),
     ui.note('严格防火墙的含义：节点故障但内核仍在运行时，国内网站保持直连；内核停止时，所有公网（包括国内）都会被阻断。这是有意的保护行为。', 'info'));
@@ -131,6 +131,16 @@ function actionRow(title, text, action) {
   return ui.el('div', { class: 'action-row' },
     ui.el('div', {}, ui.el('strong', { text: title }), ui.el('p', { text })),
     action);
+}
+
+function diagnosticsCard(ctx) {
+  const unavailable = !ctx.state.configured;
+  return ui.card({ title: '检查与故障演练（按需）', subtitle: '一键配置不运行这些检查。可自行选择；故障演练会短暂中断公网。' },
+    ui.el('div', { class: 'action-grid' },
+      actionRow('重新检查连通性', '运行一次连通性验收（不模拟节点故障或停核），检查出口地区、DNS、IPv6 与工具出口。',
+        ui.button('检查连通性', { variant: 'secondary', icon: 'refresh', disabled: unavailable || ctx.busy, onClick: () => verify(ctx) })),
+      actionRow('完整防火墙复核与故障演练', '以管理员权限完整检查防火墙，分别演练节点故障、关闭 TUN 但保持内核运行、内核退出，并在恢复后复测。公网会短暂中断。',
+        ui.button('完整复核与演练', { variant: 'secondary', icon: 'shield', disabled: unavailable || ctx.busy, onClick: () => audit(ctx) }))));
 }
 
 async function supplement(ctx) {
@@ -176,7 +186,7 @@ async function reconfigure(ctx) {
   const ok = await ctx.confirm({
     title: '恢复最早状态并重新配置？',
     subtitle: '这是一个高风险恢复动作',
-    description: '将先恢复固定首次恢复点并确认联网，再沿用配置记录中的精确节点、订阅和出口地区完整配置。独立本机看护会在失败、超时或主控退出时尝试恢复网络。',
+    description: '将先恢复固定首次恢复点，再沿用配置记录中的精确节点、订阅和出口地区完整配置。独立本机看护会在失败、超时或主控退出时尝试恢复网络。',
     items: [
       { title: '会中断网络', text: '恢复和配置期间公网会短暂中断；正在下载、会议或远程控制可能断开。' },
       { title: '不会关闭浏览器', text: '默认浏览器都不会被关闭，但网页可能因网络中断失去连接。' },

@@ -13,7 +13,7 @@ export function render(ctx) {
       ui.el('li', {}, ui.el('strong', { text: '确认前置条件' }), '使用 Windows 11 x64；手动安装 Clash Verge Rev 及 Mihomo 内核，启动 Clash Verge 后台服务并导入可用订阅。准备已安装的 Edge 或 Chrome，仅用于显示本地管理界面。'),
       ui.el('li', {}, ui.el('strong', { text: '启动项目' }), '运行根目录「一键网络.cmd」。缺少的 Python 3.13、PyYAML 和 Node.js 会自动安装到项目 .runtime 目录，不需要手动安装，不修改系统 PATH 或系统运行环境。首次下载需要联网。命令行备用入口为 一键网络.cmd --menu。'),
       ui.el('li', {}, ui.el('strong', { text: '选择节点' }), '在「一键配置」选择订阅中的完整节点名。节点必须已存在；不会猜测或替换。'),
-      ui.el('li', {}, ui.el('strong', { text: '完成配置' }), '先阅读当前设置与配置后目标，确认影响后在 Windows 管理员授权窗口中确认。首次配置保存本机原始快照，之后沿用该基线；配置会生成并检查候选配置、应用系统设置并运行网络验收，期间会短暂中断网络。'),
+      ui.el('li', {}, ui.el('strong', { text: '完成配置' }), '先阅读当前设置与配置后目标，确认影响后在 Windows 管理员授权窗口中确认。首次配置保存本机原始快照，之后沿用该基线；配置会生成并检查候选配置、应用系统设置并确认写入，期间会短暂中断网络。联网检查和故障演练位于“网络环境”的独立按钮，按需点击。'),
 
   )));
   root.append(ui.card({ title: '规则更新方式' },

@@ -1,6 +1,7 @@
 """Network verification only: never logs in or invokes a Claude conversation."""
 from checks import require
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import argparse,contextlib,datetime,ipaddress,json,os,shutil,socket,struct,subprocess,sys,time,uuid
 from urllib.parse import urlsplit
 from client import PROJECT,LOCAL,api,root_path,GROUP,load
@@ -247,7 +248,9 @@ def verify(outage=False,stage=None):
   address=json.loads(egress['body']);require(address.get('country')==plan['region'],'Exit country differs from required region')
   report['egress']={k:address.get(k) for k in ('ip','country','city')}
   check='dns'
-  report['dns']=[query('8.8.8.8',53,t,tcp) for t in (1,64,65) for tcp in (False,True)]
+  with ThreadPoolExecutor(max_workers=6) as pool:
+   probes=[pool.submit(query,'8.8.8.8',53,t,tcp) for t in (1,64,65) for tcp in (False,True)]
+   report['dns']=[probe.result() for probe in probes]
   require(all(x['passed'] for x in report['dns']),'配置检查未通过，请查看本地记录。')
   check='fake_ip'
   fake=query('8.8.8.8',53,1,False,host='example.com')
@@ -257,9 +260,10 @@ def verify(outage=False,stage=None):
   require(curl('https://[2606:4700:4700::1111]/cdn-cgi/trace')['exit']!=0,'配置检查未通过，请查看本地记录。')
   report['ipv6_public_blocked']=True
   check='tools'
-  report['stun']=stun(route_probe=lambda probe:udp_route(root,node,probe))
-  report['git']=git_egress()
-  report['npm']=npm_egress()
+  with ThreadPoolExecutor(max_workers=3) as pool:
+   probes={'stun':pool.submit(stun,route_probe=lambda probe:udp_route(root,node,probe)),
+           'git':pool.submit(git_egress),'npm':pool.submit(npm_egress)}
+   for name,probe in probes.items():report[name]=probe.result()
   failed=[]
   for name in ('stun','git','npm'):
    value=report[name]
@@ -291,7 +295,24 @@ def verify(outage=False,stage=None):
     report['node_failure_blocks_foreign_preserves_domestic']=True
    finally:api(root,'PUT','/configs?force=true',{'payload':current})
    check='recovery'
-   recovered=curl('https://ipinfo.io/json');require(recovered['exit']==0 and json.loads(recovered['body']).get('country')==plan['region'],'配置检查未通过，请查看本地记录。')
+   report['recovery_attempts']=[];recovery_ok=False
+   for attempt in range(3):
+    try:recovered=curl('https://ipinfo.io/json')
+    except (OSError,subprocess.SubprocessError) as exc:
+     recovered={'exit':None,'http':0,'error':type(exc).__name__}
+    evidence={k:recovered.get(k) for k in ('exit','http','error')}
+    report['recovery_attempts'].append(evidence)
+    if recovered['exit']==0 and recovered['http']==200:
+     try:
+      address=json.loads(recovered['body'])
+      if not isinstance(address,dict):raise ValueError('Invalid country response')
+     except (ValueError,KeyError) as exc:evidence['response_error']=type(exc).__name__
+     else:
+      evidence['country']=address.get('country')
+      require(address.get('country')==plan['region'],'节点恢复后出口地区不符；详见 recovery_attempts')
+      recovery_ok=True;break
+    if attempt<2:time.sleep(2)
+   require(recovery_ok,'节点恢复后海外出口连接失败；详见 recovery_attempts')
    report['recovered']=True
   report['success']=True
  except Exception as exc:report.update(error=str(exc),failed_check=check);raise

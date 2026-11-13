@@ -42,7 +42,7 @@ function lastRunCard(ctx) {
 function verificationCard(ctx) {
   const verification = ctx.state.verification || {};
   if (!verification.available) {
-    return ui.card({ title: '网络验收' }, ui.empty('还没有验收记录', '完整配置成功后会自动运行网络验收。'));
+    return ui.card({ title: '网络验收' }, ui.empty('还没有验收记录', '配置不自动运行网络验收；请在“网络环境”按需点击检查或演练。'));
   }
   return ui.card({ title: '网络验收摘要', actions: ui.badge(verification.success ? '通过' : '未通过', verification.success ? 'ok' : 'bad') },
     ui.el('div', { class: 'verification-head' },

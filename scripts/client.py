@@ -1,6 +1,7 @@
 """Clash Verge Rev Windows adapter. Secrets and backups stay under .local/."""
 from checks import require
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.error,urllib.request,uuid
 import yaml
 from atomic_files import replace_file
@@ -141,10 +142,14 @@ def parse_rule_source(name,raw):
 
 def download_rules():
  data={};metadata={}
- for name,url in SOURCES.items():
-  raw=rule_source_bytes(url)
-  data[name]=parse_rule_source(name,raw)
-  metadata[name]={'url':url,'sha256':hashlib.sha256(raw).hexdigest(),'count':len(data[name])}
+ # Workers only download. Parsing and the single candidate publication remain
+ # ordered, so partial failures cannot publish an incomplete source record.
+ with ThreadPoolExecutor(max_workers=4) as pool:
+  pending={name:pool.submit(rule_source_bytes,url) for name,url in SOURCES.items()}
+  for name,url in SOURCES.items():
+   raw=pending[name].result()
+   data[name]=parse_rule_source(name,raw)
+   metadata[name]={'url':url,'sha256':hashlib.sha256(raw).hexdigest(),'count':len(data[name])}
  require(len(data['domains'])>10000 and len(data['ips'])>8000 and len(data['privateDomains'])>30 and len(data['lanCidrs'])>0,'Incomplete rule source')
  data['ruleSources']=metadata
  write(LOCAL/'sources-candidate.json',metadata);return data

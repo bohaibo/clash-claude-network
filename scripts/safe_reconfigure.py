@@ -71,7 +71,7 @@ def run_stage(folder,job,action,timeout):
 
 def network_ready():
  # Baseline recovery confirms basic connectivity, not overseas proxy usability.
- # Accept either domestic or overseas HTTPS; full apply still verifies exit country.
+ # Used only by the emergency recovery guardian, not routine configuration.
  for url in ('https://www.baidu.com','https://www.taobao.com','https://www.cloudflare.com/cdn-cgi/trace'):
   try:
    probe=subprocess.run(['curl.exe','--noproxy','*','--connect-timeout','4','--max-time','12','-sS','-o','NUL',
@@ -169,6 +169,15 @@ def worker(folder,action):
   time.sleep(.1)
  return subprocess.call(command(job,action))
 
+def validate_apply_result(report,job,previous_id):
+ if (report.get('success') is not True or report.get('action')!='apply'
+     or report.get('configuration_verified') is not True
+     or not report.get('configuration_id') or report['configuration_id']==previous_id
+     or report.get('node')!=job['node'] or report.get('region')!=job['region']
+     or report.get('snapshot')!=Path(job['snapshot']).name):
+  raise RuntimeError('Fresh local configuration evidence is missing')
+ return report['configuration_id']
+
 def reconfigure():
  check_pending_settings(client.LOCAL)
  if os.name!='nt' or not ctypes.windll.shell32.IsUserAnAdmin():raise RuntimeError('Administrator required')
@@ -180,12 +189,11 @@ def reconfigure():
  os.environ['CCN_SNAPSHOT']=str(path)
  baseline.preflight_restore();baseline.pin_baseline(client.LOCAL,path)
  client.select(client.root_path(plan['root']),plan['node'],plan['subscription_uid'])
- if not network_ready():raise RuntimeError('Pre-operation network probe failed; no settings changed')
  folder=client.LOCAL/'reconfigure-runs'/uuid.uuid4().hex;folder.mkdir(parents=True)
  job={k:plan[k] for k in ('node','subscription_uid','region','root')}
  job.update(id=folder.name,snapshot=str(path.resolve()),parent_pid=os.getpid(),parent_birth=process_birth(os.getpid()))
- previous=client.LOCAL/'verification.json'
- previous_run=json.loads(previous.read_text(encoding='utf-8')).get('run_id') if previous.exists() else None
+ previous=client.LOCAL/'last-run.json'
+ previous_id=json.loads(previous.read_text(encoding='utf-8-sig')).get('configuration_id') if previous.exists() else None
  save(folder,'job.json',job)
  with active.open('x',encoding='utf-8') as output:json.dump({'id':folder.name},output)
  try:
@@ -199,19 +207,16 @@ def reconfigure():
   print('独立网络看护已就绪；即使会话断开，本机仍会继续执行并在失败或超时后恢复网络。记录：'+str(folder),flush=True)
   save(folder,'status.json',{'stage':'restore','success':False})
   run_stage(folder,job,'restore',600)
-  if not network_ready():raise RuntimeError('Original baseline connectivity was not confirmed')
-  save(folder,'baseline-restored.json',{'success':True,'network_ready':True})
-  print('已恢复最早记录并确认联网，开始重新配置。',flush=True)
+  save(folder,'baseline-restored.json',{'success':True,'network_tested':False})
+  print('已恢复最早记录，开始重新配置；不自动运行联网检查或故障演练。',flush=True)
   save(folder,'status.json',{'stage':'apply','success':False})
   run_stage(folder,job,'apply',900)
-  report=json.loads((client.LOCAL/'verification.json').read_text(encoding='utf-8'))
-  if (report.get('success') is not True or report.get('run_id')==previous_run
-      or not {'node-outage','core-exit','post-recovery'}<=set(report.get('stages',{}))):
-   raise RuntimeError('Fresh complete verification evidence is missing')
+  report=json.loads((client.LOCAL/'last-run.json').read_text(encoding='utf-8-sig'))
+  configuration_id=validate_apply_result(report,job,previous_id)
   baseline.verify()
-  save(folder,'status.json',{'stage':'complete','success':True,'verification_run':report['run_id']})
+  save(folder,'status.json',{'stage':'complete','success':True,'configuration_id':configuration_id,'network_tested':False})
   save(folder,'done.json',{'success':True});active.unlink(missing_ok=True)
-  print('恢复、重新配置及断网恢复验收已完成。记录：'+str(folder),flush=True)
+  print('恢复和重新配置已完成；网络未验收。需要时请使用独立检查按钮。记录：'+str(folder),flush=True)
   return 0
  except Exception as exc:
   save(folder,'status.json',{'stage':'failed','success':False,'error':str(exc)})

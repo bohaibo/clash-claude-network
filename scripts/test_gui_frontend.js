@@ -183,6 +183,32 @@ async function main() {
   await banner.refreshState(true);
   assert.equal(banner.app.stateLoading, false, 'failed request also clears loading state');
   assert.equal(loader(), undefined, 'failed request does not leave a stuck spinner');
+  // Diagnostics are opt-in buttons; rendering must never dispatch a job.
+  const buttons = [], badges = [], jobs = [];
+  const diagnosticUi = new Proxy({}, {get: (_, name) => (...args) => {
+    if (name === 'button') buttons.push({label: args[0], ...args[1]});
+    if (name === 'badge') badges.push(args[0]);
+    return {name, args};
+  }});
+  const networkContext = vm.createContext({ui: diagnosticUi, Date});
+  const networkSource = fs.readFileSync('gui/js/pages/network.js', 'utf8')
+    .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
+  vm.runInContext(networkSource + '\nglobalThis.pageTest={diagnosticsCard,configCard};', networkContext);
+  const diagnosticCtx = {state: {configured: true}, busy: false,
+    confirm: async () => true, startJob: value => jobs.push(value)};
+  networkContext.pageTest.diagnosticsCard(diagnosticCtx);
+  assert.equal(jobs.length, 0);
+  await buttons.find(b => b.label === '检查连通性').onClick();
+  await buttons.find(b => b.label === '完整复核与演练').onClick();
+  assert.deepEqual(jobs.map(j => j.action), ['verify', 'audit']);
+  const configured = {configured: true, plan: {}, last_run: {success: true, action: 'apply',
+    network_tested: false, configuration_time: '2026-11-13T20:00:00+08:00'},
+    verification: {available: true, success: true, time: '2026-11-13T19:00:00+08:00'}};
+  networkContext.pageTest.configCard({state: configured});
+  assert.equal(badges.at(-1), '配置完成 · 网络未验收');
+  configured.verification.time = '2026-11-13T21:00:00+08:00';
+  networkContext.pageTest.configCard({state: configured});
+  assert.equal(badges.at(-1), '历史验收通过');
   console.log('GUI task lifecycle offline checks passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

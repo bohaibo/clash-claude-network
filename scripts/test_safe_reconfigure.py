@@ -14,6 +14,14 @@ class SafeReconfigure(unittest.TestCase):
    self.assertTrue(safe.network_ready())
   self.assertEqual(run.call_count,1)
   self.assertEqual(run.call_args.args[0][-1],'https://www.baidu.com')
+ def test_configuration_only_completion_requires_fresh_matching_local_evidence(self):
+  job={'node':'Chosen','region':'SG','snapshot':str(self.local/'original')}
+  report={'success':True,'action':'apply','configuration_verified':True,'configuration_id':'new',
+          'node':'Chosen','region':'SG','snapshot':'original','network_tested':False}
+  self.assertEqual(safe.validate_apply_result(report,job,'old'),'new')
+  for change in ({'configuration_id':'old'},{'configuration_verified':False},{'node':'Other'},
+                 {'region':'US'},{'snapshot':'different'},{'success':False}):
+   with self.subTest(change=change),self.assertRaises(RuntimeError):safe.validate_apply_result({**report,**change},job,'old')
  def test_connectivity_falls_back_and_rejects_failures(self):
   failed=MagicMock(returncode=7,stdout=b'000')
   with patch.object(safe.subprocess,'run',side_effect=[subprocess.TimeoutExpired('curl',15),failed,MagicMock(returncode=0,stdout=b'200')]):

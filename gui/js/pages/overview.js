@@ -84,12 +84,14 @@ export function refreshStatus(ctx) {
 function statusGrid(ctx) {
   const state = ctx.state;
   const verification = state.verification || {};
+  const awaitingVerification = state.last_run?.network_tested === false &&
+    (!verification.available || (Date.parse(verification.time) || 0) < (Date.parse(state.last_run.configuration_time) || Infinity));
   const update = state.update || {};
   const tiles = [
     {
       label: '网络配置',
-      value: !state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : verification.dns_failed ? 'DNS 验收失败' : verification.available && verification.success ? '历史验收通过' : '已写入',
-      tone: !state.configured ? 'warn' : state.last_run?.success === false || verification.dns_failed ? 'bad' : verification.available && verification.success ? 'ok' : 'warn',
+      value: !state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : awaitingVerification ? '配置完成，网络未验收' : verification.dns_failed ? 'DNS 验收失败' : verification.available && verification.success ? '历史验收通过' : '已写入',
+      tone: !state.configured ? 'warn' : state.last_run?.success === false ? 'bad' : awaitingVerification ? 'warn' : verification.dns_failed ? 'bad' : verification.available && verification.success ? 'ok' : 'warn',
       detail: state.configured ? ('节点 ' + (state.plan.node || '—') + (verification.available ? ' · 上次验收 ' + ui.relativeTime(verification.time) : ' · 尚未验收')) : '首次配置会先保存原始快照',
       action: state.configured ? () => ctx.navigate('network') : null,
     },
@@ -104,7 +106,7 @@ function statusGrid(ctx) {
       label: '上次验收',
       value: verification.available ? (verification.success ? '历史通过' : '历史未通过') : '待检查',
       tone: verification.available ? (verification.success ? 'ok' : 'bad') : 'neutral',
-      detail: verification.available ? ui.relativeTime(verification.time) : '配置完成后自动运行',
+      detail: verification.available ? ui.relativeTime(verification.time) : '在网络环境按需点击检查',
       action: () => ctx.navigate('logs'),
     },
   ];
@@ -319,7 +321,7 @@ function renderChoices(ctx) {
       form.regionManual = true;
       form.acknowledged = false;
       renderChoices(ctx);
-    }), '从节点名自动填入地区提示；实际出口由配置后的网络验收核对，可随时手动修改。'),
+    }), '从节点名自动填入地区提示；实际出口可通过独立的连通性检查核对，可随时手动修改。'),
   );
 
   const selected = ui.el('div', { class: 'selected-node' },
@@ -351,10 +353,10 @@ function renderChoices(ctx) {
     : null;
   const regionHint = form.node
     ? (form.regionAuto
-        ? ui.note('出口地区已按节点名自动填为 ' + form.regionAuto.code + '。实际出口由配置后的网络验收核对；如识别错误可直接修改。配置时系统地区及时区会同步切换到该地区。', 'info')
+        ? ui.note('出口地区已按节点名自动填为 ' + form.regionAuto.code + '。实际出口可通过独立的连通性检查核对；如识别错误可直接修改。配置时系统地区及时区会同步切换到该地区。', 'info')
         : form.regionManual
           ? ui.note('已手动选择出口地区 ' + form.region + '；配置时系统地区及时区会同步切换到该地区。', 'info')
-          : ui.note('未能从节点名识别出口地区，请手动选择。实际出口由配置后的网络验收核对。', 'warn'))
+          : ui.note('未能从节点名识别出口地区，请手动选择。实际出口可通过独立的连通性检查核对。', 'warn'))
     : null;
   choicesHost.replaceChildren(...[
     columns,
@@ -438,7 +440,7 @@ async function beginApply(ctx) {
   const ok = await ctx.confirm({
     title: '开始配置网络？',
     subtitle: form.node + ' · 出口 ' + form.region,
-    description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，再运行网络验收；外部指纹浏览器自行管理。',
+    description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，不自动运行联网检查或故障演练；外部指纹浏览器自行管理。',
     items: IMPACT,
     note: 'Mihomo 停止时所有公网（包括国内网站）都会短暂断开；请先保存正在进行的网络工作。',
     noteType: 'warn',
@@ -462,7 +464,7 @@ async function quickReapply(ctx) {
     title: '按当前记录重新配置？',
     subtitle: plan.node + ' · 出口 ' + (plan.region || 'SG'),
     description: '沿用上次配置记录的精确节点、订阅和出口地区；如果该节点已从当前订阅消失，配置会在写入前停止。',
-    description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，再运行网络验收；外部指纹浏览器自行管理。',
+    description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，不自动运行联网检查或故障演练；外部指纹浏览器自行管理。',
     items: IMPACT,
     confirmText: '重新配置',
     requireCheck: '我已了解重新配置会关闭 Clash 并短暂中断网络。',
