@@ -6,9 +6,7 @@ export function render(ctx) {
   const root = document.createElement('div');
   root.className = 'stack';
   root.append(ui.pageHeader({
-    eyebrow: 'EVIDENCE',
     title: '日志与验证',
-    description: '查看上次操作、网络验收摘要和本地日志。日志只保存在 .local，不包含订阅内容或控制密钥。',
     actions: [
       ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) }),
       ui.button('打开 .local', { variant: 'ghost', icon: 'folder', onClick: () => reveal(ctx) }),
@@ -17,7 +15,7 @@ export function render(ctx) {
   root.append(lastRunCard(ctx));
   root.append(verificationCard(ctx));
   root.append(logListCard(ctx));
-  root.append(reconfigureCard(ctx));
+  if (state.reconfigure_runs?.length) root.append(reconfigureCard(ctx));
   const inline = document.createElement('div');
   inline.id = 'log-inline';
   inline.dataset.preserveKey = 'open-log';
@@ -32,9 +30,7 @@ function lastRunCard(ctx) {
   return ui.card({ title: '上次操作', actions: run.action ? ui.badge(run.success ? '成功' : '未完成', tone) : null },
     run.action ? ui.kv([
       ['动作', actionName(run.action)],
-      ['结果', run.success ? '成功' : '未完成'],
-      ['状态', run.status || '—'],
-      ['错误', run.error || '—'],
+      ...(run.status ? [['状态', run.status]] : []),
     ]) : ui.empty('还没有操作记录', '从「一键配置」开始，或在此查看上次运行结果。'),
     run.error ? ui.note(run.error + '。详情见 .local/last-error.log 或对应操作日志。', 'bad') : null);
 }
@@ -42,9 +38,9 @@ function lastRunCard(ctx) {
 function verificationCard(ctx) {
   const verification = ctx.state.verification || {};
   if (!verification.available) {
-    return ui.card({ title: '网络验收' }, ui.empty('还没有验收记录', '配置不自动运行网络验收；请在“网络环境”按需点击检查或演练。'));
+    return ui.card({ title: '网络验收', help: '配置不自动运行验收；请在网络环境页面检查或演练。' }, ui.el('p', { class: 'muted', text: '还没有验收记录' }));
   }
-  return ui.card({ title: '网络验收摘要', actions: ui.badge(verification.success ? '通过' : '未通过', verification.success ? 'ok' : 'bad') },
+  return ui.disclosure({ title: '历史网络验收 · ' + (verification.success ? '通过' : '未通过'), key: 'logs-verification', open: !verification.success },
     ui.el('div', { class: 'verification-head' },
       ui.el('span', { class: 'muted', text: '记录时间 ' + ui.formatTime(verification.time) }),
       verification.egress?.country ? ui.pill(verification.egress.country + ' · ' + (verification.egress.city || ''), 'neutral') : null),
@@ -66,7 +62,7 @@ function logListCard(ctx) {
       ui.el('span', { class: 'muted', text: ui.relativeTime(file.time) }),
       icon('chevron', 14))))
     : ui.empty('还没有日志文件', '操作产生错误或更新结果时会生成日志。');
-  return ui.card({ title: '本地日志', subtitle: '点击文件名在此读取；不会把日志上传到网络。' }, body);
+  return ui.card({ title: '本地日志', help: '点击文件名在此读取；不会把日志上传到网络。' }, body);
 }
 
 function reconfigureCard(ctx) {
@@ -74,7 +70,7 @@ function reconfigureCard(ctx) {
   if (!runs.length) {
     return ui.card({ title: '安全重新配置记录' }, ui.empty('还没有记录', '「恢复最早状态并重新配置」会在 .local/reconfigure-runs 保存阶段和恢复结果。'));
   }
-  return ui.card({ title: '安全重新配置记录', subtitle: '最近 8 次；详细日志在 .local/reconfigure-runs。' },
+  return ui.disclosure({ title: '重新配置记录', key: 'logs-reconfigure', open: runs.some(run => !run.success) },
     ui.el('div', { class: 'run-list' }, runs.map((run) => ui.el('div', { class: 'run-row' },
       ui.el('span', { class: 'status-dot ' + (run.success ? 'ok' : run.stage === 'failed' ? 'bad' : 'warn') }),
       ui.el('div', { class: 'run-main' },

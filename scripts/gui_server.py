@@ -1525,7 +1525,6 @@ class App:
         })
         self.log('GUI listening on ' + self.base_url)
         if self.open_browser:
-            self.request_software_check(force=False)
             self.open_gui_browser()
         threading.Thread(target=self._idle_monitor, daemon=True, name='ccn-idle').start()
         try:

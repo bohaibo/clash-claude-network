@@ -12,34 +12,35 @@ const FLOW = [
 ];
 
 export function render(ctx) {
-  const state = ctx.state;
-  const plan = state.plan || {};
-  const verification = state.verification || {};
   const root = document.createElement('div');
   root.className = 'stack';
   root.append(ui.pageHeader({
-    eyebrow: 'NETWORK',
     title: '网络环境',
-    description: '查看当前固定节点、分流顺序、上次验收结果与高级维护动作。',
     actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) })],
   }));
+  root.append(verificationCard(ctx));
+  root.append(diagnosticsCard(ctx));
+  root.append(actionsCard(ctx));
+  return root;
+}
 
-  if (!plan.exists) {
-    root.append(ui.card({ title: '还没有配置记录' },
-      ui.empty('尚未配置网络', '完成一次配置后，这里会显示固定节点、回滚点和验收结果。', ui.button('去一键配置', { variant: 'ink', onClick: () => ctx.navigate('overview') }))));
-    return root;
-  }
-
-  root.append(configCard(ctx));
+// Detailed status belongs in the guide, keeping the network page focused on actions.
+export function configurationDetails(ctx) {
+  const state = ctx.state;
+  if (!state.plan?.exists) return [ui.card({ title: '当前配置详情' },
+    ui.empty('尚未配置网络', '完成一次配置后可在这里查看详细状态。',
+      ui.button('去一键配置', { variant: 'ink', onClick: () => ctx.navigate('overview') })))];
+  const cards = [];
+  cards.push(configCard(ctx));
   if (state.verification?.dns_failed) {
-    root.append(ui.note('上次验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。请点击「重新检查连通性」；若仍失败，恢复关联快照并重新配置。', 'bad'));
+    cards.push(ui.note('上次验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。请点击「重新检查连通性」；若仍失败，恢复关联快照并重新配置。', 'bad'));
   }
   const health = state.preview?.current?.health;
-  root.append(ui.card({ title: '当前配置一致性', subtitle: '核对本地配置文件和系统状态。规则或版本不一致请重新配置；系统地区或新增网卡请补充配置。' },
+  cards.push(ui.card({ title: '当前配置一致性', subtitle: '核对本地配置文件和系统状态。规则或版本不一致请重新配置；系统地区或新增网卡请补充配置。' },
     ...(health?.checks || []).map(row => ui.note(row.title + '：' + (row.status === 'passed' ? '一致' : row.status === 'failed' ? '不一致，请' + row.action : '待检查') + '；当前 ' + (row.title === '配置生成版本' ? (row.current ? '已记录版本' : '旧版未记录') : String(row.current ?? '未知')) + ' → ' + (row.title === '配置生成版本' ? '当前软件版本' : String(row.target)), row.status === 'passed' ? 'info' : 'warn'))));
-  root.append(flowCard());
+  cards.push(flowCard());
   const rtc = state.preview?.current?.webrtc;
-  root.append(ui.card({ title: '常用浏览器 WebRTC', subtitle: '配置与补充配置会备份并管理这三款标准浏览器的 WebRTC 策略。' },
+  cards.push(ui.card({ title: '常用浏览器 WebRTC', subtitle: '配置与补充配置会备份并管理这三款标准浏览器的 WebRTC 策略。' },
     ui.kv((rtc?.browsers || []).map(row => [row.browser + ' 配置', row.configuration_state || '正在读取'])),
     ui.kv((rtc?.browsers || []).map(row => [row.browser, row.state])),
     ui.kv((rtc?.browsers || []).filter(row => row.installation).map(row => [row.browser + ' 扩展安装', row.installation.label])),
@@ -50,10 +51,7 @@ export function render(ctx) {
     } }) : null,
     ui.el('p', { class: 'muted small', text: rtc?.installation_help || '一键配置会自动安排 Chrome、Edge 安装官方商店扩展，已有扩展直接复用。' }),
     ui.el('p', { class: 'muted small', text: rtc?.note || '正在读取 WebRTC 配置。' })));
-  root.append(diagnosticsCard(ctx));
-  root.append(verificationCard(ctx));
-  root.append(actionsCard(ctx));
-  return root;
+  return cards;
 }
 
 function configCard(ctx) {
@@ -94,9 +92,13 @@ function flowCard() {
 function verificationCard(ctx) {
   const verification = ctx.state.verification || {};
   const body = [];
+  if (!ctx.state.configured) {
+    body.push(ui.note('当前未运行项目配置，检查和补充配置暂不可用。', 'warn'));
+  }
   if (!verification.available) {
-    body.push(ui.empty('还没有验收结果', '配置不自动运行检查。需要时点击“检查连通性”或“完整复核与演练”，结果显示在这里。'));
+    body.push(ui.el('p', { class: 'muted', text: '还没有验收结果' }));
   } else {
+    if (verification.dns_failed) body.push(ui.note('上次 DNS 验收未通过，请重新检查连通性；仍失败时恢复关联快照并重新配置。', 'bad'));
     if (!verification.source_matches_current) body.push(ui.note('该历史报告未对应当前软件版本；需要时请重新检查或演练。', 'warn'));
     body.push(ui.el('div', { class: 'verification-head' },
       ui.badge(verification.success ? (verification.coverage === 'partial' ? '已记录阶段通过，验收不完整' : '历史验收通过') : '验收未通过', verification.success ? 'ok' : 'bad'),
@@ -109,31 +111,30 @@ function verificationCard(ctx) {
       ui.el('span', { class: 'status-dot ' + (stage.success ? 'ok' : stage.status === 'unverified' ? 'warn' : stage.tested ? 'bad' : 'warn') }),
       ui.el('div', {}, ui.el('strong', { text: stage.title }), ui.el('small', { text: stage.success ? '已通过' : stage.status === 'unverified' ? '待检查' : stage.tested ? '未通过' : '未记录' }))))));
   }
-  return ui.card({ title: '上次网络验收', actions: ui.button('查看日志', { variant: 'ghost', size: 'small', icon: 'list', onClick: () => ctx.navigate('logs') }) }, ...body);
+  return ui.card({ title: '上次网络验收', help: '这里只显示历史结果，不代表当前网络已通过验收。配置不自动运行检查；需要时使用下方检查按钮。浏览器、虚拟网络、Claude 服务和账号行为未验证。', actions: ui.button('查看日志', { variant: 'ghost', size: 'small', icon: 'list', onClick: () => ctx.navigate('logs') }) }, ...body);
 }
 
 function actionsCard(ctx) {
   const state = ctx.state;
   const unavailable = !state.configured;
-  return ui.card({ title: '维护与恢复', subtitle: '这些动作会修改系统设置或短暂中断网络，执行前会再次确认。' },
+  return ui.card({ title: '维护与恢复', help: '这些动作会修改系统设置或短暂中断网络，执行前会再次确认。' },
     ui.el('div', { class: 'action-grid' },
       actionRow('补充配置', '补充防火墙、IPv6、地区和常用浏览器 WebRTC 策略，累积恢复记录。不会关闭浏览器或运行网络测试。',
         ui.button('补充配置', { variant: 'secondary', icon: 'shield', disabled: unavailable || ctx.busy, onClick: () => supplement(ctx) })),
       actionRow('恢复最早状态并重新配置', '先恢复固定首次恢复点，再沿用当前精确节点完整配置。需要独立本机看护；失败或超时会尝试恢复网络。',
-        ui.button('恢复并重新配置', { variant: 'danger', icon: 'alert', disabled: !state.baseline || !state.plan.node || ctx.busy, onClick: () => reconfigure(ctx) })),
-    ),
-    ui.note('严格防火墙的含义：节点故障但内核仍在运行时，国内网站保持直连；内核停止时，所有公网（包括国内）都会被阻断。这是有意的保护行为。', 'info'));
+        ui.button('恢复并重新配置', { variant: 'danger', icon: 'alert', disabled: !state.baseline || !state.plan?.node || ctx.busy, onClick: () => reconfigure(ctx) })),
+    ));
 }
 
 function actionRow(title, text, action) {
   return ui.el('div', { class: 'action-row' },
-    ui.el('div', {}, ui.el('strong', { text: title }), ui.el('p', { text })),
+    ui.el('div', { class: 'action-label' }, ui.el('strong', { text: title }), ui.helpTip(text, title + '说明')),
     action);
 }
 
 function diagnosticsCard(ctx) {
   const unavailable = !ctx.state.configured;
-  return ui.card({ title: '检查与故障演练（按需）', subtitle: '一键配置不运行这些检查。可自行选择；故障演练会短暂中断公网。' },
+  return ui.card({ title: '检查与故障演练', help: '一键配置不运行这些检查。可自行选择；故障演练会短暂中断公网。' },
     ui.el('div', { class: 'action-grid' },
       actionRow('重新检查连通性', '运行一次连通性验收（不模拟节点故障或停核），检查出口地区、DNS、IPv6 与工具出口。',
         ui.button('检查连通性', { variant: 'secondary', icon: 'refresh', disabled: unavailable || ctx.busy, onClick: () => verify(ctx) })),

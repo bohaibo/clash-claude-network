@@ -478,3 +478,51 @@ select.input { appearance: none; padding-right: 30px; background-image: linear-g
   .config-value { padding: 4px 8px; }
 }
 .config-table .config-explanation { display: block; margin-top: 4px; font-size: 11px; line-height: 1.7; font-weight: 400; color: var(--muted); letter-spacing: 0; }
+
+/* Compact contextual help, available to pointer and keyboard users. */
+.heading-with-help, .action-label { display: flex; align-items: center; gap: 8px; }
+.help-tip { position: relative; display: inline-flex; flex: none; font-weight: 400; letter-spacing: normal; }
+.help-trigger { display: inline-flex; align-items: center; justify-content: center; width: 19px; height: 19px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1; cursor: help; }
+.help-trigger:hover, .help-trigger:focus-visible { color: var(--info); border-color: var(--info); outline: 2px solid transparent; }
+.help-tooltip { position: absolute; top: 100%; left: -8px; z-index: 20; width: max-content; max-width: min(320px, calc(100vw - 64px)); padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink); box-shadow: 0 6px 24px #00000018; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; text-align: left; visibility: hidden; opacity: 0; }
+.help-tip:not(.is-dismissed):hover .help-tooltip, .help-tip:not(.is-dismissed):focus-within .help-tooltip { visibility: visible; opacity: 1; }
+@media (max-width: 600px) {
+  .heading-with-help, .action-label { position: relative; }
+  .heading-with-help .help-tip, .action-label .help-tip { position: static; }
+  .help-tooltip { left: 0; max-width: min(320px, calc(100vw - 84px)); }
+}
+
+/* Progressive detail keeps each page focused on its primary task. */
+.disclosure-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; list-style: none; cursor: pointer; font-size: 14px; font-weight: 600; }
+.disclosure-heading::-webkit-details-marker { display: none; }
+.disclosure-heading > .icon { color: var(--muted); transition: transform .15s; flex: none; }
+.disclosure[open] > .disclosure-heading > .icon { transform: rotate(90deg); }
+.disclosure-heading:focus-visible { outline: 2px solid var(--info); outline-offset: -4px; border-radius: var(--radius); }
+.disclosure > .card-body { padding-top: 0; }
+.setup-page .tiles { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+.setup-page .tile { padding: 13px 16px; gap: 5px; }
+.setup-page .tile-value { font-size: 19px; }
+.config-group .help-tip { margin-left: 8px; vertical-align: middle; }
+.config-table:has(.help-tip:hover), .config-table:has(.help-tip:focus-within) { overflow: visible; }
+.mode-card > div { min-width: 0; }
+
+/* Software updates live beside network status, outside page navigation. */
+.software-control { display: flex; align-items: center; flex: none; }
+.software-update-button { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: auto; min-width: 32px; padding: 7px; }
+.software-update-button.has-update { color: var(--info); background: var(--info-bg); border-radius: 9px; }
+.software-update-button.has-update::after { content: ''; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; background: var(--info); }
+#software-update-label { font-size: 11px; white-space: nowrap; }
+.software-update-panel { position: fixed; inset: 70px 24px auto auto; margin: 0; width: min(440px, calc(100vw - 24px)); max-height: calc(100dvh - 90px); overflow: auto; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
+.software-update-panel > .stack > .card { border: 0; box-shadow: none; }
+.software-update-panel .card-head { flex-wrap: wrap; gap: 8px; }
+.software-update-panel .form-foot { justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
+.software-update-panel .release-notes { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.software-update-panel .help-tip { position: static; }
+.software-update-panel .help-tooltip { top: auto; bottom: 0; left: 0; max-width: 100%; }
+@media (max-width: 600px) {
+  .topbar { gap: 8px; flex-wrap: wrap; }
+  .topbar-actions { flex: 1; justify-content: flex-end; }
+  .software-update-panel { inset: 90px 12px auto auto; max-height: calc(100dvh - 110px); }
+}
+
+.software-update-button[hidden] { display: none; }

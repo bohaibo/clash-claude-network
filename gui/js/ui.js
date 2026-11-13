@@ -32,11 +32,45 @@ export function card(options = {}, ...body) {
     ? el('div', { class: 'card-head' },
         el('div', { class: 'card-heading' },
           options.eyebrow ? el('span', { class: 'eyebrow', text: options.eyebrow }) : null,
-          options.title ? el('h2', { text: options.title }) : null,
+          options.title ? el('h2', { class: options.help ? 'heading-with-help' : undefined },
+            el('span', { text: options.title }), options.help ? helpTip(options.help, options.title + '说明') : null) : null,
           options.subtitle ? el('p', { class: 'card-subtitle', text: options.subtitle }) : null),
         options.actions ? el('div', { class: 'card-actions' }, options.actions) : null)
     : null;
   return el('section', { class: 'card ' + (options.class || '') }, header, el('div', { class: 'card-body' }, ...body));
+}
+
+const disclosureState = new Map();
+
+export function disclosure(options = {}, ...body) {
+  const key = options.key || options.title;
+  const node = el('details', { class: 'card disclosure ' + (options.class || ''),
+    open: disclosureState.has(key) ? disclosureState.get(key) : Boolean(options.open),
+    ontoggle: () => disclosureState.set(key, node.open),
+  },
+  el('summary', { class: 'disclosure-heading' },
+    el('span', { text: options.title }), icon('chevron', 16)),
+  el('div', { class: 'card-body' }, ...body));
+  return node;
+}
+
+let helpTipId = 0;
+
+export function helpTip(text, label = '说明') {
+  const id = 'help-tip-' + (++helpTipId);
+  const trigger = el('button', { class: 'help-trigger', type: 'button',
+    'aria-label': label, 'aria-describedby': id, text: '?' });
+  const tip = el('span', { class: 'help-tooltip', id, role: 'tooltip', text });
+  // Escape dismisses the tooltip without moving keyboard focus.
+  const host = el('span', { class: 'help-tip',
+    onkeydown: event => {
+      if (event.key === 'Escape') host.classList.add('is-dismissed');
+    },
+    onmouseenter: () => host.classList.remove('is-dismissed'),
+    onfocusin: () => host.classList.remove('is-dismissed'),
+    onClick: () => host.classList.remove('is-dismissed'),
+  }, trigger, tip);
+  return host;
 }
 
 export function pageHeader(options = {}) {
@@ -89,9 +123,8 @@ export function pill(text, type = 'neutral') {
 
 export function field(label, control, hint) {
   return el('label', { class: 'field' },
-    el('span', { class: 'field-label', text: label }),
-    control,
-    hint ? el('span', { class: 'field-hint' }, hint) : null);
+    el('span', { class: 'field-label heading-with-help' }, el('span', { text: label }), hint ? helpTip(hint, label + '说明') : null),
+    control);
 }
 
 export function select(options, value, onChange, attrs = {}) {

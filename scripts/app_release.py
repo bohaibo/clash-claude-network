@@ -20,8 +20,11 @@ VERSION=metadata()['version']
 class NoRedirect(urllib.request.HTTPRedirectHandler):
  def redirect_request(self,*args,**kwargs):raise urllib.error.URLError('Release redirect refused')
 
-def release_bytes(repository):
- url='https://api.github.com/repos/'+repository+'/releases/latest'
+class NoPublishedRelease(ValueError):
+ pass
+
+def github_bytes(repository,suffix):
+ url='https://api.github.com/repos/'+repository+suffix
  request=urllib.request.Request(url,headers={'Accept':'application/vnd.github+json','User-Agent':'ClashNetwork/'+VERSION})
  routes=[{}]
  try:
@@ -39,6 +42,16 @@ def release_bytes(repository):
   except urllib.error.HTTPError:raise
   except OSError:continue
  raise OSError('Release source unreachable')
+
+def release_bytes(repository):
+ try:return github_bytes(repository,'/releases/latest')
+ except urllib.error.HTTPError as exc:
+  if exc.code!=404:raise
+  # A visible repository with no latest stable release is not a network error.
+  info=json.loads(github_bytes(repository,''))
+  if isinstance(info,dict) and info.get('full_name')==repository and info.get('private') is False:
+   raise NoPublishedRelease() from None
+  raise
 
 def parse_release(raw,info):
  release=json.loads(raw)
@@ -58,7 +71,7 @@ class ReleaseChecker:
   value={}
   try:
    cached=json.loads((self.local/'software-update.json').read_text(encoding='utf-8-sig'))
-   if isinstance(cached,dict) and cached.get('repository')==self.info['repository'] and cached.get('current_version')==self.info['version'] and cached.get('status') in ('available','current','error'):
+   if isinstance(cached,dict) and cached.get('repository')==self.info['repository'] and cached.get('current_version')==self.info['version'] and cached.get('status') in ('available','current','no_release','error'):
     value={key:cached[key] for key in ('status','reason','checked_at','latest_version','release_url','notes','published_at') if key in cached}
     if value['status'] in ('available','current'):
      version_tuple(value['latest_version'])
@@ -78,6 +91,8 @@ class ReleaseChecker:
    self.checking=True
    result={'status':'error','reason':'无法检查软件更新，请检查网络后重试。'}
    try:result=parse_release(release_bytes(self.info['repository']),self.info)
+   except NoPublishedRelease:
+    result={'status':'no_release','reason':'仓库尚未发布正式版本。'}
    except urllib.error.HTTPError as exc:
     result['reason']='发布源不可访问：可能尚未发布正式版本、仓库为私有，或访问受限。' if exc.code==404 else '更新服务暂不可用或访问受限，请稍后重试。'
    except Exception:pass

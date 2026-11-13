@@ -209,6 +209,19 @@ async function main() {
   configured.verification.time = '2026-11-13T21:00:00+08:00';
   networkContext.pageTest.configCard({state: configured});
   assert.equal(badges.at(-1), '已配置');
+  // Every newly opened UI requests a fresh update check, independent of yesterday's cache.
+  const startupPosts = [];
+  const startupContext = vm.createContext({overview() {}, network() {}, snapshots() {}, updates() {}, logs() {}, help() {},
+    api: {post: async (...args) => {startupPosts.push(args);return {checking:true};}}, ui:{}, console});
+  vm.runInContext(source + `
+    updateChrome = () => {};
+    app.data = {};
+    globalThis.startup = {checkSoftwareOnOpen, app};
+  `, startupContext);
+  await startupContext.startup.checkSoftwareOnOpen();
+  await startupContext.startup.checkSoftwareOnOpen();
+  assert.deepEqual(startupPosts.map(args => args[0]), ['/api/software-check', '/api/software-check']);
+  assert.equal(startupContext.startup.app.softwareCheckStarted, true);
   // The comparison uses matching state labels, with installation evidence in a note.
   let impact;
   const previewUi = new Proxy({}, {get: (_, name) => (...args) => ({name, args})});
@@ -242,7 +255,7 @@ async function main() {
       assert.equal(current, target, label + ' must match after configuration');
     }
   }
-  assert.ok(walk(impact).some(n => n.args?.[1]?.text?.includes('安装记录：仅 1/3')));
+  assert.ok(walk(impact).some(n => n.name === 'helpTip' && n.args?.[0]?.includes('安装记录：仅 1/3')), 'installation evidence remains available in contextual help');
   assert.ok(!JSON.stringify(impact).includes('配置完成'));
   console.log('GUI task lifecycle offline checks passed');
 }

@@ -13,33 +13,22 @@ export function render(ctx) {
   const root = document.createElement('div');
   root.className = 'stack';
   root.append(ui.pageHeader({
-    eyebrow: 'RECOVERY',
     title: '快照与恢复',
-    description: '首次配置自动保存原始恢复点；之后可以另存当前状态。恢复会保留当前订阅、节点更新和后来手动选择的设置。',
     actions: [
       ui.button('保存当前快照', { variant: 'secondary', icon: 'plus', disabled: ctx.busy, onClick: () => saveSnapshot(ctx) }),
     ],
   }));
-  root.append(settingsRecoveryCard(ctx));
+  const pending = settingsRecoveryCard(ctx);
+  if (pending) root.append(pending);
   root.append(baselineCard(ctx));
   root.append(listCard(ctx, snapshots));
-  root.append(ui.card({ title: '恢复边界', subtitle: '恢复不是 Windows 重置，也不会回放旧节点配置。' },
-    ui.el('ul', { class: 'check-list' },
-      ui.el('li', {}, '只还原本项目记录过的系统、客户端关联和规则来源更新。'),
-      ui.el('li', {}, '保留当前订阅、订阅地址更新、节点更新、删除和当前选择；不会用旧 profiles 索引覆盖。'),
-      ui.el('li', {}, '外部浏览器及旧版浏览器资料不会被关闭或删除；旧版快照中的浏览器记录会被忽略。'),
-      ui.el('li', {}, '恢复后本项目注册的规则更新任务会被移除；如仍需定时更新，请在「规则更新」重新保存。'),
-      ui.el('li', {}, '恢复不运行网络验收，需要自行确认联网。'))));
-  root.append(ui.card({ title: '高风险恢复', subtitle: '当配置链路已经损坏，需要先回到最早状态再重新配置。' },
-    ui.el('div', { class: 'action-row' },
-      ui.el('div', {}, ui.el('strong', { text: '恢复最早状态并重新配置' }), ui.el('p', { text: '使用固定首次恢复点，再沿用当前精确节点重新配置。会短暂中断网络，并启动独立本机看护。' })),
-      ui.button('前往网络环境', { variant: 'secondary', icon: 'network', onClick: () => ctx.navigate('network') }))));
   return root;
 }
 
 function settingsRecoveryCard(ctx) {
   const pending = ctx.state.operation?.settings_pending || [];
-  return ui.card({ title: '未完成的设置保存', subtitle: '这里只恢复更新方式和计划任务，不更改网络快照或首次基线。' },
+  if (!pending.length) return null;
+  return ui.card({ title: '未完成的设置保存', help: '这里只恢复更新方式和计划任务，不更改网络快照或首次基线。' },
     pending.length ? pending.map(row => ui.el('div', { class: 'action-row' },
       ui.el('div', {}, ui.el('strong', { text: row.id }),
         ui.el('p', { text: row.error || '检测到中断或恢复失败的设置保存，可恢复修改前的状态。' })),
@@ -55,13 +44,12 @@ function baselineCard(ctx) {
   const verified = state.baseline && state.plan?.snapshot === state.baseline;
   return ui.card({
     title: '固定首次恢复点',
-    subtitle: '首次配置前自动保存，之后不会被当前状态覆盖。',
+    help: '首次配置前自动保存的原始状态，之后不会覆盖。用于失败恢复或重建环境；保存当前快照会另存一份。',
     actions: state.baseline ? ui.badge(verified ? '与配置关联' : '已固定', verified ? 'ok' : 'neutral') : ui.badge('缺失', 'bad'),
   },
   ui.kv([
     ['恢复点', state.baseline || '—'],
     ['配置关联', state.plan?.snapshot || '—'],
-    ['用途', '完整的系统与客户端原始记录；配置失败或需要重建环境时先回到这里。'],
   ]),
   !state.baseline ? ui.note('没有可用的首次恢复点。请完成一次配置，或确认 .local/snapshots 未被删除。不要用当前状态伪造基线。', 'bad') : null);
 }
@@ -70,7 +58,7 @@ function listCard(ctx, snapshots) {
   const host = ui.el('div', { class: 'snapshot-library' });
   const card = ui.card({
     title: '全部快照',
-    subtitle: '选择一张卡片查看恢复点。首次恢复点和正在使用的快照受到保护。',
+    help: '选择快照后点击恢复所选。首次恢复点和正在使用的快照不可删除。封存不代表完整性已验证，恢复前仍会校验；恢复会中断网络，执行前会再次确认。',
     actions: ui.button('恢复所选', { variant: 'ink', icon: 'clock', disabled: !selected || ctx.busy, onClick: () => restoreSelected(ctx) }),
   }, host);
   const restoreButton = card.querySelector('.card-actions .btn');
@@ -82,7 +70,7 @@ function listCard(ctx, snapshots) {
     }
     const chosen = snapshots.find(row => row.name === selected);
     const summary = ui.el('div', { class: 'snapshot-selection' },
-      ui.el('div', {}, ui.el('span', { class: 'eyebrow', text: 'SELECTED SNAPSHOT' }),
+      ui.el('div', {}, ui.el('span', { class: 'muted small', text: '已选恢复点' }),
         ui.el('strong', { text: chosen ? ui.formatTime(chosen.time) || chosen.name : '选择恢复点' }),
         ui.el('p', { text: chosen ? chosen.name : '点击下方卡片选择' })),
       ui.badge(chosen?.sealed ? '系统记录已封存' : '系统记录不完整', chosen?.sealed ? 'ok' : 'warn'));

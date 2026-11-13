@@ -8,7 +8,7 @@ class SoftwareRelease(unittest.TestCase):
  def setUp(self):
   temp=tempfile.TemporaryDirectory(dir=client.LOCAL,prefix='software-test-');self.addCleanup(temp.cleanup)
   self.local=Path(temp.name);self.checker=release.ReleaseChecker(local=self.local)
-  self.raw={'tag_name':'v2.3.0','html_url':'https://github.com/bohaibo/clash-claude-network/releases/tag/v2.3.0',
+  self.raw={'tag_name':'v2.4.0','html_url':'https://github.com/bohaibo/clash-claude-network/releases/tag/v2.4.0',
    'draft':False,'prerelease':False,'body':'Changes','published_at':'2026-11-14T00:00:00Z'}
  def test_numeric_versions_do_not_use_lexical_order(self):
   self.assertGreater(release.version_tuple('2.10.0'),release.version_tuple('2.9.0'))
@@ -16,9 +16,9 @@ class SoftwareRelease(unittest.TestCase):
    with self.subTest(value=value),self.assertRaises(ValueError):release.version_tuple(value)
  def test_new_stable_version_has_validated_release_link(self):
   result=release.parse_release(json.dumps(self.raw),self.checker.info)
-  self.assertEqual(result['status'],'available');self.assertEqual(result['latest_version'],'2.3.0')
+  self.assertEqual(result['status'],'available');self.assertEqual(result['latest_version'],'2.4.0')
  def test_old_or_equal_version_never_prompts_update(self):
-  for version in ['2.1.0','2.2.0']:
+  for version in ['2.1.0','2.2.0','2.3.0']:
    raw=dict(self.raw,tag_name=version,html_url='https://github.com/bohaibo/clash-claude-network/releases/tag/'+version)
    self.assertEqual(release.parse_release(json.dumps(raw),self.checker.info)['status'],'current')
  def test_draft_prerelease_and_untrusted_links_are_rejected(self):
@@ -33,6 +33,25 @@ class SoftwareRelease(unittest.TestCase):
    with self.subTest(error=type(error).__name__),patch.object(release,'release_bytes',side_effect=error):
     result=self.checker.check(force=True)
    self.assertEqual(result['status'],'error');self.assertNotIn('withheld',result['reason'])
+ def test_visible_repository_without_stable_release_has_specific_status(self):
+  missing=urllib.error.HTTPError('withheld',404,'not found',{},None)
+  repo=json.dumps({'full_name':self.checker.info['repository'],'private':False}).encode()
+  with patch.object(release,'github_bytes',side_effect=[missing,repo]) as get:
+   result=self.checker.check(force=True)
+  self.assertEqual(result['status'],'no_release')
+  self.assertEqual(self.checker.state()['status'],'no_release')
+  self.assertIn('尚未发布正式版本',result['reason'])
+  self.assertEqual([call.args[1] for call in get.call_args_list],['/releases/latest',''])
+ def test_inaccessible_repository_remains_an_error(self):
+  missing=urllib.error.HTTPError('withheld',404,'not found',{},None)
+  with patch.object(release,'github_bytes',side_effect=missing):
+   self.assertEqual(self.checker.check(force=True)['status'],'error')
+ def test_startup_force_retries_recent_failure(self):
+  with patch.object(release,'release_bytes',side_effect=OSError('withheld')):
+   self.checker.check(force=True)
+  with patch.object(release,'release_bytes',return_value=json.dumps(self.raw).encode()) as get:
+   self.assertEqual(self.checker.check(force=True)['status'],'available')
+  get.assert_called_once()
  def test_invalid_cached_json_does_not_break_app_state(self):
   (self.local/'software-update.json').write_text('{bad')
   self.assertEqual(self.checker.state()['status'],'unchecked')

@@ -7,14 +7,13 @@ import { render as snapshots } from './pages/snapshots.js';
 import { render as updates, hasDraft as updatesHasDraft } from './pages/updates.js';
 import { render as logs } from './pages/logs.js';
 import { render as help } from './pages/help.js';
-import { render as software } from './pages/software.js';
+import { control as softwareControl, refreshControl as refreshSoftwareControl } from './pages/software.js';
 
 const PAGES = [
   { id: 'overview', label: '一键配置', icon: 'home', title: '一键配置', render: overview },
   { id: 'network', label: '网络环境', icon: 'network', title: '网络环境', render: network },
   { id: 'snapshots', label: '快照与恢复', icon: 'clock', title: '快照与恢复', render: snapshots },
   { id: 'updates', label: '规则更新', icon: 'refresh', title: '规则更新', render: updates },
-  { id: 'software', label: '软件更新', icon: 'download', title: '软件更新与打包', render: software },
   { id: 'logs', label: '日志与验证', icon: 'list', title: '日志与验证', render: logs },
   { id: 'help', label: '使用说明', icon: 'help', title: '使用说明', render: help },
 ];
@@ -44,6 +43,7 @@ const app = {
   jobConnectionError: '',
   startingJob: false,
   stateLoading: false,
+  softwareCheckStarted: false,
 };
 let shell = null;
 let refreshPromise = null;
@@ -53,6 +53,7 @@ let stateRevision = 0;
 const ctx = {
   api,
   ui,
+  get softwareCheckStarted() { return app.softwareCheckStarted; },
   get state() { return app.data; },
   get busy() { return Boolean(app.jobId) || app.startingJob || Boolean(app.data?.operation?.settings_busy); },
   get nodes() { return app.nodes; },
@@ -101,6 +102,7 @@ function bootShell() {
       h('h2', { id: 'page-title', text: '一键配置' })),
     h('div', { class: 'topbar-actions' },
       h('div', { class: 'chips', id: 'top-chips' }),
+      softwareControl(ctx),
       ui.iconButton('refresh', '刷新状态', () => refresh(true))));
 
   const content = h('main', { class: 'content', id: 'content', tabindex: '-1' });
@@ -150,8 +152,8 @@ function updateChrome() {
         ? ui.badge(verification.dns_failed ? 'DNS 验收失败' : verifiedFresh ? '已配置' : '配置已写入', statusTone)
         : ui.badge('未配置', 'warn'),
       data.update?.mode === 'scheduled'
-        ? ui.badge((Number(data.update.days || 1) === 1 ? '定时更新 ' : '每 ' + (data.update.days || 1) + ' 天 ') + (data.update.time || '13:00'), 'neutral')
-        : ui.badge('手动更新', 'neutral'),
+        ? ui.badge((Number(data.update.days || 1) === 1 ? '定时更新分流规则 ' : '定时更新分流规则 · 每 ' + (data.update.days || 1) + ' 天 ') + (data.update.time || '13:00'), 'neutral')
+        : ui.badge('手动更新分流规则', 'neutral'),
       app.jobId ? ui.badge('操作进行中', 'info') : null,
     ].filter(Boolean));
   }
@@ -168,6 +170,7 @@ function updateChrome() {
       data.app?.node === false ? h('small', { class: 'warn-text', text: '未找到 Node.js' }) : null,
     ].filter(Boolean));
   }
+  refreshSoftwareControl(ctx);
   renderBanners();
 }
 
@@ -183,10 +186,6 @@ function renderBanners() {
       h('span', { text: app.stateLoading ? '正在读取本地配置…' : '正在读取' + collecting.map(([name]) => labels[name] || name).join('、') + '…' })));
   }
   if (!app.data) { host.replaceChildren(...rows); return; }
-  const softwareUpdate = app.data.software || {};
-  if (softwareUpdate.status === 'available') {
-    rows.push(ui.note('发现软件新版本 ' + softwareUpdate.latest_version + '，请到「软件更新」查看。', 'info'));
-  }
   for (const [name, status] of Object.entries(app.data.collection || {})) {
     if (!app.stateLoading && !status.refreshing && (status.error || status.stale)) {
       const last = status.read_at ? '上次读取：' + ui.formatTime(status.read_at) + '。' : '尚无成功读取记录。';
@@ -624,6 +623,17 @@ function renderFatal(message) {
     ui.button('重试', { variant: 'ink', onClick: () => location.reload() })));
 }
 
+async function checkSoftwareOnOpen() {
+  try {
+    const result = await api.post('/api/software-check', {});
+    app.softwareCheckStarted = true;
+    if (app.data) ctx.acceptState('software', result);
+    updateChrome();
+  } catch {
+    // Keep the update icon hidden when the startup check cannot be requested.
+  }
+}
+
 async function init() {
   try {
     await api.bootstrap();
@@ -636,6 +646,7 @@ async function init() {
   app.page = PAGES.some((item) => item.id === initial) ? initial : 'overview';
   renderPage();
   await refresh(true);
+  checkSoftwareOnOpen();
   window.scrollTo(0, 0);
   setInterval(() => { api.heartbeat().catch(() => {}); }, 8000);
   setInterval(() => { if (!app.fatal && !app.jobId && document.visibilityState === 'visible') refresh(false); }, 9000);

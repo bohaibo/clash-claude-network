@@ -57,20 +57,18 @@ export function render(ctx) {
   }
 
   rootNode = document.createElement('div');
-  rootNode.className = 'stack';
+  rootNode.className = 'stack setup-page';
   rootNode.append(ui.pageHeader({
-    eyebrow: 'SETUP',
     title: state.configured ? '网络配置' : '一键配置',
-    description: '选择一个订阅中已存在的完整节点。固定节点组只包含这个节点；未知海外流量走该节点，节点故障时不回落直连。',
     actions: [
       ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) }),
     ],
   }));
   rootNode.append(statusGrid(ctx));
   impactHost = document.createElement('div');
+  rootNode.append(setupCard(ctx));
   rootNode.append(impactHost);
   renderImpact(ctx);
-  rootNode.append(setupCard(ctx));
   return rootNode;
 }
 
@@ -97,7 +95,7 @@ function statusGrid(ctx) {
     },
     {
       label: '规则更新',
-      value: update.mode === 'scheduled' ? ('每天 ' + (update.time || '13:00')) : '手动',
+      value: update.mode === 'scheduled' ? ((Number(update.days || 1) === 1 ? '每天 ' : '每 ' + update.days + ' 天 ') + (update.time || '13:00')) : '手动',
       tone: update.last?.success ? 'ok' : update.last?.time ? 'warn' : 'neutral',
       detail: update.last?.time ? ('上次 ' + ui.relativeTime(update.last.time)) : '尚未更新',
       action: () => ctx.navigate('updates'),
@@ -135,17 +133,15 @@ function setupCard(ctx) {
     : null;
 
   const currentBand = configured ? ui.el('div', { class: 'current-band' },
-    ui.el('div', {}, ui.el('span', { class: 'eyebrow', text: 'CURRENT' }), ui.el('strong', { text: plan.node || '—' })),
+    ui.el('div', {}, ui.el('strong', { text: plan.node || '—' })),
     ui.el('div', { class: 'current-meta' },
       ui.pill('订阅 ' + (plan.subscription ? plan.subscription.slice(0, 8) : '—'), 'neutral'),
       ui.pill('出口 ' + (plan.region || 'SG'), 'neutral'),
-      plan.snapshot ? ui.pill('回滚点 ' + plan.snapshot, 'neutral') : null)) : null;
+      ui.helpTip('恢复点：' + (plan.snapshot || '尚未记录'), '当前恢复点'))) : null;
 
   const card = ui.card({
     title: configured ? '更换节点或重新配置' : '选择节点',
-    subtitle: configured
-      ? '当前节点：' + (plan.node || '—') + ' · 出口 ' + (plan.region || 'SG')
-      : '节点必须来自当前 Clash Verge 订阅；不会自动替换或猜测名称。',
+    help: '从已有订阅选择精确节点；固定节点组只包含所选节点，节点故障不回落直连。配置会请求管理员权限。',
     actions: headerActions,
   }, currentBand, choicesHost);
 
@@ -224,9 +220,9 @@ function renderImpact(ctx) {
     ['代理设置', rows.slice(9, 15), '关闭之前分散在各处的代理设置，统一由 TUN 模式接管网络。'],
     ['网站访问', rows.slice(15)],
   ];
-  impactHost.replaceChildren(ui.card({ title: selected ? '配置后会' : '配置会发生什么',
-    subtitle: '读取于 ' + readTime + ' · 选择节点后，国家、语言和时区会自动更新。',
+  impactHost.replaceChildren(ui.disclosure({ title: '配置变更详情', key: 'setup-impact',
     class: 'config-preview-card' },
+    ui.el('p', { class: 'muted small', text: '读取于 ' + readTime + ' · 地区识别仅依据节点名称，实际出口未验证。' }),
     ui.el('div', { class: 'config-legend', 'aria-label': '状态颜色说明' },
       valueBadge('开启'), valueBadge('关闭'), valueBadge('未能确认')),
     ui.el('table', { class: 'config-table', 'aria-label': '当前状态与配置后的对照' },
@@ -236,9 +232,9 @@ function renderImpact(ctx) {
         ui.el('th', { scope: 'col', class: 'config-target-heading', text: '配置后' }))),
       groups.map(([title, items, description]) => ui.el('tbody', {},
         ui.el('tr', { class: 'config-group' }, ui.el('th', { colSpan: 3, scope: 'rowgroup' },
-          ui.el('span', { text: title }), description ? ui.el('small', { class: 'config-explanation', text: description }) : null)),
+          ui.el('span', { text: title }), description ? ui.helpTip(description, title + '说明') : null)),
         items.map(([label, current, desired, description]) => ui.el('tr', { class: 'config-item' },
-          ui.el('th', { scope: 'row' }, ui.el('span', { text: label }), description ? ui.el('small', { class: 'config-explanation', text: description }) : null),
+          ui.el('th', { scope: 'row' }, ui.el('span', { class: 'heading-with-help' }, ui.el('span', { text: label }), description ? ui.helpTip(description, label + '说明') : null)),
           ui.el('td', { 'data-label': '当前' }, valueBadge(current)),
           ui.el('td', { 'data-label': '配置后', class: 'config-target' }, valueBadge(desired))))))),
     ui.el('p', { class: 'muted small', text: '外部指纹浏览器由用户自行管理。' })));
@@ -326,12 +322,12 @@ function renderChoices(ctx) {
   );
 
   const selected = ui.el('div', { class: 'selected-node' },
-    ui.el('span', { class: 'eyebrow', text: 'SELECTED' }),
+    ui.el('span', { class: 'muted small', text: '已选节点' }),
     ui.el('strong', { text: form.node || '尚未选择节点' }),
     form.node ? ui.pill('出口 ' + form.region, 'neutral') : null,
     form.regionAuto ? ui.pill('自动识别 ' + form.regionAuto.code, 'ok') : null);
 
-  const ack = ui.checkbox(form.acknowledged, '我已了解上述影响，并确认所选节点确实存在于该订阅中。', (value) => {
+  const ack = ui.checkbox(form.acknowledged, '我已确认所选节点，并了解配置会修改网络与系统设置。', (value) => {
     form.acknowledged = value;
     updateStartButton(ctx);
   });
@@ -352,13 +348,8 @@ function renderChoices(ctx) {
   const missingHint = form.node && !selectedInside
     ? ui.note('所选节点不在当前订阅中。请从上方列表重新选择；不会自动替换。', 'warn')
     : null;
-  const regionHint = form.node
-    ? (form.regionAuto
-        ? ui.note('出口地区已按节点名自动填为 ' + form.regionAuto.code + '。实际出口可通过独立的连通性检查核对；如识别错误可直接修改。配置时系统地区及时区会同步切换到该地区。', 'info')
-        : form.regionManual
-          ? ui.note('已手动选择出口地区 ' + form.region + '；配置时系统地区及时区会同步切换到该地区。', 'info')
-          : ui.note('未能从节点名识别出口地区，请手动选择。实际出口可通过独立的连通性检查核对。', 'warn'))
-    : null;
+  const regionHint = form.node && !form.regionAuto && !form.regionManual
+    ? ui.note('未识别出口地区，请手动选择。', 'warn') : null;
   choicesHost.replaceChildren(...[
     columns,
     hint,
@@ -369,7 +360,7 @@ function renderChoices(ctx) {
     missingHint,
     ui.el('div', { class: 'ack-row' }, ack),
     ui.el('div', { class: 'choice-foot' },
-      ui.el('p', { class: 'muted', text: '配置会请求管理员权限。界面本身以普通用户运行。' }),
+      ui.helpTip('配置需要管理员权限，期间可能短暂中断网络。详细改动可展开下方对照表查看，执行前会再次确认。', '配置影响'),
       start),
   ].filter(Boolean));
   renderNodeList(ctx, filtered);
