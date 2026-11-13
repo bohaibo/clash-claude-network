@@ -34,7 +34,7 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   self.discover([{'uid':'first','name':'Same','nodes':['Chosen']}])
  def discover(self,rows):
   data=json.dumps({'subscriptions':rows},ensure_ascii=True)
-  (self.scripts/'client.py').write_text('import sys\nif sys.argv[1] != "discover": raise RuntimeError("Unexpected mutation")\nprint('+repr(data)+')\n')
+  (self.scripts/'client.py').write_text('import sys,json\nif sys.argv[1] == "prefetch-rules": print(json.dumps({"rules_bundle":"a"*32}));sys.exit(0)\nif sys.argv[1] != "discover": raise RuntimeError("Unexpected mutation")\nprint('+repr(data)+')\n')
  def run_entry(self,action='apply',answers=(),*extra):
   (self.project/'answers.json').write_text(json.dumps(answers))
   command=['powershell.exe','-NoProfile','-File',str(self.scripts/'run.ps1'),'-Action',action,'-NoPause']
@@ -63,13 +63,27 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   types=[row.get('type') for row in rows]
   self.assertIn('start',types);self.assertIn('step',types);self.assertIn('error',types)
   first_step=next(row for row in rows if row.get('type')=='step')
-  self.assertEqual(first_step.get('total'),10)
+  self.assertEqual(first_step.get('total'),11)
   self.assertTrue(all('浏览器' not in str(row.get('title','')) for row in rows))
  def test_duplicate_node_stops_without_substituting(self):
   self.discover([{'uid':uid,'name':'Same','nodes':['Chosen']} for uid in ('first','second')])
   result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Chosen')
   self.assertEqual(result.returncode,1,text);self.assertIn('多个订阅',text)
   self.assertNotIn('Unexpected process',text)
+ def test_download_failure_keeps_client_open_and_records_failed_step(self):
+  (self.scripts/'client.py').write_text('import sys,json\nif sys.argv[1] == "prefetch-rules": sys.exit(1)\nprint(json.dumps({"subscriptions":[{"uid":"first","name":"Same","nodes":["Chosen"]}]}))\n')
+  result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Chosen')
+  self.assertEqual(result.returncode,1,text)
+  self.assertIn('未关闭 Clash',text)
+  self.assertNotIn('Unexpected process',text)
+  rows=[json.loads(line) for path in (self.local/'performance').glob('*.steps.jsonl') for line in path.read_text(encoding='utf-8').splitlines()]
+  self.assertEqual([(row['stage'],row['status']) for row in rows],[('step.1','passed'),('step.2','passed'),('step.3','failed')])
+ def test_missing_supplement_plan_records_failed_timing_without_system_writes(self):
+  result,text=self.run_entry('supplement',(),'-Acknowledged')
+  self.assertEqual(result.returncode,1,text)
+  self.assertNotIn('Unexpected process',text)
+  rows=[json.loads(line) for path in (self.local/'performance').glob('*.steps.jsonl') for line in path.read_text(encoding='utf-8').splitlines()]
+  self.assertEqual([(row['stage'],row['status']) for row in rows],[('step.1','failed')])
  def test_node_name_is_case_sensitive(self):
   result,text=self.run_entry('apply',(),'-Acknowledged','-Node','chosen')
   self.assertEqual(result.returncode,1);self.assertIn('没有这个精确节点',text)
@@ -133,7 +147,7 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   plan={'snapshot':str(snapshot),'core_program':'fixture.exe'}
   (self.local/'plan.json').write_text(json.dumps(plan))
   discover=json.dumps({'subscriptions':[{'uid':'first','name':'Same','nodes':['Chosen']}]})
-  (self.scripts/'client.py').write_text('import json,sys\nprint('+repr(discover)+' if sys.argv[1] == "discover" else '+repr(json.dumps(plan))+')\n')
+  (self.scripts/'client.py').write_text('import json,sys\nif sys.argv[1] == "prefetch-rules": print(json.dumps({"rules_bundle":"a"*32}));sys.exit(0)\nprint('+repr(discover)+' if sys.argv[1] == "discover" else '+repr(json.dumps(plan))+')\n')
   (self.scripts/'system.ps1').write_text('param($Action,$Python,$TimeZoneId,$Culture,$LanguageTag,$FallbackLanguageTag)\n')
   (self.scripts/'verify.py').write_text('raise SystemExit(1)\n')
   path=self.scripts/'run.ps1';source=path.read_text(encoding='utf-8-sig')

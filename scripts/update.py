@@ -1,10 +1,11 @@
 """Transactional updates of fixed Loyalsoldier sources. No service probes."""
 from checks import require
-import argparse,datetime,hashlib,json,ipaddress,re,sys,uuid
+import argparse,datetime,hashlib,json,ipaddress,os,re,sys,uuid
 from client import LOCAL,PROJECT,SOURCES,root_path,load,select,build,download_rules,api,safe_file,write,parse_project_wrapper
 from atomic_files import replace_file
 from config_health import source_digest,assert_live
 from operation_lock import operation_lock
+from performance import timed
 
 KEYS=('domains','ips','privateDomains','lanCidrs')
 
@@ -50,6 +51,7 @@ def recover_pending():
  require(not errors,'Rule update rollback incomplete')
  pending.unlink();return True
 
+@timed('rules.publish')
 def publish(plan,profiles,wrapper,text,metadata):
  root=root_path(plan['root']);active=profiles['current']==plan['subscription_uid']
  new_plan=dict(plan,source_digest=source_digest())
@@ -83,6 +85,7 @@ def publish(plan,profiles,wrapper,text,metadata):
   recover_pending();raise
  return active
 
+@timed('rules.update')
 def update(migrate_source=False):
  recovered=recover_pending()
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root'])
@@ -145,6 +148,7 @@ def failure_result(exc):
 
 if __name__=='__main__':
  parser=argparse.ArgumentParser();parser.add_argument('--migrate-source',action='store_true');args=parser.parse_args()
+ os.environ['CCN_OPERATION_ID']=uuid.uuid4().hex;os.environ['CCN_OPERATION_ACTION']='update'
  try:
   with operation_lock(LOCAL):result=update(migrate_source=args.migrate_source)
  except Exception as exc:result=failure_result(exc)

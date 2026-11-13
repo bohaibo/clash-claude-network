@@ -355,14 +355,25 @@ class App:
             return ''
 
     def configured(self):
-        root = self.plan().get('root')
+        plan = self.plan()
+        root = plan.get('root')
         if not isinstance(root, str) or not root:
             return False, ''
         folder = Path(root) / 'profiles'
         if not folder.is_dir():
             return False, '找不到 Clash Verge Rev 的 profiles 目录。'
         try:
-            for candidate in folder.iterdir():
+            # Prefer the recorded script; avoid reading large subscriptions first.
+            # Read the file again on every request rather than caching success.
+            name = plan.get('script_file')
+            preferred = folder / name if isinstance(name, str) and name and Path(name).name == name else None
+            def candidates():
+                if preferred is not None:
+                    yield preferred
+                for path in folder.iterdir():
+                    if path != preferred:
+                        yield path
+            for candidate in candidates():
                 if candidate.suffix.lower() not in ('.js', '.yaml', '.yml') or not candidate.is_file():
                     continue
                 try:

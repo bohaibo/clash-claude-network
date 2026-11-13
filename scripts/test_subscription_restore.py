@@ -25,7 +25,7 @@ class SubscriptionRestore(unittest.TestCase):
   index=client.load(self.root/'profiles.yaml');item=next(x for x in index['items'] if x['uid']==uid)
   node=client.load(self.root/'profiles'/item['file'])['proxies'][0]['name']
   entry=next((x for x in index['items'] if x['uid']==item.get('option',{}).get('script')),None)
-  def build(*args):
+  def build(*args,**kwargs):
    previous=(self.root/'profiles'/entry['file']).read_text(encoding='utf-8') if entry else 'function main(config) { return config; }'
    previous=previous.split('// PORTABLE-CLAUDE-NETWORK-V1')[0]
    wrapper=previous+'\n// PORTABLE-CLAUDE-NETWORK-V1\nfunction secureMain(config) { return config; }\n;(()=>{ const before=main; const data={}; main=function(config){return secureMain(before(config),data,'+json.dumps(node)+',"Claude-Overseas-Pinned");};})();\n'
@@ -33,7 +33,7 @@ class SubscriptionRestore(unittest.TestCase):
    text=yaml.safe_dump(candidate)
    (self.local/'candidate.js').write_text(wrapper,encoding='utf-8');(self.local/'candidate.yaml').write_text(text,encoding='utf-8')
    return wrapper,text,candidate,entry
-  with patch.object(client,'build',side_effect=build),patch.object(client,'actual_core',return_value='fixture.exe'):
+  with patch.object(client,'build',side_effect=build),patch.object(client,'executables',return_value=('fixture-node','fixture.exe')):
    client.prepare(self.root,node,uid,'SG')
   with patch.object(client,'api',return_value={}):client.apply_client()
   return json.loads((self.local/'plan.json').read_text(encoding='utf-8'))

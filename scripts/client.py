@@ -4,6 +4,9 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.error,urllib.request,uuid
 import yaml
+import base64,time
+from safe_yaml import loads as yaml_loads, dumps as yaml_dumps
+from performance import timed,stage
 from atomic_files import replace_file
 from baseline import is_runtime_snapshot_file,verify_incremental_files,default_snapshot,pin_baseline
 from routing_checks import audit_ingress,audit_lan_provider,lan_domain,local_network,normalize_lan_cidrs
@@ -18,7 +21,7 @@ SOURCES={'domains':'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/r
  'lanCidrs':'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/lancidr.txt'}
 FAKE=ipaddress.ip_network('198.18.0.0/15')
 
-def load(path):return yaml.safe_load(path.read_text(encoding='utf-8-sig'))
+def load(path):return yaml_loads(path.read_text(encoding='utf-8-sig'))
 def write(path,data):
  path.parent.mkdir(parents=True,exist_ok=True);temp=path.with_name(path.name+'.new')
  temp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8');replace_file(temp,path)
@@ -75,6 +78,7 @@ def safe_file(root,relative):
 def executables():
  node=os.environ.get('CCN_NODE') or shutil.which('node');require(node,'Install project-local Node.js through 一键网络.cmd; the system PATH is not modified')
  return node,actual_core()
+@timed("client.discover")
 def discover(root):
  profiles=load(root/'profiles.yaml');rows=[]
  for item in profiles['items']:
@@ -84,11 +88,18 @@ def discover(root):
   value=load(source) or {}
   rows.append({'uid':item['uid'],'name':item.get('name'),'nodes':[n['name'] for n in value.get('proxies',[])]})
  return {'client':'Clash Verge Rev','root':str(root),'active_uid':profiles['current'],'subscriptions':rows}
-def select(root,node,subscription=None):
- matches=[r for r in discover(root)['subscriptions'] if node in r['nodes'] and
-          (subscription is None or subscription in (r['name'],r['uid']))]
+@timed("client.select")
+def select(root,node,subscription=None,profiles=None):
+ profiles=profiles if profiles is not None else load(root/'profiles.yaml')
+ matches=[]
+ for item in profiles['items']:
+  if item.get('type')!='remote' or not item.get('file'):continue
+  if subscription is not None and subscription not in (item.get('name'),item.get('uid')):continue
+  source=safe_file(root,'profiles/'+item['file'])
+  if source.is_file() and any(n['name']==node for n in (load(source) or {}).get('proxies',[])):matches.append(item)
  require(len(matches)==1,'节点不存在或有重名。请指定订阅名称或 UID；不要猜测。')
- return next(x for x in load(root/'profiles.yaml')['items'] if x['uid']==matches[0]['uid'])
+ return matches[0]
+
 def rule_source_bytes(url):
  # Only the fixed public rule sources may use this download path. Never inherit
  # environment/system proxies or forward controller/subscription credentials.
@@ -121,7 +132,7 @@ REVIEWED_DIRECT_TLDS=frozenset(('alibaba alipay anquan baidu citic cn icbc shouj
 
 def parse_rule_source(name,raw):
  require(len(raw)<=4_000_000,'Oversized rule source')
- document=yaml.safe_load(raw.decode('utf-8-sig'))
+ document=yaml_loads(raw.decode('utf-8-sig'))
  require(isinstance(document,dict) and set(document)=={'payload'} and isinstance(document['payload'],list),'Invalid rule payload')
  values=[]
  for value in document['payload']:
@@ -140,19 +151,58 @@ def parse_rule_source(name,raw):
   values.append(value)
  return list(dict.fromkeys(values))
 
-def download_rules():
- data={};metadata={}
- # Workers only download. Parsing and the single candidate publication remain
- # ordered, so partial failures cannot publish an incomplete source record.
+def _download_source(name,url):
+ with stage('rules.download.'+name.lower()):return rule_source_bytes(url)
+
+def download_raw_rules():
  with ThreadPoolExecutor(max_workers=4) as pool:
-  pending={name:pool.submit(rule_source_bytes,url) for name,url in SOURCES.items()}
-  for name,url in SOURCES.items():
-   raw=pending[name].result()
-   data[name]=parse_rule_source(name,raw)
-   metadata[name]={'url':url,'sha256':hashlib.sha256(raw).hexdigest(),'count':len(data[name])}
+  pending={name:pool.submit(_download_source,name,url) for name,url in SOURCES.items()}
+  return {name:pending[name].result() for name in SOURCES}
+
+@timed("rules.prepare")
+def download_rules(raw_sources=None):
+ data={};metadata={}
+ raw_sources=download_raw_rules() if raw_sources is None else raw_sources
+ require(set(raw_sources)==set(SOURCES),'Incomplete rule source bundle')
+ for name,url in SOURCES.items():
+  raw=raw_sources[name]
+  with stage('rules.parse.'+name.lower()):data[name]=parse_rule_source(name,raw)
+  metadata[name]={'url':url,'sha256':hashlib.sha256(raw).hexdigest(),'count':len(data[name])}
  require(len(data['domains'])>10000 and len(data['ips'])>8000 and len(data['privateDomains'])>30 and len(data['lanCidrs'])>0,'Incomplete rule source')
  data['ruleSources']=metadata
  write(LOCAL/'sources-candidate.json',metadata);return data
+
+@timed("rules.prefetch")
+def prefetch_rules():
+ from config_health import source_digest
+ raw=download_raw_rules();data=download_rules(raw)
+ token=uuid.uuid4().hex
+ record={'created':time.time(),'source_digest':source_digest(),
+  'operation_id':os.environ.get('CCN_OPERATION_ID',''),
+  'sources':{name:{**data['ruleSources'][name],'raw':base64.b64encode(value).decode('ascii')} for name,value in raw.items()}}
+ write(LOCAL/'rule-preparations'/(token+'.json'),record)
+ return {'rules_bundle':token}
+
+def consume_rules(token):
+ from config_health import source_digest
+ require(isinstance(token,str) and re.fullmatch('[a-f0-9]{32}',token),'Invalid rule preparation token')
+ path=LOCAL/'rule-preparations'/(token+'.json')
+ require(path.resolve().parent==(LOCAL/'rule-preparations').resolve() and not path.is_symlink(),'Invalid rule preparation path')
+ try:
+  require(path.stat().st_size<=24_000_000,'Oversized rule preparation')
+  record=json.loads(path.read_text(encoding='utf-8'))
+  require(0<=time.time()-record['created']<=900,'Rule preparation expired; retry configuration')
+  require(record['source_digest']==source_digest(),'Generator changed during preparation')
+  require(record['operation_id']==os.environ.get('CCN_OPERATION_ID',''),'Rule preparation belongs to another operation')
+  require(set(record['sources'])==set(SOURCES),'Incomplete rule preparation')
+  raw={}
+  for name,url in SOURCES.items():
+   entry=record['sources'][name];value=base64.b64decode(entry['raw'],validate=True)
+   require(entry['url']==url and hashlib.sha256(value).hexdigest()==entry['sha256'],'Rule preparation integrity failure')
+   raw[name]=value
+  return download_rules(raw)
+ finally:path.unlink(missing_ok=True)
+
 def api(root,method,path,body=None):
  config=load(root/'clash-verge.yaml');pipes=[n for n in os.listdir('//./pipe/') if n.startswith('verge-mihomo-')]
  require(len(pipes)==1,'Cannot identify a unique Mihomo control pipe')
@@ -178,7 +228,8 @@ def api(root,method,path,body=None):
    decoded+=value[:size];value=value[size+2:]
   value=decoded
  return json.loads(value) if value else None
-def build(root,item,node,data=None):
+@timed("config.build")
+def build(root,item,node,data=None,*,runtime=None,profiles=None):
  original=load(safe_file(root,'profiles/'+item['file']));config=copy.deepcopy(original)
  effective=load(root/'clash-verge.yaml')
  for key in ('mixed-port','port','socks-port','allow-lan','log-level','external-controller','external-controller-pipe','secret','find-process-mode','profile'):
@@ -229,25 +280,27 @@ def build(root,item,node,data=None):
  data['lan']=list(dict.fromkeys(data['lan']))
  write(LOCAL/'lan-audit.json',{'source_profiles_changed':False,'changes':lan_audit})
  scriptid=item.get('option',{}).get('script')
- entry=next((x for x in load(root/'profiles.yaml')['items'] if x['uid']==scriptid),None)
+ entry=next((x for x in (profiles if profiles is not None else load(root/'profiles.yaml'))['items'] if x['uid']==scriptid),None)
  previous=safe_file(root,'profiles/'+entry['file']).read_text(encoding='utf-8') if entry else 'function main(config) { return config; }'
  # Do not nest this project's wrapper on repeated applications.
  if '// PORTABLE-CLAUDE-NETWORK-V1' in previous:previous,_=strip_project_wrapper(previous)
  secure=(PROJECT/'assets/secure-main.js').read_text(encoding='utf-8')
  secure=secure.replace("  delete config['prepend-rules'];", "  Object.assign(config['rule-providers'],data.lanProviderOverrides);\n  delete config['prepend-rules'];")
  wrapper=previous+'\n// PORTABLE-CLAUDE-NETWORK-V1\n'+secure+'\n;(()=>{ const before=main; const data='+json.dumps(data,ensure_ascii=False,separators=(',',':'))+'; main=function(config){return secureMain(before(config),data,'+json.dumps(node)+','+json.dumps(GROUP)+');};})();\n'
- path=LOCAL/'candidate.js';path.write_text(wrapper,encoding='utf-8');nodebin,core=executables()
+ path=LOCAL/'candidate.js';path.write_text(wrapper,encoding='utf-8');nodebin,core=runtime if runtime is not None else executables()
  runner="const fs=require('fs'),vm=require('vm');vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>process.stdout.write(JSON.stringify(main(JSON.parse(s)))));"
- result=subprocess.run([nodebin,'-e',runner,str(path)],input=json.dumps(config),capture_output=True,text=True,encoding='utf-8',timeout=30)
- require(result.returncode==0,'Existing or generated enhancement script failed; no changes published')
+ with stage('config.enhancement'):
+  result=subprocess.run([nodebin,'-e',runner,str(path)],input=json.dumps(config),capture_output=True,text=True,encoding='utf-8',timeout=30)
+  require(result.returncode==0,'Existing or generated enhancement script failed; no changes published')
  candidate=json.loads(result.stdout);validate(candidate,original,node)
- text=yaml.safe_dump(candidate,allow_unicode=True,sort_keys=False);check=LOCAL/'candidate.yaml';check.write_text(text,encoding='utf-8')
+ text=yaml_dumps(candidate,allow_unicode=True,sort_keys=False);check=LOCAL/'candidate.yaml';check.write_text(text,encoding='utf-8')
  require(all((root/name).is_file() for name in ('geosite.dat','geoip.dat')),'缺少本机 geosite.dat 或 geoip.dat；请先在 Clash 中准备规则库，未发布配置')
- result=subprocess.run([core,'-t','-d',str(root),'-f',str(check)],capture_output=True,timeout=45)
- # Keep native diagnostics local: they may include subscription or node details.
- (LOCAL/'candidate-validation.stdout.log').write_bytes(result.stdout)
- (LOCAL/'candidate-validation.stderr.log').write_bytes(result.stderr)
- require(result.returncode==0,'Mihomo validation failed; see .local/candidate-validation.stdout.log and .local/candidate-validation.stderr.log')
+ with stage('config.core_validation'):
+  result=subprocess.run([core,'-t','-d',str(root),'-f',str(check)],capture_output=True,timeout=45)
+  # Keep native diagnostics local: they may include subscription or node details.
+  (LOCAL/'candidate-validation.stdout.log').write_bytes(result.stdout)
+  (LOCAL/'candidate-validation.stderr.log').write_bytes(result.stderr)
+  require(result.returncode==0,'Mihomo validation failed; see .local/candidate-validation.stdout.log and .local/candidate-validation.stderr.log')
  return wrapper,text,candidate,entry
 def validate(config,original,node):
  require(config['proxies']==original['proxies'],'Node definitions changed')
@@ -316,6 +369,7 @@ def already_configured(root):
    if 'PORTABLE-CLAUDE-NETWORK-V1' in candidate.read_text(encoding='utf-8',errors='ignore'):return True
   except OSError:pass
  return False
+@timed("snapshot.backup")
 def backup(root,path=None,allow_configured=False):
  path=path or snapshot_dir(create=True);manifest=path/'manifest.json'
  if manifest.exists():
@@ -341,6 +395,7 @@ def backup(root,path=None,allow_configured=False):
 def user_sid():
  value=subprocess.check_output(['whoami','/user','/fo','csv','/nh'],text=True)
  return re.search(r'S-1-\d+(?:-\d+)+',value).group(0)
+@timed("snapshot.seal")
 def seal():
  path=snapshot_dir();manifest=path/'manifest.json';state=json.loads(manifest.read_text(encoding='utf-8'))
  backup(Path(state['client_root']),path);extras=state.setdefault('extra_sha256',{})
@@ -352,17 +407,40 @@ def seal():
   require(file.name not in extras or extras[file.name]==digest,'Previously sealed system snapshot changed')
   extras[file.name]=digest
  write(manifest,state);return {'system_backup_sealed':True}
-def prepare(root,node,subscription,region):
- item=select(root,node,subscription)
- path=snapshot_dir(create=True);backup(root,path);wrapper,text,candidate,entry=build(root,item,node)
+def preparation_inputs(root,item,profiles):
+ names=['profiles.yaml','clash-verge.yaml','profiles/'+item['file']]
+ scriptid=item.get('option',{}).get('script')
+ entry=next((x for x in profiles['items'] if x['uid']==scriptid),None)
+ if entry:names.append('profiles/'+entry['file'])
+ original=load(safe_file(root,'profiles/'+item['file'])) or {}
+ for rule in original.get('rules',[]):
+  fields=rule.split(',')
+  if len(fields)<3 or fields[0]!='RULE-SET' or fields[2]!='DIRECT' or not re.search('private|localarea|lancidr|lan$',fields[1],re.I):continue
+  provider=original.get('rule-providers',{}).get(fields[1],{})
+  if provider.get('payload') is None and provider.get('path'):names.append(provider['path'])
+ return {name:hashlib.sha256(safe_file(root,name).read_bytes()).hexdigest() for name in dict.fromkeys(names)}
+
+def assert_preparation_inputs(root,inputs):
+ require(all(hashlib.sha256(safe_file(root,name).read_bytes()).hexdigest()==digest for name,digest in inputs.items()),
+         'Client configuration changed during preparation; retry without publishing')
+
+@timed("client.prepare")
+def prepare(root,node,subscription,region,rules_bundle=None):
+ data=consume_rules(rules_bundle) if rules_bundle else None
+ index_bytes=(root/'profiles.yaml').read_bytes();profiles=yaml_loads(index_bytes);item=select(root,node,subscription,profiles)
+ inputs=preparation_inputs(root,item,profiles)
+ inputs['profiles.yaml']=hashlib.sha256(index_bytes).hexdigest()
+ runtime=executables()
+ path=snapshot_dir(create=True);backup(root,path);wrapper,text,candidate,entry=build(root,item,node,data,runtime=runtime,profiles=profiles)
+ assert_preparation_inputs(root,inputs)
  pin_baseline(LOCAL,default_snapshot(LOCAL) or path)
  # Never overwrite an existing user script. Reuse only our own generated wrapper.
  owned=entry and str(entry['uid']).startswith('PortableClaude') and 'PORTABLE-CLAUDE-NETWORK-V1' in safe_file(root,'profiles/'+entry['file']).read_text(encoding='utf-8')
  uid=entry['uid'] if owned else 'PortableClaude'+uuid.uuid4().hex[:12]
  file=entry['file'] if owned else uid+'.js'
  from config_health import source_digest
- plan={'source_digest':source_digest(),'root':str(root),'node':node,'subscription_uid':item['uid'],'script_uid':uid,'script_file':file,
-  'script_existed':bool(owned),'region':region,'core_program':actual_core(),'snapshot':str(path),'generated_files':['profiles/'+file]}
+ plan={'source_digest':source_digest(),'input_sha256':inputs,'root':str(root),'node':node,'subscription_uid':item['uid'],'script_uid':uid,'script_file':file,
+  'script_existed':bool(owned),'region':region,'core_program':runtime[1],'snapshot':str(path),'generated_files':['profiles/'+file]}
  if (LOCAL/'plan.json').exists():
   earlier=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'))
   require(Path(earlier['root']).resolve()==root.resolve(),'Previous plan targets another client directory')
@@ -372,6 +450,7 @@ def prepare(root,node,subscription,region):
 def is_file_safe(path):
  try:return path.is_file()
  except OSError:return False
+@timed("client.core_discovery")
 def actual_core():
  command="Get-CimInstance Win32_Process | Where-Object {$_.Name -eq 'verge-mihomo.exe'} | Select-Object -ExpandProperty ExecutablePath"
  try:
@@ -388,8 +467,13 @@ def actual_core():
  require(len(candidates)==1,'Cannot identify unique actual core executable for firewall rule')
  print('core path not verifiable without elevation; using single install: '+str(candidates[0]),file=sys.stderr)
  return str(candidates[0])
+@timed("client.publish")
 def apply_client():
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root']);backup(root,Path(plan['snapshot']) if plan.get('snapshot') else None)
+ if plan.get('input_sha256'):
+  from config_health import source_digest
+  require(plan['source_digest']==source_digest(),'Generator changed after preparation; retry without publishing')
+  assert_preparation_inputs(root,plan['input_sha256'])
  text=(LOCAL/'candidate.yaml').read_text(encoding='utf-8');current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
  profiles=load(root/'profiles.yaml');item=next(x for x in profiles['items'] if x['uid']==plan['subscription_uid'])
  journal_path=(Path(plan['snapshot']) if plan.get('snapshot') else snapshot_dir())/'client-changes.json'
@@ -400,10 +484,10 @@ def apply_client():
  write(journal_path,journal) # Commit recovery metadata before changing any association.
  if not plan['script_existed']:profiles['items'].append({'uid':plan['script_uid'],'type':'script','file':plan['script_file'],'desc':'Portable Claude network enhancement','updated':int(__import__('time').time())})
  item.setdefault('option',{})['script']=plan['script_uid'];profiles['current']=item['uid']
- targets={root/'profiles.yaml':yaml.safe_dump(profiles,allow_unicode=True,sort_keys=False),
+ targets={root/'profiles.yaml':yaml_dumps(profiles,allow_unicode=True,sort_keys=False),
   safe_file(root,'profiles/'+plan['script_file']):(LOCAL/'candidate.js').read_text(encoding='utf-8'),root/'clash-verge.yaml':text}
- for filename,updates in [('verge.yaml',{'enable_tun_mode':True,'enable_system_proxy':False,'enable_dns_settings':False}),('config.yaml',{'mode':'rule','ipv6':False,'tun':yaml.safe_load(text)['tun']})]:
-  value=load(root/filename) or {};value.update(updates);targets[root/filename]=yaml.safe_dump(value,allow_unicode=True,sort_keys=False)
+ for filename,updates in [('verge.yaml',{'enable_tun_mode':True,'enable_system_proxy':False,'enable_dns_settings':False}),('config.yaml',{'mode':'rule','ipv6':False,'tun':yaml_loads(text)['tun']})]:
+  value=load(root/filename) or {};value.update(updates);targets[root/filename]=yaml_dumps(value,allow_unicode=True,sort_keys=False)
  old={p:p.read_bytes() if p.exists() else None for p in targets}
  try:
   api(root,'PUT','/configs?force=true',{'payload':text})
@@ -527,7 +611,7 @@ def client_restore_targets(root,original,plan,journal):
   if not any(p.get('name')==node for p in source.get('proxies',[])):
    raise ValueError('Snapshot project node is absent from the current subscription; no replacement selected')
  if 'items' in profiles:profiles['items']=[x for x in items if x['uid'] not in owned]
- targets[root/'profiles.yaml']=yaml.safe_dump(profiles,allow_unicode=True,sort_keys=False)
+ targets[root/'profiles.yaml']=yaml_dumps(profiles,allow_unicode=True,sort_keys=False)
  for name,keys in [('verge.yaml',('enable_tun_mode','enable_system_proxy','enable_dns_settings')),
                    ('config.yaml',('mode','ipv6','tun'))]:
   if not (original/name).is_file():continue
@@ -536,7 +620,7 @@ def client_restore_targets(root,original,plan,journal):
   for key in keys:
    if key in saved:current[key]=copy.deepcopy(saved[key])
    else:current.pop(key,None)
-  targets[root/name]=yaml.safe_dump(current,allow_unicode=True,sort_keys=False)
+  targets[root/name]=yaml_dumps(current,allow_unicode=True,sort_keys=False)
  return targets,remove,profiles
 
 def restore_client():
@@ -583,7 +667,7 @@ def restore_client():
 
 def restored_runtime_ready(root,report):
  current=restore_yaml(root/'profiles.yaml') or {}
- raw=(root/'clash-verge.yaml').read_bytes();text=raw.decode('utf-8-sig');effective=yaml.safe_load(text) or {}
+ raw=(root/'clash-verge.yaml').read_bytes();text=raw.decode('utf-8-sig');effective=yaml_loads(text) or {}
  if not isinstance(current,dict) or not isinstance(effective,dict):raise ValueError('Invalid generated configuration')
  if current.get('current')!=report['active_uid']:return None
  project_node=report.get('project_node')
@@ -650,11 +734,15 @@ def create_snapshot(root=None,node=None):
 
 if __name__=='__main__':
  try:
-  parser=argparse.ArgumentParser();parser.add_argument('action',choices=['discover','prepare','seal','apply-client','restore-client','finish-restore','create-snapshot'])
-  parser.add_argument('--root');parser.add_argument('--node');parser.add_argument('--subscription');parser.add_argument('--region',default='SG');args=parser.parse_args()
+  parser=argparse.ArgumentParser();parser.add_argument('action',choices=['discover','prefetch-rules','prepare','seal','apply-client','restore-client','finish-restore','create-snapshot'])
+  parser.add_argument('--rules-bundle');parser.add_argument('--root');parser.add_argument('--node');parser.add_argument('--subscription');parser.add_argument('--region',default='SG');args=parser.parse_args()
+  if not re.fullmatch('[a-f0-9]{32}',os.environ.get('CCN_OPERATION_ID','')):
+   os.environ['CCN_OPERATION_ID']=uuid.uuid4().hex
+   os.environ['CCN_OPERATION_ACTION']={'discover':'discover','restore-client':'restore','finish-restore':'restore','create-snapshot':'snapshot'}.get(args.action,'apply')
   if args.action=='discover':result=discover(root_path(args.root))
+  elif args.action=='prefetch-rules':result=prefetch_rules()
   elif args.action=='prepare':
-   require(args.node,'Exact node name is required');result=prepare(root_path(args.root),args.node,args.subscription,args.region)
+   require(args.node,'Exact node name is required');result=prepare(root_path(args.root),args.node,args.subscription,args.region,args.rules_bundle)
   elif args.action=='seal':result=seal()
   elif args.action=='create-snapshot':result=create_snapshot(args.root,args.node)
   elif args.action=='apply-client':result=apply_client()

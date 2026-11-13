@@ -9,7 +9,7 @@ GROUP = 'Claude-Overseas-Pinned'
 
 def source_digest(project=PROJECT):
     digest = hashlib.sha256()
-    for name in ('assets/secure-main.js', 'assets/claude-policy.json', 'scripts/client.py'):
+    for name in ('assets/secure-main.js', 'assets/claude-policy.json', 'scripts/client.py', 'scripts/safe_yaml.py'):
         digest.update((project / name).read_bytes())
     return digest.hexdigest()
 
@@ -34,7 +34,16 @@ def inspect(config, current, plan):
                                ('已保存区域格式', 'culture', region['culture']),
                                ('系统时区', 'timezone', region['timezone_id'])]:
         add(title, current.get(key), target, '补充配置')
-    return dict(checks=rows, success=all(r['status'] == 'passed' for r in rows),
+    failed = [row for row in rows if row['status'] == 'failed']
+    if any(row['status'] == 'unknown' for row in rows):
+        recommendation = dict(action='inspect', reason='本地状态尚未读全，请刷新后选择操作。')
+    elif any(row['action'] == '重新配置' for row in failed):
+        recommendation = dict(action='apply', reason='规则、配置版本或全局设置不一致，请重新配置；无需先恢复最早状态。')
+    elif failed:
+        recommendation = dict(action='supplement', reason='当前检测到的差异仅涉及可补充的系统设置，建议补充配置。')
+    else:
+        recommendation = dict(action='none', reason='已检查的本地项目一致，无需重复完整配置；只需刷新分流名单时使用规则更新。')
+    return dict(checks=rows, success=all(r['status'] == 'passed' for r in rows), recommendation=recommendation,
                 scope='本地配置文件和系统状态；不代表内核已加载或网络实测通过',
                 live_routing='未验证')
 

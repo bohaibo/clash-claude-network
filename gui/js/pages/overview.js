@@ -455,8 +455,7 @@ async function quickReapply(ctx) {
   const ok = await ctx.confirm({
     title: '按当前记录重新配置？',
     subtitle: plan.node + ' · 出口 ' + (plan.region || 'SG'),
-    description: '沿用上次配置记录的精确节点、订阅和出口地区；如果该节点已从当前订阅消失，配置会在写入前停止。',
-    description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，不自动运行联网检查或故障演练；外部指纹浏览器自行管理。',
+    description: '沿用上次记录的精确节点、订阅和地区，生成校验后重新应用配置，不先恢复最早状态。节点不存在时停止；只更新名单请去规则更新，新增网卡或地区设置偏差请使用补充配置。不自动运行联网检查或故障演练。',
     items: IMPACT,
     confirmText: '重新配置',
     requireCheck: '我已了解重新配置会关闭 Clash 并短暂中断网络。',

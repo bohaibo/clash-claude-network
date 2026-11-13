@@ -10,6 +10,21 @@ $env:PYTHONIOENCODING='utf-8'
 try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;[Console]::ForegroundColor=[ConsoleColor]::White}catch{}
 $project=Split-Path -Parent $PSScriptRoot
 $local=Join-Path $project '.local';New-Item -Path $local -ItemType Directory -Force | Out-Null
+$env:CCN_OPERATION_ID=[Guid]::NewGuid().ToString('N')
+$env:CCN_OPERATION_ACTION=$Action
+$script:stepClock=$null
+function Complete-StepTiming([string]$Status){
+ if(!$script:stepClock){return}
+ $script:stepClock.Stop()
+ try{
+  $timing=[ordered]@{stage=('step.'+$script:stepNo);action=$Action;status=$Status;elapsed_ms=[Math]::Round($script:stepClock.Elapsed.TotalMilliseconds,3)}
+  $timingDir=Join-Path $local 'performance'
+  [void][IO.Directory]::CreateDirectory($timingDir)
+  $timingPath=Join-Path $timingDir ($env:CCN_OPERATION_ID+'.'+$PID+'.steps.jsonl')
+  [IO.File]::AppendAllText($timingPath,(($timing | ConvertTo-Json -Compress)+"`n"),[Text.UTF8Encoding]::new($false))
+  Write-GuiEvent 'timing' $timing
+ }catch{}finally{$script:stepClock=$null}
+}
 # ---- GUI 事件流 ---------------------------------------------------------
 # 提权后的进程无法把标准输出交回非管理员的界面进程，所以界面通过这个
 # JSONL 文件接收进度。事件只包含动作、步骤和错误，不含订阅内容或凭据。
@@ -116,6 +131,8 @@ $stepTitles=@()
 $stepNo=0
 function Set-StepPlan([string[]]$titles){$script:stepTitles=@($titles);$script:stepNo=0}
 function Write-Step([string]$note){
+ Complete-StepTiming 'passed'
+ $script:stepClock=[Diagnostics.Stopwatch]::StartNew()
  $script:stepNo++
  $n=$script:stepNo
  $list=@($script:stepTitles)
@@ -130,6 +147,7 @@ function Write-Step([string]$note){
  Write-GuiEvent 'step' ([ordered]@{index=$n;total=$total;title=$title;note=$note})
 }
 function Write-Done([string]$text){
+ Complete-StepTiming 'passed'
  Write-Host ''
  Write-Host ('  ['+('='*20)+']  '+$text) -ForegroundColor Green
  Write-GuiEvent 'done' ([ordered]@{message=$text})
@@ -369,9 +387,11 @@ if($Action -eq 'supplement'){
  }catch{
   $result.error=$_.Exception.Message
   $_ | Format-List * -Force | Out-String | Set-Content -LiteralPath (Join-Path $local 'last-error.log') -Encoding UTF8
+  Complete-StepTiming 'failed'
   Write-Host ('补充配置未完成：'+$result.error) -ForegroundColor Red
   Write-Host '错误保存在 .local/last-error.log；如有未恢复的改动，可在「快照与恢复」中恢复到关联快照。'
  }finally{
+  if($script:stepClock){Complete-StepTiming 'cancelled'}
   $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
  }
  $operationStream.Dispose()
@@ -409,7 +429,7 @@ $clashProgram=@(Get-Process clash-verge -ErrorAction SilentlyContinue | Select-O
 $result=[ordered]@{success=$false;action=$Action}
 # 先按本次实际会跑的分支确定步骤总数，进度条才能显示「第几步/共几步」。
 if($Action -eq 'apply'){
- $plan=@('检查运行环境','选择节点','生成候选配置与备份','备份系统状态','封存快照','写入 Clash 客户端配置','启动防火墙看门狗','应用系统设置','确认配置写入','配置规则更新方式')
+ $plan=@('检查运行环境','选择节点','准备分流规则','生成候选配置与备份','备份系统状态','封存快照','写入 Clash 客户端配置','启动防火墙看门狗','应用系统设置','确认配置写入','配置规则更新方式')
 } else {
  $plan=@('校验快照','移除规则更新任务','还原系统设置','还原 Clash 客户端')
 }
@@ -484,10 +504,15 @@ try {
  elseif(Get-Command node.exe -ErrorAction SilentlyContinue){$env:CCN_NODE=(Get-Command node.exe).Source}
  else{throw '未找到项目内 Node.js。请重新运行「一键网络.cmd」修复 .runtime；未关闭应用或写入配置。'}
 }
-  Write-Step '关闭 Clash Verge，生成候选配置并用内核自带的检查验证能加载'
+  Write-Step '先下载并严格校验四份规则；失败时不关闭 Clash 客户端'
+  $rulePreparation=& $python (Join-Path $PSScriptRoot 'client.py') prefetch-rules
+  if($LASTEXITCODE -ne 0){throw '规则准备失败，未关闭 Clash 或写入配置；详情见 .local/client-error.log。'}
+  $rulesBundle=[string](($rulePreparation | Select-Object -Last 1 | ConvertFrom-Json).rules_bundle)
+  if($rulesBundle -notmatch '^[a-f0-9]{32}$'){throw '规则准备记录无效，未关闭 Clash 或写入配置。'}
+  Write-Step '关闭 Clash Verge，重新读取当前订阅，生成候选配置并用内核自带的检查验证能加载'
   $clientSessionTouched=$true
   Stop-ClashClient
-  $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region)
+  $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region,'--rules-bundle',$rulesBundle)
   if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
   $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw '候选配置/备份生成失败，未改动任何系统设置。规则下载或内核检查详情见 .local/client-error.log。'}
   $planState=($prepared | Select-Object -Last 1) | ConvertFrom-Json
@@ -623,7 +648,8 @@ try {
  Write-Host '  IPv6 和语言改动要重启 Windows 才完全生效。网络测试不能证明 Claude 账号本身可用。'
 } catch {
  $runError=$_
- $result.error=$_.Exception.Message
+ Complete-StepTiming 'failed'
+ $result.error=$runError.Exception.Message
  $result.failedStep=$script:stepNo
  Write-GuiEvent 'error' ([ordered]@{message=$runError.Exception.Message;step=$script:stepNo;total=@($script:stepTitles).Count})
  $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
@@ -656,6 +682,10 @@ try {
   Write-Host '恢复没有完成，可能只还原了一部分。可以直接再执行一次「恢复」。'
  }
 } finally {
+ if($script:stepClock){Complete-StepTiming 'cancelled'}
+ if($rulesBundle -match '^[a-f0-9]{32}$'){
+  Remove-Item -LiteralPath (Join-Path $local ('rule-preparations\'+$rulesBundle+'.json')) -Force -ErrorAction SilentlyContinue
+ }
  $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
  try{
   if($clientSessionTouched){Start-ClashClient}
@@ -670,6 +700,7 @@ if(!$result.success){exit 1}
 } finally {$operationStream.Dispose()}
 } catch {
  $startupError=$_
+ Complete-StepTiming 'failed'
  Write-GuiEvent 'error' ([ordered]@{message=$startupError.Exception.Message})
  [ordered]@{success=$false;action=$Action;status='failed';error=$startupError.Exception.Message} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
  $_ | Format-List * -Force | Out-String | Set-Content -LiteralPath (Join-Path $local 'last-error.log') -Encoding UTF8

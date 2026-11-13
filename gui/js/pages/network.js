@@ -117,10 +117,19 @@ function verificationCard(ctx) {
 function actionsCard(ctx) {
   const state = ctx.state;
   const unavailable = !state.configured;
+  const collection = state.collection?.preview;
+  const recommendation = state.preview?.current?.health?.recommendation;
   return ui.card({ title: '维护与恢复', help: '这些动作会修改系统设置或短暂中断网络，执行前会再次确认。' },
+    recommendation ? ui.note(collection?.stale || collection?.refreshing
+      ? '本地状态正在刷新或已经过期，请刷新后再参考操作建议。'
+      : recommendation.reason, 'info') : null,
     ui.el('div', { class: 'action-grid' },
+      actionRow('只更新分流名单', '只下载并审核规则变化；内容和生成版本均未变化时不重载，不重新应用系统设置。',
+        ui.button('去规则更新', { variant: 'secondary', disabled: unavailable || ctx.busy, onClick: () => ctx.navigate('updates') })),
       actionRow('补充配置', '补充防火墙、IPv6、地区和常用浏览器 WebRTC 策略，累积恢复记录。不会关闭浏览器或运行网络测试。',
         ui.button('补充配置', { variant: 'secondary', icon: 'shield', disabled: unavailable || ctx.busy, onClick: () => supplement(ctx) })),
+      actionRow('更换节点、地区或重新应用配置', '在一键配置页选择精确节点和地区。沿用首次恢复点，生成并校验新配置；不先执行完整恢复。',
+        ui.button('去一键配置', { variant: 'secondary', disabled: ctx.busy, onClick: () => ctx.navigate('overview') })),
       actionRow('恢复最早状态并重新配置', '先恢复固定首次恢复点，再沿用当前精确节点完整配置。需要独立本机看护；失败或超时会尝试恢复网络。',
         ui.button('恢复并重新配置', { variant: 'danger', icon: 'alert', disabled: !state.baseline || !state.plan?.node || ctx.busy, onClick: () => reconfigure(ctx) })),
     ));
