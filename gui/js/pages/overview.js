@@ -90,9 +90,9 @@ function statusGrid(ctx) {
   const tiles = [
     {
       label: '网络配置',
-      value: !state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : awaitingVerification ? '配置完成，网络未验收' : verification.dns_failed ? 'DNS 验收失败' : verification.available && verification.success ? '历史验收通过' : '已写入',
+      value: !state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : '已配置',
       tone: !state.configured ? 'warn' : state.last_run?.success === false ? 'bad' : awaitingVerification ? 'warn' : verification.dns_failed ? 'bad' : verification.available && verification.success ? 'ok' : 'warn',
-      detail: state.configured ? ('节点 ' + (state.plan.node || '—') + (verification.available ? ' · 上次验收 ' + ui.relativeTime(verification.time) : ' · 尚未验收')) : '首次配置会先保存原始快照',
+      detail: state.configured ? ('节点 ' + (state.plan.node || '—') + (awaitingVerification ? ' · 网络未验收' : verification.available ? ' · 上次验收 ' + ui.relativeTime(verification.time) : ' · 尚未验收')) : '首次配置会先保存原始快照',
       action: state.configured ? () => ctx.navigate('network') : null,
     },
     {
@@ -193,8 +193,8 @@ function renderImpact(ctx) {
     ['Git 代理', proxyState(now.git), '关闭'],
     ['npm 代理', proxyState(now.npm), '关闭'],
     ['Docker 代理', proxyState(now.docker), '关闭'],
-    ['网站连接方式', now.routing_simple, '国内直接连接，国外使用所选节点'],
-    ['国外连接节点', '尚未核实', after(form.node)],
+    ['网站连接方式', now.routing_simple, '按规则分流'],
+    ['国外连接节点', now.fixed_node || unknown, after(form.node)],
     ['DNS 解析', now.dns_simple, '开启'],
     ['DNS 额外过滤', now.dns_filter_simple, '开启'],
     ['接管应用网络', now.tun_simple, '开启'],
@@ -215,10 +215,11 @@ function renderImpact(ctx) {
       ['DNS 防泄露', now.dns_protection, '开启', '防止域名查询绕过代理'],
       ...(now.webrtc?.browsers || ['Chrome', 'Edge', 'Firefox'].map(browser => ({ browser }))).flatMap(row => [
         [row.browser + ' WebRTC 策略', row.policy_configured === true ? '已配置' : row.policy_configured === false ? '未完整配置' : unknown,
-          row.browser === 'Firefox' ? '锁定关闭 WebRTC' : '限制非代理 UDP'],
-        ...(row.browser === 'Firefox' ? [] : [[row.browser + ' WebRTC 扩展', row.installation?.label || '尚未读取安装记录',
-          '自动安装官方扩展，已有扩展直接复用']]),
-        [row.browser + ' WebRTC 目标配置', row.configuration_state || '正在读取', '配置完成'],
+          '已配置', row.browser === 'Firefox' ? '锁定关闭 WebRTC' : '限制非代理 UDP'],
+        ...(row.browser === 'Firefox' ? [] : [[row.browser + ' WebRTC 扩展',
+          row.extension_requested || row.installation?.state === 'installed' ? '已配置' : '待配置自动安装',
+          '已配置', '静默安装，已有扩展复用。安装记录：' + (row.installation?.label || '尚未读取')]]),
+        [row.browser + ' WebRTC 配置', row.configuration_state || '正在读取', '已配置'],
       ])], 'Chrome/Edge 使用策略与扩展两层保护，配置时自动安排扩展安装；Firefox 使用原生禁用策略。'],
     ['代理设置', rows.slice(9, 15), '关闭之前分散在各处的代理设置，统一由 TUN 模式接管网络。'],
     ['网站访问', rows.slice(15)],

@@ -359,10 +359,11 @@ def protection_status(registry=None):
         if installation and requested and installation['state'] in ('missing', 'partial', 'no_profiles'):
             installation['label'] = '已安排自动安装' if installation['state'] == 'missing' else installation['label'] + '，待浏览器自动安装'
         complete = policy and (browser == 'Firefox' or installation['state'] == 'installed')
+        configured = policy and (browser == 'Firefox' or requested or complete)
         rows.append(dict(browser=browser, policy_configured=policy, extension_requested=requested,
                          installation=installation,
                          configuration_complete=complete,
-                         configuration_state='配置完成' if complete else '待应用策略' if not policy else '待完成扩展配置',
+                         configuration_state='已配置' if configured else '待应用策略' if not policy else '待配置自动安装',
                          runtime_verified=False,
                          state=('WebRTC 已锁定关闭' if policy else '禁用策略未完整配置') if browser == 'Firefox'
                          else '路径限制策略已配置' if policy

@@ -67,12 +67,10 @@ function configCard(ctx) {
     subtitle: state.configured ? '项目分流配置正在运行。' : '当前未运行项目分流配置。',
     actions: !state.configured ? ui.badge('未生效', 'warn')
       : state.last_run?.success === false ? ui.badge('上次操作未完成', 'bad')
-        : awaitingVerification ? ui.badge('配置完成 · 网络未验收', 'warn')
-        : state.verification?.dns_failed ? ui.badge('DNS 验收失败', 'bad')
-          : state.verification?.available && state.verification.success ? ui.badge('历史验收通过', 'ok')
-            : ui.badge('配置已写入', 'warn'),
+        : ui.badge('已配置', 'ok'),
   },
   ui.kv([
+    ['网络验收', awaitingVerification ? '网络未验收' : state.verification?.dns_failed ? 'DNS 验收失败' : state.verification?.available && state.verification.success ? '历史验收通过' : '尚未验收'],
     ['固定节点', plan.node || '—'],
     ['订阅', plan.subscription || '—'],
     ['出口地区', plan.region || 'SG'],

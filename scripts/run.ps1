@@ -269,7 +269,7 @@ if($Action -eq 'reconfigure'){
  if($eventsPath){$env:CCN_EVENTS_FILE=$eventsPath}
  & $python @safeArguments
  if($LASTEXITCODE -ne 0){throw '恢复并重新配置未全部完成，请检查本次本地记录；独立看护会处理网络恢复。'}
- Write-GuiEvent 'done' ([ordered]@{message='恢复并重新配置已完成；请查看本次验收记录。'})
+ Write-GuiEvent 'done' ([ordered]@{message='已恢复并重新配置；请查看本次配置记录。'})
  if(!$NoPause){Read-Host '按回车键关闭窗口'}
  return
 }
@@ -364,7 +364,7 @@ if($Action -eq 'supplement'){
   & (Join-Path $PSScriptRoot 'system.ps1') -Action supplement -Python $python -TimeZoneId $supplementRegion.timezone_id -RegionCode $supplementRegion.region -CultureName $supplementRegion.culture
   $result.success=$true
   $result.snapshot=$snapshotPath
-  Write-Done ('补充配置已完成。恢复时请在「快照与恢复」选择快照：'+(Split-Path -Leaf $snapshotPath))
+  Write-Done ('已配置。恢复时请在「快照与恢复」选择快照：'+(Split-Path -Leaf $snapshotPath))
   Write-Host '未运行网络或断网测试；外部浏览器、虚拟网络和账号行为未验证。'
  }catch{
   $result.error=$_.Exception.Message
@@ -612,7 +612,7 @@ try {
     $extensionNote=' '+($protection.installation_pending -join '、')+' 尚有标准资料未完成扩展安装。请正常重启浏览器；仍未安装时，在扩展页启用开发者模式并加载项目 .local\webrtc-addon\1.0.0。'
    }
   }catch{$extensionNote=' 扩展安装状态未确认，请查看「网络环境」的网络保护；自动安装失败时可使用项目离线包手动加载。'}
-  Write-Done ('配置写入已完成，网络未验收（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT+$extensionNote)
+  Write-Done ('已配置，网络未验收（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT+$extensionNote)
   Write-Host '  固定节点组 Claude-Overseas-Pinned 只包含你指定的节点。要撤销请在「快照与恢复」中恢复。'
   Write-Host '  配置写入已确认；未运行联网检查或故障演练。需要时请在「网络环境」点击独立检查按钮。'
 

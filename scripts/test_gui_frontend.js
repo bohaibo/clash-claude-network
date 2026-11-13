@@ -205,10 +205,45 @@ async function main() {
     network_tested: false, configuration_time: '2026-11-13T20:00:00+08:00'},
     verification: {available: true, success: true, time: '2026-11-13T19:00:00+08:00'}};
   networkContext.pageTest.configCard({state: configured});
-  assert.equal(badges.at(-1), '配置完成 · 网络未验收');
+  assert.equal(badges.at(-1), '已配置');
   configured.verification.time = '2026-11-13T21:00:00+08:00';
   networkContext.pageTest.configCard({state: configured});
-  assert.equal(badges.at(-1), '历史验收通过');
+  assert.equal(badges.at(-1), '已配置');
+  // The comparison uses matching state labels, with installation evidence in a note.
+  let impact;
+  const previewUi = new Proxy({}, {get: (_, name) => (...args) => ({name, args})});
+  const overviewContext = vm.createContext({ui: previewUi, Intl, Date,
+    host: {replaceChildren: value => { impact = value; }}});
+  const overviewSource = fs.readFileSync('gui/js/pages/overview.js', 'utf8')
+    .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
+  vm.runInContext(overviewSource + `
+    impactHost = host;
+    form.node = 'fixture-sg';
+    nodesState.data = {subscriptions: [{nodes: ['fixture-sg']}]};
+    globalThis.renderPreview = renderImpact;
+  `, overviewContext);
+  overviewContext.renderPreview({state: {preview: {current: {
+    fixed_node: 'fixture-sg', routing_simple: '按规则分流',
+    webrtc: {browsers: ['Chrome', 'Edge', 'Firefox'].map(browser => ({browser,
+      policy_configured: true, extension_requested: browser !== 'Firefox',
+      configuration_state: '已配置',
+      installation: browser === 'Firefox' ? null : {state: 'partial', label: '仅 1/3 份标准资料有安装记录'}
+    }))}
+  }}}});
+  const walk = value => Array.isArray(value) ? value.flatMap(walk) : value && typeof value === 'object'
+    ? [value, ...walk(value.args || [])] : [];
+  const comparison = walk(impact).filter(n => n.name === 'el' && n.args[0] === 'tr' && n.args[1]?.class === 'config-item');
+  const texts = n => walk(n).filter(x => x.name === 'el' && x.args[1]?.class?.startsWith('config-value ')).map(x => x.args[1].text);
+  for (const row of comparison) {
+    const label = walk(row).find(n => n.name === 'el' && n.args[0] === 'span' && n.args[1]?.text)?.args[1].text;
+    if (/WebRTC|国外连接节点|网站连接方式/.test(label)) {
+      const [current, target] = texts(row);
+      assert.ok(current, label);
+      assert.equal(current, target, label + ' must match after configuration');
+    }
+  }
+  assert.ok(walk(impact).some(n => n.args?.[1]?.text?.includes('安装记录：仅 1/3')));
+  assert.ok(!JSON.stringify(impact).includes('配置完成'));
   console.log('GUI task lifecycle offline checks passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

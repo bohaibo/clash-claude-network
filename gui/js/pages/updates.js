@@ -139,7 +139,7 @@ function statusCard(ctx, update) {
 function lastResultCard(ctx, update) {
   const last = update.last || {};
   if (!last.time) {
-    return ui.card({ title: '最近一次更新' }, ui.empty('还没有更新记录', '配置完成或点击立即更新后，这里会显示结果。'));
+    return ui.card({ title: '最近一次更新' }, ui.empty('还没有更新记录', '配置后或点击立即更新后，这里会显示结果。'));
   }
   const tone = last.skipped ? 'warn' : last.success ? 'ok' : 'bad';
   const outcome = last.skipped ? '已跳过' : !last.success ? '未完成' : last.unchanged ? '已是最新' : last.migrated ? '已切换来源' : '成功';

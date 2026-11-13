@@ -43,9 +43,9 @@ vm.runInContext(source + `
   globalThis.renderPreview = renderImpact;
 `, preview);
 preview.renderPreview({ state: { preview: { current: { webrtc: { browsers: [
-  {browser: 'Chrome', policy_configured: true, installation: {label: '已安装'}, configuration_state: '配置完成'},
-  {browser: 'Edge', policy_configured: true, installation: {label: '待加载本地扩展'}, configuration_state: '待完成扩展配置'},
-  {browser: 'Firefox', policy_configured: true, configuration_state: '配置完成'},
+  {browser: 'Chrome', policy_configured: true, installation: {state: 'installed', label: '已安装'}, configuration_state: '已配置'},
+  {browser: 'Edge', policy_configured: true, extension_requested: true, installation: {state: 'missing', label: '已安排自动安装'}, configuration_state: '已配置'},
+  {browser: 'Firefox', policy_configured: true, configuration_state: '已配置'},
 ] } } } } });
 const text = node => !node || typeof node !== 'object' ? '' : (node.props?.text || '') + (node.children || []).map(text).join('');
 const rows = [];
@@ -55,9 +55,9 @@ function collect(node) {
   (node.children || []).forEach(collect);
 }
 preview.output.forEach(collect);
-assert.ok(rows.some(row => row[0] === 'Chrome WebRTC 策略' && row[1] === '已配置'));
-assert.ok(rows.some(row => row[0] === 'Chrome WebRTC 目标配置' && row[1] === '配置完成'));
-assert.ok(rows.some(row => row[0] === 'Edge WebRTC 目标配置' && row[1] === '待完成扩展配置'));
+assert.ok(rows.some(row => row[0].startsWith('Chrome WebRTC 策略') && row[1] === '已配置' && row[2] === row[1]));
+assert.ok(rows.some(row => row[0] === 'Chrome WebRTC 配置' && row[1] === '已配置' && row[2] === row[1]));
+assert.ok(rows.some(row => row[0] === 'Edge WebRTC 配置' && row[1] === '已配置' && row[2] === row[1]));
 assert.ok(!rows.some(row => row[0] === 'Firefox WebRTC 扩展'));
 assert.doesNotMatch(preview.output.map(text).join(''), /不代表|不等于|实际阻断未验证/);
 console.log('Offline WebRTC setup preview passed');

@@ -2,6 +2,11 @@ import json, tempfile, unittest
 from pathlib import Path
 import preview_config
 class Preview(unittest.TestCase):
+ def test_fixed_node_comes_from_single_project_group_only(self):
+  from client import GROUP
+  for nodes, expected in [(['demo-sg'], 'demo-sg'), (['DIRECT'], None), (['a', 'b'], None), ([], None)]:
+   self.assertEqual(preview_config.network({'proxy-groups':[{'name':GROUP,'proxies':nodes}]})['fixed_node'],expected)
+  self.assertIsNone(preview_config.network({'proxy-groups':[{'name':'other','proxies':['demo-sg']}]})['fixed_node'])
  def test_dns_credentials_and_url_tokens_are_hidden(self):
   v=preview_config.network({'dns':{'nameserver':['https://user:secret@resolver.invalid/token?key=hidden#group']}})
   text=json.dumps(v)

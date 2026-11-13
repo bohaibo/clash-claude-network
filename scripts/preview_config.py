@@ -17,12 +17,16 @@ def resolver(value):
 
 
 def network(config):
+    from client import GROUP
+    group = next((g for g in config.get('proxy-groups', []) if g.get('name') == GROUP), {})
+    nodes = group.get('proxies') or []
     tun = config.get('tun') or {}
     dns = config.get('dns') or {}
     yes = lambda v: '开启' if v is True else '关闭' if v is False else '未显式设置'
     servers = lambda key: '、'.join(resolver(v) for v in (dns.get(key) or [])) or '未设置'
     policies = dns.get('nameserver-policy') or {}
     return {
+        'fixed_node': nodes[0] if len(nodes) == 1 and nodes[0] not in ('DIRECT', 'REJECT') else None,
         'routing_simple': {'rule': '按规则分流', 'global': '全部通过代理', 'direct': '全部直接连接'}.get(config.get('mode'), '未能确认'),
         'dns_simple': yes(dns.get('enable')),
         'dns_protection': '开启' if (dns.get('enable') is True and dns.get('ipv6') is False and dns.get('enhanced-mode') == 'fake-ip' and tun.get('enable') is True and tun.get('strict-route') is True and {'any:53', 'tcp://any:53'}.issubset(set(tun.get('dns-hijack') or []))) else '未完整开启',
