@@ -86,12 +86,16 @@ class WebRtcPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):rtc.restore(state,self.registry)
         self.assertEqual(self.registry.values,{})
 
-    def sealed_protection(self, legacy=False):
+    def sealed_protection(self, legacy=False, offline=False):
         self.snapshot()
         extensions = rtc.snapshot_extensions(self.path,self.registry)
         if legacy:
             extensions['version'] = 1
             extensions.pop('read_only', None)
+            (self.path / rtc.EXTENSION_RECORD).write_text(json.dumps(extensions), encoding='utf-8')
+        if offline:
+            extensions['version'] = 2
+            extensions['read_only'] = True
             (self.path / rtc.EXTENSION_RECORD).write_text(json.dumps(extensions), encoding='utf-8')
         hashes={name:hashlib.sha256((self.path/name).read_bytes()).hexdigest()
                 for name in (rtc.RECORD,rtc.EXTENSION_RECORD)}
@@ -106,8 +110,8 @@ class WebRtcPolicyTests(unittest.TestCase):
         self.assertEqual(state['entries'][0]['name'],'2')
         before=copy.deepcopy(self.registry.values)
         rtc.apply_protection(self.path,self.registry)
-        self.assertFalse(rtc.protection_status(self.registry)['browsers'][0]['extension_requested'])
-        self.assertEqual(self.registry.list_values(path), {'1': unrelated})
+        self.assertTrue(rtc.protection_status(self.registry)['browsers'][0]['extension_requested'])
+        self.assertEqual(self.registry.read(path,'2')['value'],rtc.EXTENSIONS[0][2])
         self.assertEqual(self.registry.read(path,'1'),unrelated)
         later={'exists':True,'kind':1,'value':'b'*32}
         self.registry.write(path,'3',later)
@@ -152,7 +156,7 @@ class WebRtcPolicyTests(unittest.TestCase):
         status=rtc.protection_status(self.registry)
         self.assertFalse(status['runtime_verified'])
         self.assertTrue(all(row['policy_configured'] for row in status['browsers']))
-        self.assertTrue(all(not row['extension_requested'] for row in status['browsers'][:2]))
+        self.assertTrue(all(row['extension_requested'] for row in status['browsers'][:2]))
         self.assertTrue(all(not row['runtime_verified'] for row in status['browsers']))
 
     def test_installation_requires_registration_and_files_in_each_profile(self):
@@ -197,14 +201,49 @@ class WebRtcPolicyTests(unittest.TestCase):
         self.assertEqual(before, self.registry.values)
 
     def test_offline_restore_never_owns_unused_force_install_slot(self):
-        state = self.sealed_protection()
+        state = self.sealed_protection(offline=True)
         self.assertEqual(state['version'], 2)
         entry = state['entries'][0]
         later = {'exists': True, 'kind': 1, 'value': 'd' * 32}
         self.registry.write(entry['path'], entry['name'], later)
-        rtc.apply_protection(self.path, self.registry)
         rtc.restore_extensions(state, self.registry)
         self.assertEqual(self.registry.read(entry['path'], entry['name']), later)
+
+    def test_offline_baseline_migration_preserves_original_and_later_addons(self):
+        original = self.sealed_protection(offline=True)
+        before = (self.path / rtc.EXTENSION_RECORD).read_bytes()
+        entry = original['entries'][0]
+        later = {'exists': True, 'kind': 1, 'value': 'e' * 32}
+        self.registry.write(entry['path'], entry['name'], later)
+        rtc.snapshot_extension_installation(self.path, self.registry)
+        manifest = json.loads((self.path/'manifest.json').read_text())
+        manifest['extra_sha256'][rtc.AUTO_EXTENSION_RECORD] = hashlib.sha256((self.path/rtc.AUTO_EXTENSION_RECORD).read_bytes()).hexdigest()
+        (self.path/'manifest.json').write_text(json.dumps(manifest))
+        self.assertEqual((self.path/rtc.EXTENSION_RECORD).read_bytes(), before)
+        auto = rtc.load_installation_sealed(self.path)
+        self.assertEqual(auto['entries'][0]['name'], '2')
+        rtc.apply_protection(self.path, self.registry)
+        self.assertTrue(all(row['extension_requested'] for row in rtc.protection_status(self.registry)['browsers'][:2]))
+        rtc.restore_extensions(auto, self.registry)
+        self.assertEqual(self.registry.read(entry['path'],entry['name']),later)
+        self.assertFalse(self.registry.read(entry['path'],'2')['exists'])
+        self.assertEqual((self.path/rtc.EXTENSION_RECORD).read_bytes(),before)
+
+    def test_unmigrated_offline_baseline_stops_before_any_policy_write(self):
+        self.sealed_protection(offline=True)
+        with self.assertRaises(ValueError):
+            rtc.apply_protection(self.path, self.registry)
+        self.assertEqual(self.registry.values,{})
+
+    def test_missing_sealed_automatic_migration_record_is_rejected(self):
+        self.sealed_protection(offline=True)
+        rtc.snapshot_extension_installation(self.path,self.registry)
+        manifest=json.loads((self.path/'manifest.json').read_text())
+        manifest['extra_sha256'][rtc.AUTO_EXTENSION_RECORD]=hashlib.sha256((self.path/rtc.AUTO_EXTENSION_RECORD).read_bytes()).hexdigest()
+        (self.path/'manifest.json').write_text(json.dumps(manifest))
+        (self.path/rtc.AUTO_EXTENSION_RECORD).unlink()
+        with self.assertRaises(ValueError):rtc.load_installation_sealed(self.path)
+        with self.assertRaises(ValueError):rtc.snapshot_extension_installation(self.path,self.registry)
 
     def test_configuration_complete_requires_both_layers_for_chromium(self):
         self.sealed_protection()

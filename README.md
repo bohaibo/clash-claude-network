@@ -97,17 +97,19 @@ Windows「设置 → 时间和语言 → 语言和区域 → 区域格式」也�
 
 本软件不再提供内置浏览器、指纹配置、环境检测页、语言同步或默认浏览器注册。请自行安装和管理浏览器。管理界面仍通过本机已有的 Edge/Chrome 显示，只允许打开本机管理地址。
 
-配置和补充配置会管理标准 Chrome、Edge、Firefox 的 WebRTC 策略：Firefox 锁定 `media.peerconnection.enabled=false`；Chrome/Edge 设置 `disable_non_proxied_udp`，并直接准备项目自带的“本地 WebRTC 保护”离线扩展，不新增商店下载请求。不修改默认浏览器资料，不启动浏览器，不管理外部指纹浏览器。
+配置和补充配置会管理标准 Chrome、Edge、Firefox 的 WebRTC 策略：Firefox 锁定 `media.peerconnection.enabled=false`；Chrome/Edge 设置 `disable_non_proxied_udp`，并自动设置各自官方商店的 WebRTC Control 强制安装策略，已有商店扩展直接复用；同时准备项目自带离线扩展作为备用。不修改默认浏览器资料，不启动浏览器，不管理外部指纹浏览器。
 
 离线扩展完整文件存放在仓库的 `assets/webrtc-addon/`，随 Git 提交和安装包一起提供。新机器克隆或拉取最新项目即可取得，不需要从扩展商店另行下载。使用项目 MIT 许可，不是商店版 WebRTC Control。配置直接读取这些项目文件，先核对 `bundle.json` 内的文件摘要，再准备到 `.local/webrtc-addon/1.0.0`；后续配置直接复用，文件被改动时停止，避免覆盖用户修改。扩展无下载地址、远程代码、统计或账号功能。
 
-普通非域管理 Windows 的 Chrome/Edge 不支持从本地文件静默安装进现有资料。首次在 `chrome://extensions` 或 `edge://extensions` 启用开发者模式，点击“加载已解压的扩展”，选择网络环境页显示的目录；每份标准资料加载一次，后续直接复用。加载后刷新已有网页。不要删除或移动该目录。已有商店版及历史强制安装策略保持原状，避免自动卸载；浏览器自身可能继续安装或更新商店版，项目配置不再新增相关请求。Firefox 不需要扩展。
+一键配置自动安排从各自官方商店安装 WebRTC Control，无需手动添加。浏览器运行时自动执行，关闭时在下次正常启动后执行。Chrome ID 为 `fjkmabmdepjfammlpliljpnbhleegehm`，Edge ID 为 `eepeadgljpkkjpbfecfkijnnliikglpl`。
+
+离线备用方式：普通非域管理 Windows 的 Chrome/Edge 不支持从本地文件静默安装进现有资料。需要使用备用包时，在 `chrome://extensions` 或 `edge://extensions` 启用开发者模式，点击“加载已解压的扩展”，选择网络环境页显示的目录；每份标准资料加载一次，后续直接复用。加载后刷新已有网页。不要删除或移动该目录。已有商店版及历史强制安装策略保持原状，避免自动卸载；浏览器会自动安装和更新商店版。Firefox 不需要扩展。
 
 “网络保护”展示策略、扩展和目标配置结果：Chrome/Edge 的策略齐全，且标准资料均有未被禁用的扩展文件和注册记录时，显示“配置完成”；Firefox 禁用策略齐全时显示“配置完成”。缺项显示待完成的操作。内部报告仍分别记录配置证据及运行测试状态。
 
 离线扩展通过 MAIN world 的 document_start 脚本阻止网页创建 RTCPeerConnection，并补充非代理 UDP 限制。隐私窗口须另行允许；浏览器内部页、受限页、扩展页及 Worker 等环境不保证覆盖，实际浏览器行为未验证。网页语音、视频及点对点连接可能受影响。
 
-改动前记录 `webrtc-policies.json` 和 `webrtc-extensions.json` 并封存到关联快照；旧基线只补存新增记录，不覆盖原系统基线。恢复还原受管策略及旧版管理的扩展条目，保留其他扩展条目后续变化；撤销旧强制安装条目可能触发浏览器卸载商店版。手动加载的离线扩展由用户在扩展页移除，本地目录保留。旧快照没有相关记录时保留当前设置。
+改动前记录 `webrtc-policies.json` 和 `webrtc-extensions.json` 并封存到关联快照；离线版恢复点升级时另外封存 `webrtc-auto-extensions.json`，保留原只读记录；旧基线只补存新增记录，不覆盖原系统基线。恢复还原受管策略及自动安装扩展条目，保留其他扩展条目后续变化；撤销旧强制安装条目可能触发浏览器卸载商店版。手动加载的离线扩展由用户在扩展页移除，本地目录保留。旧快照没有相关记录时保留当前设置。
 
 ## 快照与恢复
 

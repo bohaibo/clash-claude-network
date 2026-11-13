@@ -63,10 +63,10 @@ def snapshot():
 
 def preflight_restore():
  m=verify();path=snapshot()
- if (path/'webrtc-policies.json').exists() or (path/'webrtc-extensions.json').exists():
-  from webrtc_system import load_sealed,load_extension_sealed
+ if any((path/name).exists() for name in ('webrtc-policies.json','webrtc-extensions.json','webrtc-auto-extensions.json')):
+  from webrtc_system import load_sealed,load_installation_sealed
   load_sealed(path)
-  load_extension_sealed(path)
+  load_installation_sealed(path)
  # Validate all recovery records before system or managed browser policy writes.
  if not Path(m['client_root']).is_dir():raise ValueError('Original client directory is missing')
  for name in ('browser-policies-before.json','browser-languages-before.json','system.json','location.json','region-time.json'):

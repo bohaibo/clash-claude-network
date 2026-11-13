@@ -43,12 +43,12 @@ export function render(ctx) {
     ui.kv((rtc?.browsers || []).map(row => [row.browser + ' 配置', row.configuration_state || '正在读取'])),
     ui.kv((rtc?.browsers || []).map(row => [row.browser, row.state])),
     ui.kv((rtc?.browsers || []).filter(row => row.installation).map(row => [row.browser + ' 扩展安装', row.installation.label])),
-    ui.kv([['离线扩展', rtc?.bundle?.label || '尚未读取'], ['加载目录', rtc?.bundle?.path || '配置时准备']]),
-    rtc?.bundle?.path ? ui.button('复制扩展目录', { variant: 'secondary', size: 'small', onClick: async () => {
+    ui.kv([['离线备用扩展', rtc?.bundle?.label || '尚未读取'], ['备用目录', rtc?.bundle?.path || '配置时准备']]),
+    rtc?.bundle?.path ? ui.button('复制备用目录', { variant: 'secondary', size: 'small', onClick: async () => {
       try { await navigator.clipboard.writeText(rtc.bundle.path); ui.toast('已复制扩展目录', 'success'); }
       catch { ui.toast('复制失败，请手动复制上方目录', 'error'); }
     } }) : null,
-    ui.el('p', { class: 'muted small', text: rtc?.installation_help || '配置直接使用项目自带的离线扩展，首次在浏览器扩展页加载显示的本地目录。' }),
+    ui.el('p', { class: 'muted small', text: rtc?.installation_help || '一键配置会自动安排 Chrome、Edge 安装官方商店扩展，已有扩展直接复用。' }),
     ui.el('p', { class: 'muted small', text: rtc?.note || '正在读取 WebRTC 配置。' })));
   root.append(verificationCard(ctx));
   root.append(actionsCard(ctx));

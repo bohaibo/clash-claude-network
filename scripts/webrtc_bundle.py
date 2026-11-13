@@ -64,6 +64,6 @@ def status():
             (target / name).is_file() and not ((target / name).is_symlink() or (target / name).is_junction())
             and (target / name).read_bytes() == raw for name, raw in data.items())
         return {'available': True, 'prepared': ready, 'path': str(target), 'version': '1.0.0',
-                'label': '本地扩展已就绪；首次需手动加载' if ready else '随项目附带；配置时准备本地扩展'}
+                'label': '离线备用文件已就绪' if ready else '随项目附带；配置时准备备用文件'}
     except (OSError, ValueError, TypeError):
         return {'available': False, 'prepared': False, 'label': '本地扩展缺失或校验失败，请修复项目文件'}

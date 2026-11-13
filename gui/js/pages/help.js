@@ -32,7 +32,7 @@ export function render(ctx) {
       ui.el('li', {}, '恢复会移除项目规则更新任务；如需继续定时更新，请重新保存更新方式。'),
       ui.el('li', {}, '恢复不运行网络验收；IPv6 和语言改动通常需要重启 Windows 才完全生效。'))));
 
-  root.append(ui.card({ title: '浏览器 WebRTC 与外部指纹浏览器' }, ui.el('p', {}, 'Chrome/Edge 使用路径限制策略与扩展两层保护；Firefox 直接锁定关闭 WebRTC。项目自带离线扩展，配置时准备到网络环境页显示的目录。在 chrome://extensions 或 edge://extensions 选择“加载已解压的扩展”，每份标准资料首次加载一次，后续配置复用。已有商店版保持原状。恢复会还原策略及项目管理的旧版扩展条目；手动加载的扩展可在浏览器扩展页移除。外部指纹浏览器自行管理。')));
+  root.append(ui.card({ title: '浏览器 WebRTC 与外部指纹浏览器' }, ui.el('p', {}, 'Chrome/Edge 使用路径限制策略与扩展两层保护；一键配置自动安排安装各自官方商店的 WebRTC Control，已有扩展直接复用。浏览器运行时自动完成安装，关闭时将在下次正常启动后完成。Firefox 直接锁定关闭 WebRTC。项目同时附带离线备用扩展，备用文件位置可在网络环境页查看。恢复还原受管策略及自动安装条目。外部指纹浏览器自行管理。')));
 
   root.append(ui.card({ title: '不会做的事' },
     ui.el('ul', { class: 'check-list muted' },

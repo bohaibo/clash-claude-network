@@ -22,6 +22,7 @@ TARGETS = [
 PREF = 'media.peerconnection.enabled'
 LOCK = {'Value': False, 'Status': 'locked'}
 EXTENSION_RECORD = 'webrtc-extensions.json'
+AUTO_EXTENSION_RECORD = 'webrtc-auto-extensions.json'
 EXTENSIONS = [
     ('Chrome', r'SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist',
      'fjkmabmdepjfammlpliljpnbhleegehm;https://clients2.google.com/service/update2/crx'),
@@ -137,7 +138,7 @@ def load_sealed(directory):
 
 
 def validate_extensions(state):
-    if state.get('version') not in (1, 2) or len(state.get('entries', [])) != len(EXTENSIONS):
+    if state.get('version') not in (1, 2, 3) or len(state.get('entries', [])) != len(EXTENSIONS):
         raise ValueError('Invalid WebRTC extension recovery record')
     if state['version'] == 2 and state.get('read_only') is not True:
         raise ValueError('Offline extension record must be read-only')
@@ -154,12 +155,14 @@ def validate_extensions(state):
     return state
 
 
-def snapshot_extensions(directory, registry):
-    file = Path(directory) / EXTENSION_RECORD
+def snapshot_extensions(directory, registry, record=EXTENSION_RECORD):
+    if record not in (EXTENSION_RECORD, AUTO_EXTENSION_RECORD):
+        raise ValueError('Unexpected extension recovery filename')
+    file = Path(directory) / record
     if file.exists():
         return validate_extensions(json.loads(file.read_text(encoding='utf-8')))
     manifest = Path(directory) / 'manifest.json'
-    if manifest.exists() and EXTENSION_RECORD in json.loads(manifest.read_text(encoding='utf-8')).get('extra_sha256', {}):
+    if manifest.exists() and record in json.loads(manifest.read_text(encoding='utf-8')).get('extra_sha256', {}):
         raise ValueError('Sealed extension recovery record is missing; do not recapture current policies')
     entries = []
     for browser, path, value in EXTENSIONS:
@@ -171,43 +174,62 @@ def snapshot_extensions(directory, registry):
         name = matches[0] if matches else next(str(i) for i in range(1, 10000) if str(i) not in values)
         entries.append(dict(browser=browser, path=path, name=name, managed=value,
                             before=registry.read(path, name)))
-    state = validate_extensions({'version': 2, 'read_only': True, 'entries': entries})
+    state = validate_extensions({'version': 3, 'entries': entries})
     with file.open('x', encoding='utf-8') as stream:
         json.dump(state, stream, ensure_ascii=False, indent=2)
     return state
 
 
-def load_extension_sealed(directory):
+def snapshot_extension_installation(directory, registry):
+    state = snapshot_extensions(directory, registry)
+    # An offline-only baseline owns no slots. Capture a separate first record
+    # for the new automatic-install changes without replacing that baseline.
+    if state['version'] == 2:
+        snapshot_extensions(directory, registry, AUTO_EXTENSION_RECORD)
+
+
+def load_extension_sealed(directory, record=EXTENSION_RECORD):
+    if record not in (EXTENSION_RECORD, AUTO_EXTENSION_RECORD):
+        raise ValueError('Unexpected extension recovery filename')
     directory = Path(directory)
-    file = directory / EXTENSION_RECORD
-    if not file.exists():
-        return None
+    file = directory / record
     manifest = json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))
-    expected = manifest.get('extra_sha256', {}).get(EXTENSION_RECORD)
+    expected = manifest.get('extra_sha256', {}).get(record)
+    if not file.exists():
+        if expected:
+            raise ValueError('Sealed extension recovery record is missing')
+        return None
     if not expected or hashlib.sha256(file.read_bytes()).hexdigest() != expected:
         raise ValueError('WebRTC extension recovery record is not sealed or was changed')
     return validate_extensions(json.loads(file.read_text(encoding='utf-8')))
 
 
+def load_installation_sealed(directory):
+    original = load_extension_sealed(directory)
+    automatic = load_extension_sealed(directory, AUTO_EXTENSION_RECORD)
+    if automatic is not None:
+        if original is None or original['version'] != 2 or automatic['version'] != 3:
+            raise ValueError('Unexpected automatic extension migration record')
+        return automatic
+    return original
+
+
 def apply_protection(directory, registry):
     state = load_sealed(directory)
-    extensions = load_extension_sealed(directory)
-    if extensions is None:
+    extensions = load_installation_sealed(directory)
+    if extensions is None or extensions['version'] == 2:
         raise ValueError('Missing extension recovery point; capture and seal before applying')
     registry.preflight()
-    # Browser installation still requires a user action on unmanaged Windows.
-    # Prepare a verified local package; never request another store download.
+    # Retain the offline fallback, and let each official browser store install
+    # its signed extension through the supported force-install policy.
     webrtc_bundle.prepare()
     changes = [(p, n, desired(n, registry.read(p, n))) for _, p, n in TARGETS]
     for entry in extensions['entries']:
-        if extensions['version'] == 2:
-            continue
         current = registry.read(entry['path'], entry['name'])
         after = {'exists': True, 'kind': 1, 'value': entry['managed']}
         if current not in (entry['before'], after):
             raise ValueError('Extension policy slot changed; refusing to replace another add-on')
-        # Preserve legacy force-install entries to avoid automatically removing
-        # an installed store extension. Fresh applies do not add these entries.
+        changes.append((entry['path'], entry['name'], after))
     before = [(p, n, registry.read(p, n)) for p, n, _ in changes]
     try:
         for p, n, value in changes:
@@ -316,7 +338,7 @@ def extension_installation(browser, root=None):
     elif installed:
         state, label = 'partial', f'仅 {installed}/{total} 份标准资料有安装记录'
     else:
-        state, label = 'missing', '待加载本地扩展'
+        state, label = 'missing', '尚未安装'
     return dict(state=state, label=label, profiles=total, installed_profiles=installed,
                 local_installed_profiles=local_installed, disabled_profiles=disabled, runtime_verified=False)
 
@@ -334,6 +356,8 @@ def protection_status(registry=None):
                 requested = any(e.get('kind') == 1 and e.get('value') == value for e in registry.list_values(path).values())
             except (OSError, ValueError): requested = False
         installation = extension_installation(browser) if browser != 'Firefox' else None
+        if installation and requested and installation['state'] in ('missing', 'partial', 'no_profiles'):
+            installation['label'] = '已安排自动安装' if installation['state'] == 'missing' else installation['label'] + '，待浏览器自动安装'
         complete = policy and (browser == 'Firefox' or installation['state'] == 'installed')
         rows.append(dict(browser=browser, policy_configured=policy, extension_requested=requested,
                          installation=installation,
@@ -347,7 +371,7 @@ def protection_status(registry=None):
             'scope': '仅管理标准 Chrome、Edge、Firefox 策略；外部指纹浏览器不在配置范围内',
             'bundle': webrtc_bundle.status(),
             'note': 'Chrome/Edge 使用策略与扩展两层保护；Firefox 使用原生禁用策略。',
-            'installation_help': '配置直接准备项目随附的离线扩展。在 chrome://extensions 或 edge://extensions 启用开发者模式，选择“加载已解压的扩展”，选取下方目录；每份标准资料首次手动加载一次，再刷新网页和软件状态。后续配置复用该目录。已有商店版保持原状。'}
+            'installation_help': '一键配置会自动设置 Chrome、Edge 的官方商店扩展安装策略，无需手动添加扩展。浏览器运行时自动完成安装；关闭时将在下次正常启动后完成。已有商店扩展会复用。项目自带的离线扩展作为备用，保留在下方目录。'}
 
 
 def apply(state, registry):
@@ -412,21 +436,21 @@ def main():
     registry = Registry()
     if args.action == 'status': return protection_status(registry)
     directory = Path(os.environ['CCN_SNAPSHOT'])
-    if (directory / EXTENSION_RECORD).exists() and not (directory / RECORD).exists():
+    if any((directory / n).exists() for n in (EXTENSION_RECORD, AUTO_EXTENSION_RECORD)) and not (directory / RECORD).exists():
         raise ValueError('Missing WebRTC policy recovery record')
     if args.action == 'snapshot':
         snapshot(directory, registry)
-        snapshot_extensions(directory, registry)
+        snapshot_extension_installation(directory, registry)
     elif args.action == 'apply': apply_protection(directory, registry)
     elif args.action == 'verify':
         if (directory / RECORD).exists(): load_sealed(directory)
-        load_extension_sealed(directory)
+        load_installation_sealed(directory)
     elif not (directory / RECORD).exists():
-        if (directory / EXTENSION_RECORD).exists(): raise ValueError('Missing WebRTC policy recovery record')
+        if any((directory / n).exists() for n in (EXTENSION_RECORD, AUTO_EXTENSION_RECORD)): raise ValueError('Missing WebRTC policy recovery record')
         return {'success': True, 'skipped': '旧快照没有全浏览器 WebRTC 记录，保留当前设置'}
     else:
         state = load_sealed(directory)
-        extensions = load_extension_sealed(directory)
+        extensions = load_installation_sealed(directory)
         failures = []
         try: restore(state, registry)
         except Exception: failures.append('browser policies')
