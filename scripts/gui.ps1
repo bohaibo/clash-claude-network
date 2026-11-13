@@ -63,7 +63,6 @@ import sys
 import json
 import urllib.request
 from gui_server import App
-import sandbox_browser
 app = App(open_browser=False)
 ready = False
 try:

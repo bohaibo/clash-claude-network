@@ -16,6 +16,8 @@ class GuiLifecycle(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.local = Path(temp.name)
         self.app = gui_server.App(local=self.local, open_browser=False, idle_exit=False)
+        self.enterContext(patch.object(self.app, 'transaction_folder', return_value=self.local))
+        self.enterContext(patch.object(self.app, 'settings_transactions', return_value=[]))
 
     def test_stop_defers_during_settings_save(self):
         with self.app.settings_operation():
@@ -27,20 +29,21 @@ class GuiLifecycle(unittest.TestCase):
     def test_shutdown_reservation_rejects_new_mutations(self):
         self.app._shutdown_requested = True
         with self.assertRaises(gui_server.ApiError):
-            self.app.start_job({'action': 'browser-open', 'confirm': 'BROWSER-OPEN'})
+            self.app.start_job({'action': 'settings-recover', 'transaction': 'fixture', 'confirm': 'fixture'})
         with self.assertRaises(gui_server.ApiError):
             with self.app.settings_operation():
                 self.fail('Entered settings operation during shutdown')
 
-    def test_browser_launch_returns_job_before_slow_mock_finishes(self):
+    def test_settings_recovery_returns_job_before_slow_mock_finishes(self):
         entered, release = threading.Event(), threading.Event()
         def browser(payload):
             entered.set()
             release.wait(3)
             return {'engine': 'edge', 'requested_engine': 'chrome'}
-        with patch.object(self.app, '_browser_action', side_effect=browser) as action:
+        with patch.object(self.app, 'restore_settings_transaction', side_effect=browser) as action:
             before = time.monotonic()
-            job = self.app.start_job({'action': 'browser-open', 'confirm': 'BROWSER-OPEN'})
+            self.app.settings_transactions.return_value=[{'id':'fixture'}]
+            job = self.app.start_job({'action': 'settings-recover', 'transaction': 'fixture', 'confirm': 'fixture'})
             self.assertLess(time.monotonic() - before, .5)
             self.assertEqual(job['state'], 'running')
             worker = self.app.active_job['thread']
@@ -68,8 +71,9 @@ class GuiLifecycle(unittest.TestCase):
 
     def test_local_job_record_failure_does_not_leave_permanent_busy_state(self):
         with patch.object(gui_server, 'append_event', side_effect=OSError('disk fixture')), \
-             patch.object(self.app, '_browser_action') as browser:
-            job = self.app.start_job({'action': 'browser-open', 'confirm': 'BROWSER-OPEN'})
+             patch.object(self.app, 'restore_settings_transaction') as browser:
+            self.app.settings_transactions.return_value=[{'id':'fixture'}]
+            job = self.app.start_job({'action': 'settings-recover', 'transaction': 'fixture', 'confirm': 'fixture'})
             self.app.jobs[job['id']]['thread'].join(3)
         self.assertIsNone(self.app.active_job)
         self.assertEqual(self.app.job_view(job['id'])['state'], 'failed')

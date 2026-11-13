@@ -23,6 +23,7 @@ def check_pending_settings(local):
         raise RuntimeError('Settings recovery is pending; use the GUI snapshot page to restore original settings first')
 
 def check_pending_firewall(local):
+    check_pending_tun(local)
     if (Path(local)/'reconfigure-active.json').exists():
         raise RuntimeError('Safe reconfiguration/recovery is active; scheduled updates must wait')
     file=Path(local)/'pending-firewall.json'
@@ -33,6 +34,11 @@ def check_pending_firewall(local):
         raise RuntimeError('Invalid pending firewall recovery record')
     if not (Path(local)/(token+'.commit')).exists():
         raise RuntimeError('Firewall rollback is pending; use the root menu to finish recovery before updating')
+
+def check_pending_tun(local):
+    for folder in (Path(local)/'tun-drills').glob('*'):
+        if re.fullmatch(r'[a-f0-9]{32}',folder.name) and (folder/'ready').exists() and not (folder/'done').exists():
+            raise RuntimeError('TUN drill recovery is pending; wait for local recovery and inspect its report')
 
 @contextmanager
 def operation_lock(local,*,settings_recovery=False):

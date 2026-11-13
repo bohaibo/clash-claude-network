@@ -51,6 +51,6 @@ async function check(page, section) {
   assert.equal(p.hasDraft(), false, 'successful unchanged draft becomes clean');
   for (const [key, value] of Object.entries(laterEdit)) assert.equal(p.draft()[key], value);
 }
-Promise.all([check('browser', 'browser'), check('updates', 'update')])
+Promise.all([check('updates', 'update')])
   .then(() => console.log('Offline form checks passed: duplicate save, in-flight edits, authoritative response'))
   .catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,4 +1,4 @@
-﻿param([ValidateSet('snapshot','apply','supplement','restore','rollback-firewall','repair-bindings')][string]$Action,[string]$Python,[string]$TimeZoneId='Singapore Standard Time',[string]$RegionCode='SG',[string]$CultureName='zh-SG')
+﻿param([ValidateSet('snapshot','apply','supplement','restore','rollback-firewall','repair-bindings','recheck-ipv6')][string]$Action,[string]$Python,[string]$TimeZoneId='Singapore Standard Time',[string]$RegionCode='SG',[string]$CultureName='zh-SG')
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'firewall_rules.ps1')
 . (Join-Path $PSScriptRoot 'region_system.ps1')
@@ -193,7 +193,6 @@ function Invoke-WebRtcPolicy([string]$PolicyAction) {
   } finally { $env:CCN_SNAPSHOT=$previous }
 }
 if($Action -eq 'snapshot') {
-  Invoke-WebRtcPolicy 'snapshot'
   Save-RegionTimeState $stateDir
   Save-LocationState
   if(Test-Path -LiteralPath $file){Write-Output '已有系统状态快照，保留原文件不覆盖。';return}
@@ -261,6 +260,7 @@ if($Action -eq 'restore' -and (Test-Path -LiteralPath (Join-Path $stateDir 'webr
 $null=@(Read-FirewallRuleJournal $stateDir)
 $regionRecord=Join-Path $stateDir 'region-time.json'
 if($Action -ne 'rollback-firewall' -and (Test-Path -LiteralPath $regionRecord)){Assert-RegionTimeState (Get-Content -LiteralPath $regionRecord -Raw -Encoding UTF8 | ConvertFrom-Json)}
+if($Action -eq 'recheck-ipv6'){Disable-CurrentIpv6Bindings;return}
 if($Action -eq 'supplement'){
   # Require an existing deployment; never capture a replacement baseline.
   $plan=Get-Content -LiteralPath (Join-Path $localDir 'plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -276,7 +276,7 @@ if($Action -eq 'supplement'){
     Assert-StrictFirewall -coreProgram ([string]$plan.core_program)
     Set-SystemRegionTime $stateDir $RegionCode $CultureName $TimeZoneId
     Disable-SystemLocation
-    Invoke-WebRtcPolicy 'apply'
+    # Browsers are managed externally; old policy backups remain restorable.
   }catch{
     $failure=$_
     try{if($outbound.Count){$outbound | Enable-NetFirewallRule -ErrorAction Stop}}catch{Write-Warning '本次出站规则回滚未完成，请使用菜单 3 恢复。'}
@@ -333,7 +333,7 @@ if($Action -eq 'restore') {
   if($languageRestoreFailed){throw '语言列表尚未还原，其余系统设置已继续处理。恢复未完成，请检查后重试。'}
   return
 }
-Invoke-WebRtcPolicy 'apply'
+# Browser policies are no longer applied.
 Set-SystemRegionTime $stateDir $RegionCode $CultureName $TimeZoneId
 Disable-SystemLocation
 # Applying does not create any browser/account identity or install Claude.

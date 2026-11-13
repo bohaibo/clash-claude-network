@@ -3,18 +3,18 @@ import { icon, logoMark } from './icons.js';
 import * as ui from './ui.js';
 import { render as overview, refreshStatus as refreshOverview } from './pages/overview.js';
 import { render as network } from './pages/network.js';
-import { render as browser, hasDraft as browserHasDraft } from './pages/browser.js';
 import { render as snapshots } from './pages/snapshots.js';
 import { render as updates, hasDraft as updatesHasDraft } from './pages/updates.js';
 import { render as logs } from './pages/logs.js';
 import { render as help } from './pages/help.js';
+import { render as software } from './pages/software.js';
 
 const PAGES = [
   { id: 'overview', label: '一键配置', icon: 'home', title: '一键配置', render: overview },
   { id: 'network', label: '网络环境', icon: 'network', title: '网络环境', render: network },
-  { id: 'browser', label: '浏览器沙箱', icon: 'browser', title: '浏览器沙箱', render: browser },
   { id: 'snapshots', label: '快照与恢复', icon: 'clock', title: '快照与恢复', render: snapshots },
   { id: 'updates', label: '规则更新', icon: 'refresh', title: '规则更新', render: updates },
+  { id: 'software', label: '软件更新', icon: 'download', title: '软件更新与打包', render: software },
   { id: 'logs', label: '日志与验证', icon: 'list', title: '日志与验证', render: logs },
   { id: 'help', label: '使用说明', icon: 'help', title: '使用说明', render: help },
 ];
@@ -27,11 +27,7 @@ const ACTION_LABELS = {
   reconfigure: '恢复最早状态并重新配置',
   update: '更新分流规则',
   verify: '检查连通性',
-  'browser-open': '打开沙箱浏览器',
-  'browser-check': '打开环境自检页',
-  'browser-close': '关闭沙箱浏览器',
-  'browser-reset': '重置沙箱资料',
-  'browser-register': '注册默认浏览器',
+  audit: '完整防火墙复核与故障演练',
   'settings-recover': '恢复原设置',
 };
 
@@ -178,7 +174,11 @@ function renderBanners() {
   const host = document.getElementById('banners');
   if (!host || !app.data) return;
   const rows = [];
-  const labels = { browser: '浏览器状态', preview: '系统设置', update: '规则更新', service: 'Clash 服务' };
+  const softwareUpdate = app.data.software || {};
+  if (softwareUpdate.status === 'available') {
+    rows.push(ui.note('发现软件新版本 ' + softwareUpdate.latest_version + '，请到「软件更新」查看。', 'info'));
+  }
+  const labels = { preview: '系统设置', update: '规则更新', service: 'Clash 服务' };
   for (const [name, status] of Object.entries(app.data.collection || {})) {
     if (status.error || status.stale) {
       const last = status.read_at ? '上次读取：' + ui.formatTime(status.read_at) + '。' : '尚无成功读取记录。';
@@ -190,7 +190,7 @@ function renderBanners() {
     rows.push(ui.note('检测到未完成的设置保存，请到「快照与恢复」恢复原设置后再继续操作。', 'bad'));
   }
   if (app.data.admin) {
-    rows.push(ui.note('界面以管理员权限运行，界面浏览器和沙箱浏览器也会继承管理员权限。建议关闭后从普通用户终端重新运行「一键网络.cmd」。', 'warn'));
+    rows.push(ui.note('界面以管理员权限运行，界面浏览器也会继承管理员权限。建议关闭后从普通用户终端重新运行「一键网络.cmd」。', 'warn'));
   }
   if (app.data.configured_error) rows.push(ui.note(app.data.configured_error, 'warn'));
   const lastRun = app.data.last_run || {};
@@ -219,12 +219,6 @@ function renderBanners() {
   }
   if (app.data.app?.node === false) {
     rows.push(ui.note('未找到项目内 Node.js。请重新运行根目录「一键网络.cmd」，启动器会将所需环境安装或修复到项目内，不修改系统 PATH。', 'warn'));
-  }
-  if (app.data.browser?.engine?.name == null) {
-    rows.push(ui.note('未找到 Chrome 或 Edge。界面仍可配置网络，但沙箱浏览器不可用；本项目不会下载浏览器。', 'warn'));
-  }
-  if (app.data.app?.gui_browser_fallback) {
-    rows.push(ui.note('界面已在默认浏览器中打开（隔离的界面浏览器未能启动）。这只影响界面窗口；Claude 的沙箱浏览器仍需从「浏览器沙箱」单独打开，默认浏览器设置不会被修改。', 'warn'));
   }
   if ((app.data.update?.last?.success === false || app.data.update?.last?.skipped) && app.data.update?.last?.time) {
     rows.push(ruleUpdateNotice('上次规则更新未完成：' + (app.data.update.last.reason || app.data.update.last.error || '请查看规则更新页。'), 'warn'));
@@ -319,8 +313,7 @@ function refreshPage() {
   }
   if (app.page === 'help') return;
   if (app.page === 'overview') { refreshOverview(ctx); return; }
-  const preserveForm = (app.page === 'browser' && browserHasDraft()) ||
-    (app.page === 'updates' && updatesHasDraft());
+  const preserveForm = (app.page === 'updates' && updatesHasDraft());
   const keep = [...stack.querySelectorAll('[data-preserve-key]')]
     .filter(node => node.dataset.preserveKey === 'open-log' || preserveForm);
   const active = document.activeElement;
@@ -418,13 +411,6 @@ async function finishJob(job) {
   updateChrome();
   if (job.state === 'success' && job.action === 'update' && job.result?.skipped) {
     ui.toast(job.result?.reason || '规则更新已跳过：订阅或脚本关联已变化。', 'warn', 8000);
-  } else if (job.state === 'success' && job.action === 'browser-open') {
-    const result = job.result || {};
-    const engine = result.engine === 'edge' ? 'Edge' : result.engine === 'chrome' ? 'Chrome' : '浏览器';
-    const fallback = result.requested_engine && result.requested_engine !== 'auto' && result.requested_engine !== result.engine;
-    ui.toast((fallback ? '所选引擎启动失败，已改用 ' : '已打开 ') + engine + ' 沙箱浏览器。', fallback ? 'warn' : 'ok', 8000);
-  } else if (job.state === 'success' && job.action === 'browser-register') {
-    ui.toast('已注册沙箱浏览器，请在 Windows 默认应用设置中手动确认。', 'ok', 8000);
   } else if (job.state === 'success') ui.toast(ACTION_LABELS[job.action] + '已完成。', 'ok', 6000);
   else if (job.state === 'cancelled') ui.toast(job.error || '操作已取消，请检查日志确认当前状态。', 'warn', 6000);
   else ui.toast(job.error || '操作未完成，请查看日志。', 'bad', 9000);
@@ -602,7 +588,7 @@ async function shutdown() {
   }
   const ok = await ui.confirmDialog({
     title: '退出界面？',
-    description: '只会关闭界面和隔离的界面浏览器资料进程；不会修改、恢复或停止网络配置，也不会关闭沙箱浏览器或默认浏览器。',
+    description: '只会关闭界面和隔离的界面浏览器资料进程；不会修改、恢复或停止网络配置，也不会关闭外部浏览器。',
     confirmText: '退出界面',
     danger: true,
   });

@@ -22,7 +22,7 @@ export function render(ctx) {
   root.append(ui.pageHeader({
     eyebrow: 'RULES',
     title: '规则更新',
-    description: '选择分流规则的更新方式：打开软件后手动更新，或让 Windows 在本机登录期间按固定时间自动更新。只更新已审核的国内/私有规则来源，不更新内核或节点。',
+    description: '统一使用 Loyalsoldier 国内域名、国内 IP、私有域名和局域网规则。可手动更新，或让 Windows 在登录期间按固定时间更新；不更新内核或节点。',
     actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) })],
   }));
   root.append(modeCard(ctx, update));
@@ -32,7 +32,8 @@ export function render(ctx) {
     ui.el('ul', { class: 'check-list' },
       ui.el('li', {}, '只更新项目配置中已审核的国内域名、国内 IP、私有域名和 LAN 地址来源。'),
       ui.el('li', {}, '来源发生较大变化、私有/LAN 内容变化或 Claude 策略变化时会停止，保留旧配置等待人工审核。'),
-      ui.el('li', {}, '第三方 Claude 规则只下载到 .local 供审核，不会自动合并关键词、ASN 或未知共享域名。'),
+      ui.el('li', {}, '首次切换来源需点击「立即更新」；定时任务不会自动扩大到新来源。海外优先规则与对应 DNS 策略保持同步。'),
+      ui.el('li', {}, '先校验完整候选配置，再发布并核对内核加载数量；失败会尝试恢复，恢复未完成时会明确提示。'),
       ui.el('li', {}, '不更新 Mihomo 内核、不添加节点、不改变固定节点组。'),
       ui.el('li', {}, '定时任务只在当前 Windows 用户登录期间运行；电脑关机或未登录时不会执行。'),
       ui.el('li', {}, '恢复快照会移除本项目的定时任务；需要时请在这里重新保存定时方式。'))));
@@ -140,14 +141,20 @@ function lastResultCard(ctx, update) {
   if (!last.time) {
     return ui.card({ title: '最近一次更新' }, ui.empty('还没有更新记录', '配置完成或点击立即更新后，这里会显示结果。'));
   }
-  const tone = last.success ? 'ok' : last.skipped ? 'warn' : 'bad';
-  return ui.card({ title: '最近一次更新', actions: ui.badge(last.success ? '成功' : last.skipped ? '已跳过' : '未完成', tone) },
+  const tone = last.skipped ? 'warn' : last.success ? 'ok' : 'bad';
+  const outcome = last.skipped ? '已跳过' : !last.success ? '未完成' : last.unchanged ? '已是最新' : last.migrated ? '已切换来源' : '成功';
+  const labels = { domains: '国内域名', ips: '国内 IP', privateDomains: '私有域名', lanCidrs: '局域网地址' };
+  const counts = Object.entries(last.changes || {}).map(([key, row]) => [labels[key] || key,
+    `${row.after ?? '—'} 条（新增 ${row.added ?? 0}，移除 ${row.removed ?? 0}）`]);
+  return ui.card({ title: '最近一次更新', actions: ui.badge(outcome, tone) },
     ui.kv([
       ['时间', ui.formatTime(last.time)],
-      ['结果', last.success ? '已刷新已审核来源' : last.skipped ? '未执行（订阅或脚本关联已变化）' : '未发布新配置'],
+      ['结果', last.skipped ? '未执行（订阅或脚本关联已变化）' : !last.success ? '更新未完成' : last.unchanged ? '规则内容未变化，无需重载' : '已发布并核对新配置'],
+      ['来源', last.source || '—'],
       ['原因', last.reason || last.error || '—'],
+      ...counts,
     ]),
-    !last.success && !last.skipped ? ui.note('更新失败时保留旧配置。请检查网络、来源变化或 .local/update-result.json 后再重试。', 'warn') : null,
+    !last.success && !last.skipped ? ui.note(last.recovery_required ? '恢复尚未完成。请先处理本地恢复记录，当前配置状态需要核对。' : '请检查网络、来源变化或本地错误记录后再重试。', 'warn') : null,
     last.skipped ? ui.note('脚本关联已改变，更新主动跳过。请重新配置后再更新。', 'warn') : null);
 }
 
@@ -187,10 +194,10 @@ async function saveSettings(ctx) {
 async function updateNow(ctx) {
   const ok = await ctx.confirm({
     title: '立即更新分流规则？',
-    description: '只刷新已审核的国内/私有规则来源，不更新内核或节点。若来源变化过大或 Claude 策略改变，更新会停止并保留旧配置。',
+    description: '使用 Loyalsoldier 更新国内/私有规则；旧配置会在本次操作中首次切换来源。后续更新仍受变化阈值保护，不更新内核或节点。',
     items: [
-      { title: '不会断开现有连接', text: '更新通过本地控制通道重载配置；可能短暂重连。' },
-      { title: '第三方列表只待审核', text: 'Claude 候选规则只下载到 .local，不会自动合并。' },
+      { title: '可能短暂重连', text: '有变化时通过本地控制通道重载；内容未变化时不重载。' },
+      { title: '保留更新前备份', text: '发布失败会尝试恢复；不会访问 Claude 服务进行验证。' },
     ],
     confirmText: '开始更新',
   });

@@ -1,4 +1,4 @@
-﻿param([ValidateSet('apply','supplement','restore','snapshot','list-snapshots','reconfigure')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[string]$EventsFile,[string]$Python)
+﻿param([ValidateSet('apply','supplement','restore','snapshot','list-snapshots','reconfigure','audit')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[string]$EventsFile,[string]$Python)
 $ErrorActionPreference='Stop'
 $env:PYTHONNOUSERSITE='1'
 . (Join-Path $PSScriptRoot 'firewall_rules.ps1')
@@ -65,7 +65,7 @@ if($LASTEXITCODE -ne 0){throw 'Python 依赖检查失败，详情见 .local/depe
 
 $regionProfile=[pscustomobject]@{
  region='SG';label='新加坡';culture='zh-SG';language_tag='zh-Hans-SG';fallback_language_tag='en-SG';
- browser_language='zh-SG';timezone_id='Singapore Standard Time';iana='Asia/Singapore'
+ timezone_id='Singapore Standard Time';iana='Asia/Singapore'
 }
 if($Action -eq 'apply'){
  if($Region -notmatch '^[A-Za-z]{2}$'){throw '出口地区须为两位国家代码，例如 SG。'}
@@ -188,12 +188,12 @@ function Get-VerificationFailureMessage([string]$fallback){
   $report=Get-Content -LiteralPath (Join-Path $local 'verification.json') -Raw -Encoding UTF8 | ConvertFrom-Json
   if(!$env:CCN_VERIFY_RUN -or $report.run_id -ne $env:CCN_VERIFY_RUN){return $fallback}
   $checkTitles=@{runtime='内核运行模式或固定节点组';domestic='国内网站连通性';egress='海外出口及要求地区';dns='DNS A/64/65 过滤';fake_ip='TUN DNS 接管';ipv6='IPv6 公网阻断';tools='Git/npm/UDP STUN';udp_egress='UDP 出口地区及指定节点路由';node_outage='节点故障保护';recovery='节点恢复后出口'}
-  foreach($stage in @('node-outage','core-exit','post-recovery','connectivity')){
+  foreach($stage in @('node-outage','tun-off','core-exit','post-recovery','firewall-before','firewall-after','connectivity')){
    $evidence=$report.stages.$stage
    if($evidence -and $evidence.success -eq $false){
     if($stage -eq 'core-exit'){
      if($evidence.restart_failed){$details+='停核测试后核心重启失败，请检查 Clash 后恢复'}else{$details+='核心退出保护检测失败'}
-    }elseif($evidence.failed_check -and $checkTitles.ContainsKey([string]$evidence.failed_check)){$details+=($checkTitles[[string]$evidence.failed_check]+'检测失败')}
+    }elseif($stage -eq 'tun-off'){$details+='TUN 关闭保护或恢复检测失败'}elseif($stage -like 'firewall-*'){$details+='防火墙完整复核未通过或未验证'}elseif($evidence.failed_check -and $checkTitles.ContainsKey([string]$evidence.failed_check)){$details+=($checkTitles[[string]$evidence.failed_check]+'检测失败')}
    }
   }
   foreach($name in @('git','npm','stun')){
@@ -241,7 +241,7 @@ if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principa
   Write-Host '即将请求管理员权限；请在 Windows 授权窗口中确认。取消授权不会执行所选操作。' -ForegroundColor Yellow
   # Start-Process -Wait also waits for Clash descendants, which stay open.
   # Wait only for the elevated operation process itself.
-  try{$process=Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -PassThru;$null=$process.Handle;$process.WaitForExit()}
+  try{$process=Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -PassThru;$null=$process.Handle;$process.WaitForExit()}
   catch{
    $native=$_.Exception
    while($native.InnerException){$native=$native.InnerException}
@@ -284,12 +284,28 @@ try{$operationStream.Lock(0,1)}catch{$operationStream.Dispose();throw '本项目
 try {
 Resolve-PendingFirewall -LocalDir $local -Python $python
 Assert-NoPendingSettings -LocalDir $local
+& $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from operation_lock import check_pending_tun;from pathlib import Path;check_pending_tun(Path(sys.argv[2]))' $PSScriptRoot $local
+if($LASTEXITCODE -ne 0){throw 'TUN 演练恢复仍待处理，请先等待本机看护并查看恢复记录。'}
 $env:CCN_SNAPSHOT=$null
 if($Snapshot){
  if([IO.Path]::GetFileName($Snapshot) -ne $Snapshot -or $Snapshot -in @('.','..')){throw '快照只能使用 .local/snapshots 内的目录名。'}
  $env:CCN_SNAPSHOT=Join-Path (Join-Path $local 'snapshots') $Snapshot
 }
 Write-GuiEvent 'start' ([ordered]@{action=$Action})
+
+if($Action -eq 'audit'){
+ if(!$Acknowledged){
+  Write-Host '将完整复核防火墙，并分别模拟节点故障、关闭 TUN 和内核退出；公网会短暂中断。'
+  if((Read-Host '确认执行请输入 1（回车取消）') -ne '1'){return}
+ }
+ Write-GuiEvent 'progress' ([ordered]@{message='复核防火墙及三个独立故障场景，可能需要数分钟'})
+ & $python (Join-Path $PSScriptRoot 'safety_audit.py')
+ $passed=($LASTEXITCODE -eq 0)
+ [ordered]@{success=$passed;action='audit'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
+ if(!$passed){Write-GuiEvent 'error' ([ordered]@{message='完整复核未全部通过；请查看本次阶段记录。'});exit 1}
+ Write-GuiEvent 'done' ([ordered]@{message='完整防火墙及故障演练已通过。'})
+ return
+}
 
 if($Action -eq 'snapshot'){
  Set-StepPlan @('采集客户端记录','保存系统记录','封存并校验快照')
@@ -332,7 +348,7 @@ if($Action -eq 'supplement'){
   if($LASTEXITCODE -ne 0){throw '原始快照校验失败，未补充任何配置。'}
   if(!(Test-Path -LiteralPath (Join-Path $snapshotPath 'system.json'))){throw '缺少系统恢复记录，无法补充配置。'}
   if(!$Acknowledged){
-   Write-Host '补充配置会禁用非项目的本地出站放行规则、关闭当前启用的网卡 IPv6、系统定位、自动时区和自动校时，按节点地区设置国家/区域格式/时区，并配置 Chrome、Edge、Firefox 的 WebRTC 策略（网页通话可能受影响），累积记录供「快照与恢复」撤销。' -ForegroundColor Yellow
+   Write-Host '补充配置会禁用非项目的本地出站放行规则、关闭当前启用的网卡 IPv6、系统定位、自动时区和自动校时，按节点地区设置国家/区域格式/时区，累积记录供「快照与恢复」撤销。' -ForegroundColor Yellow
    Write-Host '入站规则扫描后保留。可能影响新软件、VPN、Docker/WSL、远程控制；不运行网络或断网测试。'
    $answer=Read-Host '确认执行请输入 1（直接回车 = 取消）'
    if($answer -ne '1' -and $answer -cne '是' -and $answer -ine 'YES'){Write-Host '已取消，没有做任何改动。';return}
@@ -349,7 +365,7 @@ if($Action -eq 'supplement'){
   $result.success=$true
   $result.snapshot=$snapshotPath
   Write-Done ('补充配置已完成。恢复时请在「快照与恢复」选择快照：'+(Split-Path -Leaf $snapshotPath))
-  Write-Host '未运行网络或断网测试；沙箱浏览器、虚拟网络和账号行为未验证。'
+  Write-Host '未运行网络或断网测试；外部浏览器、虚拟网络和账号行为未验证。'
  }catch{
   $result.error=$_.Exception.Message
   $_ | Format-List * -Force | Out-String | Set-Content -LiteralPath (Join-Path $local 'last-error.log') -Encoding UTF8
@@ -372,11 +388,10 @@ if(!$Acknowledged) {
   Write-PlanItem 2 '严格出站防火墙：保留四条放行，阻断 SharedAccess 服务出站' 'Mihomo 一停，国内网站也一起断；连接共享、移动热点、VPN、Docker、WSL、视频通话、远程控制可能失效'
   Write-PlanItem 3 '系统 IPv6：全局关闭' '依赖 IPv6 的内网或校园网资源不可用，要重启 Windows 才完全生效'
   Write-Host '系统自动定位：关闭 Windows 定位策略；恢复时还原原值，地图/天气等定位功能会受影响。'
-  Write-PlanItem 4 ('区域与时区：系统时区切换为 '+$regionProfile.label+'（'+$regionProfile.timezone_id+'），国家/地区和区域格式同步；关闭自动时区及自动校时；沙箱浏览器按节点地区设置语言/时区') '国家、日期/数字格式和时区会变化；自动校时关闭后可能产生时钟误差；应用需重新打开'
+  Write-PlanItem 4 ('区域与时区：系统时区切换为 '+$regionProfile.label+'（'+$regionProfile.timezone_id+'），国家/地区和区域格式同步；关闭自动时区及自动校时') '国家、日期/数字格式和时区会变化；自动校时关闭后可能产生时钟误差；应用需重新打开'
   Write-PlanItem 5 '清理系统、WinHTTP、环境变量与 Git/npm/Docker 的代理覆盖' '普通本机流量交给 TUN 分流；已打开的终端需重新启动，容器内部行为未验证'
   Write-Host ''
   Write-Host '执行时会逐条显示进度。中途失败可以在「快照与恢复」中还原本项目记录的改动；后加订阅和正常更新会保留。' -ForegroundColor White
-  Write-Host '本项目的 WebRTC 保护会写入 Chrome、Edge、Firefox 的机器级策略，需重启浏览器，网页语音和视频可能受影响；不会自动关闭浏览器。' -ForegroundColor Cyan
  }
  else{
   Write-Host ''
@@ -384,7 +399,7 @@ if(!$Acknowledged) {
   Write-PlanItem 1 'Clash 客户端：保留当前订阅及更新，撤销项目脚本和网络设置' 'Clash Verge 会被关闭后重新启动，按当前订阅生成运行配置'
   Write-PlanItem 2 '系统状态：防火墙、IPv6、区域/语言、代理环境变量' 'IPv6 与语言改动要重启 Windows 才完全生效'
   Write-PlanItem 3 '计划任务：移除本项目注册的规则更新任务'
-  Write-Host '默认 Chrome / Edge 与沙箱资料目录不会被删除；沙箱登录状态会保留。'
+  Write-Host '外部浏览器及旧版浏览器本地资料保持不变。'
  }
  Write-Host ''
  $answer=Read-Host '确认执行请输入 1（直接回车 = 取消）'
@@ -484,11 +499,11 @@ try {
   Write-Step '写入 Clash 客户端配置：增强脚本、固定节点组、分流规则'
   $settingsTouched=$true
   & $python (Join-Path $PSScriptRoot 'client.py') apply-client;if($LASTEXITCODE -ne 0){throw '客户端配置写入失败。'}
-  Write-Step '启动防火墙保护：准备阶段限时 180 秒，开始修改防火墙后另计 180 秒；超时则等待当前写入完成后回滚'
+  Write-Step '启动防火墙保护：准备阶段限时 180 秒，开始修改防火墙后另计 360 秒；超时则等待当前写入完成后回滚'
   $watchToken='guard-'+[Guid]::NewGuid().ToString('N')
   [ordered]@{token=$watchToken;snapshot=$env:CCN_SNAPSHOT;wait_for_firewall=$true} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $local 'pending-firewall.json.new') -Encoding UTF8
   Move-Item -LiteralPath (Join-Path $local 'pending-firewall.json.new') -Destination (Join-Path $local 'pending-firewall.json') -Force
-  $watchArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'watchdog.ps1')+'"'),'-Token',$watchToken,'-Python',('"'+$python+'"'),'-WaitForFirewall')
+  $watchArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'watchdog.ps1')+'"'),'-Token',$watchToken,'-Python',('"'+$python+'"'),'-WaitForFirewall','-FirewallTimeoutSeconds','360')
   Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $watchArgs | Out-Null
   Write-Step '应用系统设置：严格防火墙、关闭 IPv6/定位/自动时间、国家/区域格式/时区、代理环境变量'
   $applyMutex=New-Object Threading.Mutex($false,('Global\CCN-'+$watchToken))
@@ -502,8 +517,10 @@ try {
   Write-Step '即将短暂中断代理及全部公网，分别验证节点故障、停核保护和恢复；多项检测可能需要数分钟'
   $env:CCN_VERIFY_RUN=[Guid]::NewGuid().ToString('N')
   # This coordinator already owns operation.lock; call the internal verifier.
+  & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from firewall_audit import verify_firewall;sys.exit(0 if verify_firewall()[''success''] else 1)' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw '防火墙完整复核未通过，未开始故障演练。'}
   & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from verify import verify;verify(outage=True)' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '网络验证未通过。')}
-  Write-Host '  节点故障阶段已通过；开始停核测试，国内公网也会暂时断开。' -ForegroundColor Cyan
+  & $python (Join-Path $PSScriptRoot 'verify_tun.py');if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage 'TUN 关闭保护或恢复未通过。')}
+  Write-Host '  节点及 TUN 关闭阶段已通过；开始停核测试，国内公网也会暂时断开。' -ForegroundColor Cyan
   & $python (Join-Path $PSScriptRoot 'verify_core_exit.py');if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '内核退出保护/重启验证未通过。')}
   Write-Host '  停核测试已通过；开始恢复后的连通性复测。' -ForegroundColor Cyan
   & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from verify import verify;verify(stage=''post-recovery'')' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw (Get-VerificationFailureMessage '内核退出测试之后网络没有恢复。')}
@@ -513,18 +530,11 @@ try {
    if(Test-Path -LiteralPath (Join-Path $local ($watchToken+'.rollback'))){throw '防火墙看门狗已回滚，本次部署不算成功。'}
    $firewallPlan=Get-Content -LiteralPath (Join-Path $local 'plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
    Assert-StrictFirewall -coreProgram ([string]$firewallPlan.core_program)
+   & (Join-Path $PSScriptRoot 'system.ps1') -Action recheck-ipv6 -Python $python
+   if($LASTEXITCODE -ne 0){throw '内核重启后的 IPv6 绑定复查未通过。'}
+   & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from firewall_audit import verify_firewall;sys.exit(0 if verify_firewall(''firewall-after'')[''success''] else 1)' $PSScriptRoot;if($LASTEXITCODE -ne 0){throw '最终防火墙完整复核未通过。'}
    Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Verified'
   } finally {$guardMutex.ReleaseMutex();$guardMutex.Dispose()}
-  Write-Host ('沙箱浏览器：设置 '+$regionProfile.label+' 语言；系统时区已切换，Claude 桌面/浏览器重启后读取新时区')
-  $browserScript=Join-Path $PSScriptRoot 'sandbox_browser.py'
-  if(Test-Path -LiteralPath $browserScript){
-   $browserRegionJson=& $python $browserScript --configure-region $Region
-   if($LASTEXITCODE -ne 0){Write-Warning '沙箱浏览器地区配置未完成；网络配置仍已生效。'}
-   else{
-    try{$browserRegion=$browserRegionJson | ConvertFrom-Json;if($browserRegion.running){Write-Host '沙箱浏览器正在运行：语言在关闭并重新打开后生效；系统时区变化也需重启浏览器/Claude'} }catch{}
-   }
-  }
-
   $updateMode='scheduled';$updateTime='13:00';$updateDays=1
   try{
    $uiSettings=Get-Content -LiteralPath (Join-Path $local 'ui-settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -597,8 +607,7 @@ try {
  if($Action -eq 'apply'){
   Write-Done ('配置已完成并生效（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT)
   Write-Host '  固定节点组 Claude-Overseas-Pinned 只包含你指定的节点。要撤销请在「快照与恢复」中恢复。'
-  Write-Host '  已完成自动网络验收；沙箱浏览器自检、虚拟网络、Claude 与账号可用性未验证。'
-  Write-Host '  默认 Chrome / Edge 未被修改；需要时请从界面「浏览器沙箱」打开独立资料目录。'
+  Write-Host '  已完成自动网络验收；外部浏览器行为、虚拟网络、Claude 与账号可用性未验证。'
   try{
    $verification=Get-Content -LiteralPath (Join-Path $local 'verification.json') -Raw -Encoding UTF8 | ConvertFrom-Json
    foreach($tool in @('git','npm')){
@@ -649,7 +658,7 @@ try {
  try{
   if($clientSessionTouched){Start-ClashClient}
  }catch{Write-Host '无法自动打开 Clash，请手动启动客户端；此提示不改变上面的配置/恢复结果。' -ForegroundColor Yellow}
-  # 配置/恢复不会关闭或修改默认浏览器；沙箱浏览器由用户从界面显式打开。
+  # 配置/恢复不会关闭或修改默认浏览器；浏览器由用户自行管理。
 
 }
 $operationStream.Dispose()

@@ -87,7 +87,7 @@ function reconfigureCard(ctx) {
 function actionName(action) {
   return {
     apply: '配置网络', restore: '恢复快照', snapshot: '保存快照',
-    supplement: '补充配置', reconfigure: '恢复并重新配置', update: '更新规则', verify: '连通性检查',
+    supplement: '补充配置', reconfigure: '恢复并重新配置', update: '更新规则', verify: '连通性检查', audit: '完整复核与故障演练',
   }[action] || action;
 }
 

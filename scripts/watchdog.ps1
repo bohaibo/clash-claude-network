@@ -1,4 +1,4 @@
-﻿param([Parameter(Mandatory=$true)][string]$Token,[Parameter(Mandatory=$true)][string]$Python,[switch]$WaitForFirewall)
+﻿param([Parameter(Mandatory=$true)][string]$Token,[Parameter(Mandatory=$true)][string]$Python,[switch]$WaitForFirewall,[ValidateRange(180,600)][int]$FirewallTimeoutSeconds=180)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'operation_guard.ps1')
 $project=Split-Path -Parent $PSScriptRoot
@@ -6,12 +6,12 @@ $local=Join-Path $project '.local'
 $commit=Join-Path $local ($Token+'.commit')
 $deadline=(Get-Date).AddSeconds(180)
 if($WaitForFirewall){
- # Preparation and firewall writes each have a bounded 180-second window.
+ # Preparation remains bounded at 180 seconds; full drills get a separately bounded firewall window.
  $armed=Join-Path $local ($Token+'.armed')
  while((Get-Date) -lt $deadline -and !(Test-Path -LiteralPath $armed)){
   if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2
  }
- if(Test-Path -LiteralPath $armed){$deadline=(Get-Date).AddSeconds(180)}
+ if(Test-Path -LiteralPath $armed){$deadline=(Get-Date).AddSeconds($FirewallTimeoutSeconds)}
 }
 while((Get-Date) -lt $deadline){if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2}
 try{

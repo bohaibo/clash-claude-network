@@ -27,7 +27,7 @@ function Get-Culture {[pscustomobject]@{Name=$script:culture}}
 function Set-Culture {param($CultureInfo,$ErrorAction) $script:writes++;$script:culture=$CultureInfo}
 function Get-TimeZone {param($Id,$ErrorAction) if($Id){return [TimeZoneInfo]::FindSystemTimeZoneById($Id)};[pscustomobject]@{Id=$script:zone}}
 function Set-TimeZone {param($Id,$ErrorAction) $script:writes++;if($script:fail){throw 'injected write failure'};$script:zone=$Id}
-function Get-ItemProperty {param($LiteralPath,$Name,$ErrorAction) [pscustomobject]@{LocaleName=$script:culture}}
+function Get-ItemProperty {param($LiteralPath,$Name,$ErrorAction) [pscustomobject]@{LocaleName=$script:culture;Locale=('{0:x8}' -f ([Globalization.CultureInfo]::GetCultureInfo($script:culture)).LCID)}}
 function Reset-Fixture([int]$Start,[bool]$Running,$Sync,$Delayed){
  $script:writes=0;$script:fail=$false;$script:registry=@{};$script:running=@{tzautoupdate=$Running;W32Time=$Running}
  foreach($name in @('tzautoupdate','W32Time')){

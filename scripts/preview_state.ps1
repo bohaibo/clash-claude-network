@@ -63,4 +63,9 @@ try {
  $blocked=@($profiles | Where-Object {$_.Enabled -eq 'True' -and $_.DefaultOutboundAction -eq 'Block'}).Count
  $result.firewall_state=if($blocked -eq $profiles.Count){'开启'}elseif($blocked -eq 0){'关闭'}else{'部分开启'}
 } catch {$result.firewall_state='未能确认'}
+try {
+ $allBindings=@(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden -AllBindings -ErrorAction Stop)
+ $result.ipv6_enabled_bindings=@($allBindings | Where-Object Enabled).Count
+ if($result.ipv6_enabled_bindings -gt 0){$result.ipv6_state='未完整关闭'}
+} catch {$result.ipv6_enabled_bindings=$null;$result.ipv6_state='未能确认'}
 $result | ConvertTo-Json -Compress

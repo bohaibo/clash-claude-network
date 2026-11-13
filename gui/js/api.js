@@ -89,12 +89,12 @@ export function getLog(name) {
   return request('/api/log?name=' + encodeURIComponent(name), { timeout: 20000 });
 }
 
-export function post(path, payload = {}) {
+export function post(path, payload = {}, options = {}) {
   return request(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-    timeout: path === '/api/update-settings' ? 120000 : 30000,
+    timeout: options.timeout || (path === '/api/update-settings' ? 120000 : 30000),
   });
 }
 

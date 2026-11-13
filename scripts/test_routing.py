@@ -8,6 +8,8 @@ from routing_checks import audit_ingress,audit_lan_provider,lan_domain,normalize
 class Routing(unittest.TestCase):
  def setUp(self):
   test_snapshots.Snapshots.setUp(self)
+  (self.root/'geoip.dat').write_bytes(b'offline mock')
+  (self.root/'geosite.dat').write_bytes(b'offline fixture; core validation is mocked')
   self.policy=json.loads((client.PROJECT/'assets/claude-policy.json').read_text())
   self.data=dict(self.policy,domains=['+.cn'],ips=['1.0.1.0/24'],privateDomains=['+.lan'],lanCidrs=['10.0.0.0/8'],lan=[])
   self.base={'proxies':[{'name':'Chosen','type':'socks5','server':'example.invalid','port':1234}],

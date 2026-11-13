@@ -210,6 +210,9 @@ def verify(outage=False,stage=None):
  try:
   runtime=api(root,'GET','/configs')
   require(runtime.get('mode')=='rule','Live core is not in rule mode; network probes stopped')
+  from config_health import assert_live
+  assert_live(runtime,api(root,'GET','/rules'))
+  report['runtime_configuration']='passed'
   report['runtime_mode']='rule'
   group=api(root,'GET','/proxies')['proxies'][GROUP];require(group['all']==[node] and group['now']==node,'配置检查未通过，请查看本地记录。')
   check='domestic'

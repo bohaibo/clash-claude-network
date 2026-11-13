@@ -15,6 +15,7 @@ class JobBoundaries(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(dir=client.LOCAL, prefix='job-boundary-test-')
         self.addCleanup(temp.cleanup)
         self.app = gui_server.App(local=Path(temp.name), open_browser=False)
+        self.enterContext(patch.object(self.app, '_validate_job', return_value=('settings-recover', {'transaction':'fixture'})))
 
     def test_initial_record_failure_never_registers_worker_or_busy_state(self):
         original = gui_server.atomic_json
@@ -28,7 +29,7 @@ class JobBoundaries(unittest.TestCase):
             with self.subTest(write=failing_write), patch.object(gui_server, 'atomic_json', side_effect=fail), \
                  patch.object(self.app, '_run_job') as worker:
                 with self.assertRaises(gui_server.ApiError):
-                    self.app.start_job({'action': 'browser-open', 'confirm': 'BROWSER-OPEN'})
+                    self.app.start_job({'action': 'settings-recover', 'transaction': 'fixture', 'confirm': 'fixture'})
                 self.assertIsNone(self.app.active_job)
                 self.assertEqual(self.app.jobs, {})
                 worker.assert_not_called()
@@ -36,7 +37,7 @@ class JobBoundaries(unittest.TestCase):
     def test_thread_start_failure_removes_registration(self):
         with patch.object(threading.Thread, 'start', side_effect=RuntimeError('fixture')):
             with self.assertRaises(gui_server.ApiError):
-                self.app.start_job({'action': 'browser-open', 'confirm': 'BROWSER-OPEN'})
+                self.app.start_job({'action': 'settings-recover', 'transaction': 'fixture', 'confirm': 'fixture'})
         self.assertIsNone(self.app.active_job)
         self.assertEqual(self.app.jobs, {})
 

@@ -11,7 +11,7 @@ PROJECT=Path(__file__).resolve().parent.parent
 LOCAL=PROJECT/'.local';LOCAL.mkdir(exist_ok=True)
 SNAPSHOTS=LOCAL/'snapshots'
 GROUP='Claude-Overseas-Pinned'
-SOURCES={'domains':'https://raw.githubusercontent.com/pluwen/china-domain-allowlist/main/allow-list.sorl',
+SOURCES={'domains':'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt',
  'ips':'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/cncidr.txt',
  'privateDomains':'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/private.txt',
  'lanCidrs':'https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/lancidr.txt'}
@@ -112,35 +112,42 @@ def rule_source_bytes(url):
    return raw
  raise RuntimeError('规则下载失败：直连及可用的本机 Clash HTTP 代理均未成功。请检查 Clash 后台服务与 GitHub 访问后重试；未使用旧规则缓存。') from None
 
+REVIEWED_DIRECT_TLDS=frozenset(('alibaba alipay anquan baidu citic cn icbc shouji sina sohu taobao tmall unicom wang weibo xihuan '
+ 'xn--1qqw23a xn--3bst00m xn--3ds443g xn--55qw42g xn--55qx5d xn--5tzm5g xn--6frz82g xn--6qq986b3xl '
+ 'xn--8y0a063a xn--9et52u xn--9krt00a xn--czr694b xn--czrs0t xn--czru2d xn--fiq228c5hs xn--fiq64b '
+ 'xn--fiqs8s xn--fiqz9s xn--fjq720a xn--g2xx48c xn--hxt814e xn--imr513n xn--io0a7i xn--kput3i '
+ 'xn--nyqy26a xn--otu796d xn--rhqv96g xn--ses554g xn--unup4y xn--vhquv xn--vuq861b xn--xhq521b xn--zfr164b yun').split())
+
+def parse_rule_source(name,raw):
+ require(len(raw)<=4_000_000,'Oversized rule source')
+ document=yaml.safe_load(raw.decode('utf-8-sig'))
+ require(isinstance(document,dict) and set(document)=={'payload'} and isinstance(document['payload'],list),'Invalid rule payload')
+ values=[]
+ for value in document['payload']:
+  require(isinstance(value,str) and value and value==value.strip(),'Invalid rule item')
+  if name in ('domains','privateDomains'):
+   bare=value.removeprefix('+.')
+   require(len(bare)<=253 and all(re.fullmatch(r'[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?',label) for label in bare.split('.')),'Invalid domain rule')
+   if name=='domains':require('.' in bare or bare.lower() in REVIEWED_DIRECT_TLDS,'Overbroad public suffix requires review')
+   value=value.lower()
+  else:
+   network=ipaddress.ip_network(value)
+   require(network.prefixlen>0,'Whole-network direct rule rejected')
+   if name=='lanCidrs' and network==FAKE:continue
+   if network.version==4:require(not network.overlaps(FAKE),'Direct rule overlaps fake-IP pool')
+   value=str(network)
+  values.append(value)
+ return list(dict.fromkeys(values))
+
 def download_rules():
  data={};metadata={}
  for name,url in SOURCES.items():
   raw=rule_source_bytes(url)
-  require(len(raw)<=4_000_000,'Oversized rule source')
-  if name=='domains':
-   values=[]
-   for line in raw.decode('utf-8-sig').splitlines():
-    v=line.strip()
-    if not v or v.startswith((';','[')) or re.fullmatch(r'[0-9.*]+',v):continue
-    require(re.fullmatch(r'[a-zA-Z0-9.*_-]+',v),'Unrecognized domain-list syntax')
-    v='+.'+v[2:] if v.startswith('*.') else v
-    if v not in ('+.douban.*','+.jianshu.*'):
-     # Never reuse the outer loop variable here: clobbering `name` would key
-     # this source under the last domain instead of 'domains'.
-     bare=v.removeprefix('+.');require('*' not in bare,'配置检查未通过，请查看本地记录。')
-     require('.' in bare or bare in ('cn','xn--fiqs8s'),'Overbroad public suffix requires review')
-     require(all(re.fullmatch(r'[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?',label) for label in bare.split('.')),'配置检查未通过，请查看本地记录。')
-    values.append(v)
-  else:
-   values=yaml.safe_load(raw)['payload'];require(isinstance(values,list),'配置检查未通过，请查看本地记录。')
-   if name=='lanCidrs':values=[v for v in values if v!='198.18.0.0/15']
-   if name in ('ips','lanCidrs'):
-    for value in values:
-     network=ipaddress.ip_network(value);require(network.prefixlen>0,'配置检查未通过，请查看本地记录。')
-     if network.version==4:require(not network.overlaps(FAKE),'Direct rule overlaps fake-IP pool')
-  data[name]=list(dict.fromkeys(values));metadata[name]={'url':url,'sha256':hashlib.sha256(raw).hexdigest(),'count':len(data[name])}
- require(len(data['domains'])>1000 and len(data['ips'])>8000 and len(data['privateDomains'])>30,'配置检查未通过，请查看本地记录。')
- write(LOCAL/'sources.json',metadata);return data
+  data[name]=parse_rule_source(name,raw)
+  metadata[name]={'url':url,'sha256':hashlib.sha256(raw).hexdigest(),'count':len(data[name])}
+ require(len(data['domains'])>10000 and len(data['ips'])>8000 and len(data['privateDomains'])>30 and len(data['lanCidrs'])>0,'Incomplete rule source')
+ data['ruleSources']=metadata
+ write(LOCAL/'sources-candidate.json',metadata);return data
 def api(root,method,path,body=None):
  config=load(root/'clash-verge.yaml');pipes=[n for n in os.listdir('//./pipe/') if n.startswith('verge-mihomo-')]
  require(len(pipes)==1,'Cannot identify a unique Mihomo control pipe')
@@ -230,6 +237,7 @@ def build(root,item,node,data=None):
  require(result.returncode==0,'Existing or generated enhancement script failed; no changes published')
  candidate=json.loads(result.stdout);validate(candidate,original,node)
  text=yaml.safe_dump(candidate,allow_unicode=True,sort_keys=False);check=LOCAL/'candidate.yaml';check.write_text(text,encoding='utf-8')
+ require(all((root/name).is_file() for name in ('geosite.dat','geoip.dat')),'缺少本机 geosite.dat 或 geoip.dat；请先在 Clash 中准备规则库，未发布配置')
  result=subprocess.run([core,'-t','-d',str(root),'-f',str(check)],capture_output=True,timeout=45)
  # Keep native diagnostics local: they may include subscription or node details.
  (LOCAL/'candidate-validation.stdout.log').write_bytes(result.stdout)
@@ -239,6 +247,9 @@ def build(root,item,node,data=None):
 def validate(config,original,node):
  require(config['proxies']==original['proxies'],'Node definitions changed')
  require(config.get('mode')=='rule','Only rule mode is allowed; direct/global mode rejected')
+ require(config.get('geodata-mode') is True,'Overseas geosite requires geodata mode')
+ require(config['rules'].index('GEOSITE,geolocation-!cn,'+GROUP)<config['rules'].index('RULE-SET,strict-cn-domain,DIRECT'),'Foreign exclusion must precede CN rules')
+ require(config['dns']['nameserver-policy'].get('geosite:geolocation-!cn')==config['dns']['nameserver'],'Foreign DNS must use pinned overseas resolvers')
  require(config.get('find-process-mode')=='strict','Process matching must use strict mode')
  audit_ingress(config,GROUP)
  require(set(config.get('proxy-providers',{}))==set(original.get('proxy-providers',{})),'Subscription provider removed')
@@ -344,7 +355,8 @@ def prepare(root,node,subscription,region):
  owned=entry and str(entry['uid']).startswith('PortableClaude') and 'PORTABLE-CLAUDE-NETWORK-V1' in safe_file(root,'profiles/'+entry['file']).read_text(encoding='utf-8')
  uid=entry['uid'] if owned else 'PortableClaude'+uuid.uuid4().hex[:12]
  file=entry['file'] if owned else uid+'.js'
- plan={'root':str(root),'node':node,'subscription_uid':item['uid'],'script_uid':uid,'script_file':file,
+ from config_health import source_digest
+ plan={'source_digest':source_digest(),'root':str(root),'node':node,'subscription_uid':item['uid'],'script_uid':uid,'script_file':file,
   'script_existed':bool(owned),'region':region,'core_program':actual_core(),'snapshot':str(path),'generated_files':['profiles/'+file]}
  if (LOCAL/'plan.json').exists():
   earlier=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'))
@@ -396,6 +408,8 @@ def apply_client():
    if value is not None:path.write_bytes(value)
    elif path.exists():path.unlink()
   api(root,'PUT','/configs?force=true',{'payload':current});raise
+ _,_,data,_=parse_project_wrapper(targets[safe_file(root,'profiles/'+plan['script_file'])])
+ write(LOCAL/'sources.json',data.get('ruleSources',{}))
  return {'client_applied':True,'node':plan['node']}
 VOLATILE_NAMES=('singleton-instance.lock','singleton-instance.json','cache.db')
 VOLATILE_DIRS=('logs','clash-verge-rev-backup')

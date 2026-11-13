@@ -170,14 +170,12 @@ def status(registry=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['snapshot', 'apply', 'restore', 'status', 'verify'])
+    parser.add_argument('action', choices=['restore', 'status', 'verify'])
     args = parser.parse_args()
     registry = Registry()
     if args.action == 'status': return status(registry)
     directory = Path(os.environ['CCN_SNAPSHOT'])
     if args.action == 'verify': load_sealed(directory)
-    elif args.action == 'snapshot': snapshot(directory, registry)
-    elif args.action == 'apply': apply(load_sealed(directory), registry)
     elif not (directory / RECORD).exists(): return {'success': True, 'skipped': '旧快照没有全浏览器 WebRTC 记录，保留当前设置'}
     else: restore(load_sealed(directory), registry)
     return {'success': True, 'scope': ['Chrome', 'Edge', 'Firefox'], 'restart_required': True, 'browser_behavior': 'unverified'}

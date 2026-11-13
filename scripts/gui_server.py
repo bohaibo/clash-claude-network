@@ -32,7 +32,9 @@ from urllib.parse import parse_qs, urlsplit
 import gui_settings
 import node_region
 import region_profile
-import sandbox_browser
+import gui_window
+from app_release import VERSION, ReleaseChecker
+from package_app import build_package
 from operation_lock import operation_lock, pending_settings
 from atomic_files import replace_file
 
@@ -42,7 +44,6 @@ GUI_DIR = PROJECT / 'gui'
 JOBS_DIR = LOCAL / 'gui' / 'jobs'
 SESSION_FILE = LOCAL / 'gui' / 'session.json'
 SERVER_LOG = LOCAL / 'gui' / 'server.log'
-VERSION = '2.0'
 COOKIE = 'ccn_session'
 JOB_ID_RE = re.compile(r'^[a-f0-9]{32}$')
 SNAPSHOT_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$')
@@ -55,14 +56,12 @@ CONFIRM = {
     'reconfigure': 'RECONFIGURE',
     'update': 'UPDATE',
     'verify': 'VERIFY',
+    'audit': 'AUDIT',
 }
-ADMIN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure'}
-RUN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure'}
-LOCAL_ACTIONS = {
-    'browser-open': 'open', 'browser-check': 'check', 'browser-close': 'close',
-    'browser-reset': 'reset', 'browser-register': 'register-default', 'settings-recover': None,
-}
-PUBLIC_FILES = {'sandbox-check.html', 'sandbox-check.js', 'sandbox-check.css', 'favicon.svg'}
+ADMIN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure', 'audit'}
+RUN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure', 'audit'}
+LOCAL_ACTIONS = {'settings-recover': None}
+PUBLIC_FILES = {'favicon.svg'}
 MIME = {
     '.html': 'text/html; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
@@ -240,6 +239,10 @@ class App:
         self.jobs = {}
         self._lock = threading.RLock()
         self._background = {}
+        self.release_checker = ReleaseChecker(project=self.project, local=self.local)
+        self._software_check_running = False
+        self.package_results = {}
+        self.last_package = None
         self._settings_busy = False
         self._shutdown_requested = False
         self._task_cache = (0.0, None)
@@ -275,6 +278,7 @@ class App:
         return value if isinstance(value, dict) else {}
 
     def snapshots(self):
+        import snapshot_store
         root = self.local / 'snapshots'
         plan = self.plan()
         associated = ''
@@ -285,12 +289,18 @@ class App:
         rows = []
         if not root.is_dir():
             return rows
+        if snapshot_store.linked(root):
+            return rows
+        protected, protection_error = snapshot_store.protection(self.local)
+        baseline_name = self.baseline_name()
         for folder in sorted(root.iterdir(), key=lambda p: p.name, reverse=True):
             if not folder.is_dir():
                 continue
+            if snapshot_store.linked(folder):
+                continue
             manifest = read_json(folder / 'manifest.json')
             if not isinstance(manifest, dict):
-                continue
+                manifest = {}
             sha = manifest.get('sha256') if isinstance(manifest.get('sha256'), dict) else {}
             extra = manifest.get('extra_sha256') if isinstance(manifest.get('extra_sha256'), dict) else {}
             system_file = folder / 'system.json'
@@ -303,9 +313,28 @@ class App:
                 'sealed': bool(system_file.is_file() and committed),
                 'system': system_file.is_file(),
                 'associated': bool(associated and str(folder.resolve()) == associated),
+                'baseline': folder.name == baseline_name,
+                'delete_reason': snapshot_store.deletion_reason(folder, protected, protection_error),
+                'files': len(set(sha) | set(extra)),
                 'node': str(manifest.get('node') or ''),
             })
         return rows
+
+    def delete_snapshot(self, payload):
+        import snapshot_store
+        name = payload.get('snapshot')
+        if not isinstance(name, str) or payload.get('confirm') != name:
+            raise ApiError(400, '请确认要删除的快照。')
+        with self.settings_operation():
+            try:
+                snapshot_store.delete_snapshot(self.local, name)
+            except FileNotFoundError as exc:
+                raise ApiError(404, str(exc)) from None
+            except ValueError as exc:
+                raise ApiError(409, str(exc)) from None
+            except OSError:
+                raise ApiError(500, '删除未完成，请刷新检查；文件可能被占用或缺少权限。') from None
+        return {'deleted': name}
 
     def pending_firewall(self):
         file = self.local / 'pending-firewall.json'
@@ -318,12 +347,12 @@ class App:
         return not (self.local / (token + '.commit')).is_file()
 
     def baseline_name(self):
-        value = read_json(self.local / 'baseline-selection.json', {})
-        if isinstance(value, dict) and isinstance(value.get('snapshot'), str):
-            target = self.local / 'snapshots' / value['snapshot']
-            if (target / 'manifest.json').is_file():
-                return value['snapshot']
-        return ''
+        import baseline
+        try:
+            target = baseline.default_snapshot(self.local)
+            return target.name if target else ''
+        except (OSError, ValueError, TypeError):
+            return ''
 
     def configured(self):
         root = self.plan().get('root')
@@ -400,10 +429,18 @@ class App:
             'reason': str(last.get('reason') or last.get('note') or ''),
             'error': str(last.get('error') or ''),
             'time': str(last.get('time') or ''),
+            'unchanged': bool(last.get('unchanged')),
+            'migrated': bool(last.get('migrated')),
+            'recovery_required': bool(last.get('recovery_required')),
+            'source': 'Loyalsoldier/clash-rules' if last.get('source') == 'Loyalsoldier/clash-rules' else '',
+            'changes': {key: {field: value for field, value in row.items()
+                              if field in ('before', 'after', 'added', 'removed') and type(value) is int and value >= 0}
+                        for key, row in (last.get('changes') or {}).items()
+                        if key in ('domains', 'ips', 'privateDomains', 'lanCidrs') and isinstance(row, dict)},
         }
         stale = True
         moment = parse_time(clean_last.get('time'))
-        if clean_last.get('success') and moment is not None:
+        if clean_last.get('success') and not clean_last.get('skipped') and moment is not None:
             stale = (datetime.datetime.now().astimezone() - moment).total_seconds() > 24 * 3600
         elif not clean_last.get('time'):
             stale = True
@@ -425,9 +462,11 @@ class App:
             return {'available': False}
         stages = report.get('stages') if isinstance(report.get('stages'), dict) else {}
         stage_rows = []
-        for name, title in (('node-outage', '节点故障保护'), ('core-exit', '停核保护'), ('post-recovery', '恢复后复测')):
+        for name, title in (('firewall-before', '演练前完整防火墙复核'), ('node-outage', '节点故障保护'), ('tun-off', '关闭 TUN、内核保持运行'), ('core-exit', '停核保护'), ('post-recovery', '恢复后复测'), ('firewall-after', '演练后完整防火墙复核')):
             entry = stages.get(name) if isinstance(stages.get(name), dict) else {}
-            stage_rows.append({'id': name, 'title': title, 'tested': bool(entry), 'success': bool(entry.get('success'))})
+            passed = entry.get('success') is True and (not name.startswith('firewall-') or entry.get('full_verified') is True)
+            stage_rows.append({'id': name, 'title': title, 'tested': bool(entry), 'success': passed,
+                               'status': 'passed' if passed else 'unverified' if not entry or entry.get('status') == 'unverified' else 'failed'})
         egress = report.get('egress') if isinstance(report.get('egress'), dict) else {}
         checks = []
         checks.append({'title': '内核运行模式', 'status': 'passed' if report.get('runtime_mode') == 'rule' else 'unknown'})
@@ -446,8 +485,14 @@ class App:
             checks.append({'title': title, 'status': status or 'unknown'})
         udp = report.get('udp_egress') if isinstance(report.get('udp_egress'), dict) else {}
         checks.append({'title': 'UDP 出口与节点路由', 'status': 'passed' if udp.get('verified') else 'failed' if udp else 'unknown'})
+        from config_health import source_digest
+        from verification_reports import coverage_for
         return {
             'available': True,
+            'source_matches_current': report.get('source_digest') == source_digest(),
+            'coverage': coverage_for(stages) if stages else 'legacy',
+            'evidence_kind': 'historical-network-test',
+            'current_verified': False,
             'success': bool(report.get('success')),
             'time': str(report.get('time') or ''),
             'run_id': str(report.get('run_id') or ''),
@@ -505,17 +550,6 @@ class App:
             current['winhttp'] = preview_config.winhttp()
         except (OSError, AttributeError):
             current['winhttp'] = '读取失败（未验证）'
-        profile = sandbox_browser.profile_path(self.local)
-        preferences = read_json(profile / 'Default' / 'Preferences', {})
-        current['browser_language'] = (preferences.get('intl', {}).get('accept_languages') or '独立资料尚未设置语言（设置页默认值不代表浏览器当前值）')
-        try:
-            import webrtc_system
-            rtc = webrtc_system.status()
-            current['webrtc_protection'] = rtc['state']
-            current['webrtc_browsers'] = rtc['browsers']
-        except (OSError, ValueError):
-            current['webrtc_protection'] = '未能确认'
-
         # Read only summaries; never serialize node definitions or proxy URLs.
         try:
             import client
@@ -523,6 +557,8 @@ class App:
             config = client.load(root / 'clash-verge.yaml') or {}
             import preview_config
             current.update(preview_config.network(config))
+            import config_health
+            current['health'] = config_health.inspect(config, current, self.plan())
         except (OSError, ValueError, RuntimeError, TypeError):
             pass
         for name, relative in [('git', '.gitconfig'), ('npm', '.npmrc'), ('docker', '.docker/config.json')]:
@@ -610,11 +646,6 @@ class App:
                                     time.monotonic() - entry['at'] >= 30}
                     for name, entry in self._background.items()}
 
-    def browser_summary(self):
-        browser = sandbox_browser.status(self.local)
-        browser['default'] = sandbox_browser.default_status(self.local)
-        return browser
-
     def app_state(self):
         plan = self.plan()
         configured, configured_error = self.configured()
@@ -637,9 +668,6 @@ class App:
             'snapshot_ok': snapshot_ok,
             'core_program': str(plan.get('core_program') or ''),
         }
-        browser = self.background_value('browser', self.browser_summary,
-            {'running': False, 'settings': {}, 'engine': {}, 'profile': {}, 'default': {},
-             'error': '正在读取浏览器状态（未验证）'}, ttl=15)
         active = self.active_job_view()
         last_run = read_json(self.local / 'last-run.json', {})
         if not isinstance(last_run, dict):
@@ -648,6 +676,7 @@ class App:
             'preview': self.background_value('preview', self.configuration_preview,
                 {'current': {}, 'regions': region_profile.PROFILES, 'read_at': ''}),
             'version': VERSION,
+            'software': self.software_summary(),
             'admin': is_admin(),
             'configured': configured,
             'configured_error': configured_error,
@@ -657,14 +686,12 @@ class App:
             'verification': self.verification_summary(),
             'update': self.background_value('update', self.update_summary,
                 {'mode': 'unknown', 'task': {'installed': None}, 'settings': {}, 'last': {}}, ttl=12),
-            'browser': browser,
             'service': self.background_value('service', self.service_status,
                 {'service': 'Unknown', 'app_running': False}, ttl=15),
             'app': {
                 'python': sys.version.split()[0],
                 'node': bool(self.node_path()),
                 'windows': os.name == 'nt',
-                'gui_browser_fallback': self.browser_fallback,
                 'project_name': self.project.name,
                 'path': str(self.local.relative_to(self.project)) if self.local.is_relative_to(self.project) else '',
             },
@@ -684,7 +711,6 @@ class App:
             'reconfigure_runs': self.reconfigure_runs(),
             'log_files': self.log_files(),
             'limits': {
-                'browser': '沙箱资料目录仅隔离浏览器数据；不是操作系统级沙箱，也不修改默认 Chrome/Edge。',
                 'network': '未测试浏览器 WebRTC、Claude 网页、账号可用性、Docker/WSL 和虚拟机。',
             },
             'collection': self.collection_status(),
@@ -904,9 +930,7 @@ class App:
                 if transaction not in {row['id'] for row in self.settings_transactions()}:
                     raise ApiError(400, '没有待恢复的设置记录。')
                 return action, {'transaction': transaction}
-            if payload.get('confirm') != ('DELETE' if action == 'browser-reset' else action.upper()):
-                raise ApiError(400, '浏览器操作确认不匹配。')
-            return action, {}
+            raise ApiError(400, '不支持的本地操作。')
         if action not in RUN_ACTIONS | {'update', 'verify'}:
             raise ApiError(400, '不支持的操作。')
         confirm = str(payload.get('confirm') or '')
@@ -939,14 +963,14 @@ class App:
             if not REGION_RE.fullmatch(region):
                 raise ApiError(400, '出口地区须为两位国家代码，例如 SG。')
             params.update(node=node, subscription=subscription, region=region)
-        if action in ('supplement', 'reconfigure', 'update', 'verify') and not plan:
+        if action in ('supplement', 'reconfigure', 'update', 'verify', 'audit') and not plan:
             raise ApiError(400, '还没有配置记录；请先完成一次配置。')
         if action in ('supplement', 'reconfigure') and not self.baseline_name():
             raise ApiError(400, '没有可用的首次恢复点；请先完成一次配置并保存原始快照。')
         if action == 'reconfigure':
             if (self.local / 'reconfigure-active.json').is_file():
                 raise ApiError(409, '安全重新配置或网络恢复仍在执行，请等待本机看护完成。')
-        if action in ('update', 'verify') and not configured:
+        if action in ('update', 'verify', 'audit') and not configured:
             raise ApiError(400, '当前未检测到本项目的分流配置；请先配置。')
         return action, params
 
@@ -1003,11 +1027,11 @@ class App:
                     command += ['-Subscription', params['subscription']]
             elif action == 'restore':
                 command += ['-Snapshot', params['snapshot']]
-            if action in ('apply', 'supplement', 'restore', 'reconfigure'):
+            if action in ('apply', 'supplement', 'restore', 'reconfigure', 'audit'):
                 command.append('-Acknowledged')
             return command, events
         if action == 'update':
-            return [python_console(), str(self.scripts / 'update.py')], events
+            return [python_console(), str(self.scripts / 'update.py'), '--migrate-source'], events
         return [python_console(), str(self.scripts / 'verify.py')], events
 
     def _complete_job(self, job, status):
@@ -1088,17 +1112,16 @@ class App:
         error = ''
         try:
             append_event(events, {'type': 'step', 'index': 1, 'total': 1,
-                                  'title': '正在恢复原设置…' if job['action'] == 'settings-recover' else '正在处理浏览器操作…'})
+                                  'title': '正在恢复原设置…'})
             with operation_lock(self.local, settings_recovery=job['action'] == 'settings-recover'):
                 if job['action'] == 'settings-recover':
                     result = self.restore_settings_transaction(job['params']['transaction'])
                 else:
-                    self.invalidate_background('browser')
-                    result = self._browser_action({'action': LOCAL_ACTIONS[job['action']], 'confirm': 'DELETE'})
+                    raise ApiError(400, '不支持的本地操作。')
         except Exception as exc:
             error = str(exc) if isinstance(exc, ApiError) else '操作未完成（' + type(exc).__name__ + '）。'
         finally:
-            self.invalidate_background('browser', 'update')
+            self.invalidate_background('update')
         status = {'state': 'failed' if error else 'success', 'action': job['action'],
             'started': job['created'], 'finished': now_iso(), 'exit_code': 1 if error else 0,
             'error': error, 'result': result}
@@ -1384,58 +1407,50 @@ class App:
             self.publish_background('update', summary)
             return summary
 
-    def browser_action(self, payload):
-        asynchronous = {value: key for key, value in LOCAL_ACTIONS.items() if value is not None}
-        action = str(payload.get('action') or '')
-        if action in asynchronous:
-            job_action = asynchronous[action]
-            if action == 'reset' and payload.get('confirm') != 'DELETE':
-                raise ApiError(400, '重置资料需要明确确认。')
-            return self.start_job({'action': job_action, 'confirm': 'DELETE' if action == 'reset' else job_action.upper()})
-        with self.settings_operation():
-            self.invalidate_background('browser')
-            try:
-                result = self._browser_action(payload)
-                if str(payload.get('action')) == 'save-settings':
-                    result['default'] = sandbox_browser.default_status(self.local)
-                    self.publish_background('browser', result)
-                return result
-            finally:
-                if str(payload.get('action')) != 'save-settings':
-                    self.invalidate_background('browser')
+    def software_summary(self):
+        result = self.release_checker.state()
+        result['checking'] = self._software_check_running
+        result['package'] = self.last_package
+        return result
 
-    def _browser_action(self, payload):
-        action = str(payload.get('action') or '')
-        try:
-            if action == 'open':
-                return sandbox_browser.launch(local=self.local)
-            if action == 'check':
-                return sandbox_browser.open_environment_checks(local=self.local)
-            if action == 'close':
-                return sandbox_browser.close(local=self.local)
-            if action == 'reset':
-                return sandbox_browser.reset(local=self.local, confirm=str(payload.get('confirm') or ''))
-            if action == 'default-status':
-                return sandbox_browser.default_status(self.local)
-            if action == 'register-default':
-                return sandbox_browser.register_default(self.local)
-            if action == 'open-default-settings':
-                return sandbox_browser.open_default_settings()
-            if action == 'save-settings':
-                running = sandbox_browser.running_pids(sandbox_browser.profile_path(self.local))
-                if running:
-                    raise ApiError(409, '请先关闭沙箱浏览器，再修改引擎或语言。')
-                values = {
-                    'engine': str(payload.get('engine') or ''),
-                    'language': str(payload.get('language') or ''),
-                }
-                sandbox_browser.save_settings(values, self.local)
-                return sandbox_browser.status(self.local)
-            raise ApiError(400, '不支持的浏览器操作。')
-        except ApiError:
-            raise
-        except (ValueError, OSError, RuntimeError) as exc:
-            raise ApiError(400, str(exc)) from exc
+    def request_software_check(self, force=True):
+        with self._lock:
+            if not self._software_check_running:
+                self._software_check_running = True
+                def check():
+                    try:
+                        self.release_checker.check(force=force)
+                    except Exception:
+                        self.log('Software update check did not complete')
+                    finally:
+                        with self._lock:
+                            self._software_check_running = False
+                try:
+                    threading.Thread(target=check, daemon=True, name='ccn-software-check').start()
+                except Exception:
+                    self._software_check_running = False
+                    raise ApiError(500, '无法启动更新检查，请重试。')
+        return self.software_summary()
+
+    def export_package(self):
+        with self.settings_operation():
+            try:
+                result = build_package(self.project, self.local)
+            except Exception:
+                raise ApiError(500, '打包检查未通过；未生成可下载的安装包。') from None
+            self.package_results[result['id']] = result
+            self.last_package = dict(result, download_url='/api/packages/' + result['id'])
+        return self.software_summary()
+
+    def package_download(self, identifier):
+        result = self.package_results.get(identifier)
+        if not JOB_ID_RE.fullmatch(identifier) or result is None:
+            raise ApiError(404, '安装包不存在，请重新导出。')
+        folder = (self.local / 'packages' / identifier).resolve()
+        target = (folder / result['filename']).resolve()
+        if target.parent != folder or not target.is_file():
+            raise ApiError(404, '安装包不存在，请重新导出。')
+        return target, result['filename']
 
     def reveal_local(self):
         try:
@@ -1479,7 +1494,7 @@ class App:
         existing = self.existing_session()
         if existing:
             try:
-                sandbox_browser.launch(existing, local=self.local, gui=True, app=True)
+                gui_window.launch(existing, local=self.local, gui=True, app=True)
             except Exception as exc:
                 # Same rule as a fresh start: reuse the app window, never the
                 # user's default browser.
@@ -1505,6 +1520,7 @@ class App:
         })
         self.log('GUI listening on ' + self.base_url)
         if self.open_browser:
+            self.request_software_check(force=False)
             self.open_gui_browser()
         threading.Thread(target=self._idle_monitor, daemon=True, name='ccn-idle').start()
         try:
@@ -1515,7 +1531,7 @@ class App:
 
     def open_gui_browser(self):
         try:
-            sandbox_browser.launch(self.session_url(), local=self.local, gui=True, app=True)
+            gui_window.launch(self.session_url(), local=self.local, gui=True, app=True)
             self.browser_opened = True
             self.last_browser_seen = time.monotonic()
             self.log('GUI browser opened in isolated app window')
@@ -1550,7 +1566,7 @@ class App:
             now = time.monotonic()
             if self.browser_opened:
                 try:
-                    pids = sandbox_browser.running_pids(sandbox_browser.gui_profile_path(self.local))
+                    pids = gui_window.running_pids(gui_window.gui_profile_path(self.local))
                 except Exception:
                     pids = []
                 if pids:
@@ -1575,7 +1591,7 @@ class App:
             except OSError:
                 pass
         try:
-            sandbox_browser.close(local=self.local, profile=sandbox_browser.gui_profile_path(self.local))
+            gui_window.close(local=self.local, profile=gui_window.gui_profile_path(self.local))
         except Exception as exc:
             self.log('GUI browser close failed: ' + repr(exc))
 
@@ -1761,6 +1777,11 @@ def make_handler(app):
                     refresh = parse_qs(parsed.query).get('refresh', ['0'])[0] == '1'
                     self._json(app.nodes(refresh=refresh))
                     return
+                if path.startswith('/api/packages/'):
+                    target, filename = app.package_download(path.rsplit('/', 1)[-1])
+                    self._send(200, target.read_bytes(), 'application/zip',
+                               {'Content-Disposition': 'attachment; filename="' + filename + '"'})
+                    return
                 if path.startswith('/api/job/'):
                     self._json(app.job_view(path.rsplit('/', 1)[-1]))
                     return
@@ -1802,8 +1823,12 @@ def make_handler(app):
                     self._json(app.cancel_job(str(payload.get('id') or '')))
                 elif parsed.path == '/api/update-settings':
                     self._json(app.save_update_settings(payload))
-                elif parsed.path == '/api/browser':
-                    self._json(app.browser_action(payload))
+                elif parsed.path == '/api/software-check':
+                    self._json(app.request_software_check(), 202)
+                elif parsed.path == '/api/package':
+                    self._json(app.export_package())
+                elif parsed.path == '/api/snapshot-delete':
+                    self._json(app.delete_snapshot(payload))
                 elif parsed.path == '/api/reveal':
                     self._json(app.reveal_local())
                 elif parsed.path == '/api/shutdown':

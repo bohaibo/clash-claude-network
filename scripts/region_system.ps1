@@ -83,7 +83,9 @@ function Set-SystemRegionTime([string]$Directory,[string]$RegionCode,[string]$Cu
   Set-TimeZone -Id $TimeZoneId -ErrorAction Stop
   # Read persisted culture because Get-Culture can be cached in this PowerShell session.
   $locale=(Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\International' -Name LocaleName -ErrorAction Stop).LocaleName
-  if((Get-WinHomeLocation).GeoId -ne $region.GeoId -or $locale -ine $CultureName -or (Get-TimeZone).Id -ne $TimeZoneId){throw '国家/区域格式/时区设置验证失败。'}
+  $localeId=(Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\International' -Name Locale -ErrorAction Stop).Locale
+  $expectedId='{0:x8}' -f ([Globalization.CultureInfo]::GetCultureInfo($CultureName)).LCID
+  if($localeId -ine $expectedId -or (Get-WinHomeLocation).GeoId -ne $region.GeoId -or $locale -ine $CultureName -or (Get-TimeZone).Id -ne $TimeZoneId){throw '国家/区域格式/时区设置验证失败。'}
 }
 function Restore-RegionTimeService([string]$Name,$Entry) {
   $startup=@{2='Automatic';3='Manual';4='Disabled'}[[int]$Entry.start]

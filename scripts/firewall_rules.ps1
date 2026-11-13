@@ -147,6 +147,9 @@ function Assert-StrictFirewall([string]$coreProgram,[switch]$AllowAdditionalLoca
   }
   $core=ConvertTo-FirewallProgram $coreProgram
   if(!(Test-Path -LiteralPath $core -PathType Leaf)){throw '配置记录中的核心程序不存在。'}
+  # Existence alone must not hide access restrictions on the recorded image.
+  $coreStream=[IO.File]::OpenRead($core)
+  try{if($coreStream.Length -le 0){throw '核心程序文件为空。'}}finally{$coreStream.Dispose()}
   $running=@(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'verge-mihomo.exe'" -ErrorAction Stop | Select-Object -ExpandProperty ExecutablePath -Unique)
   if($running.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$running[0]) -or (ConvertTo-FirewallProgram ([string]$running[0])) -ine $core){
     throw '运行中的核心路径与配置记录不一致或无法唯一确认。'

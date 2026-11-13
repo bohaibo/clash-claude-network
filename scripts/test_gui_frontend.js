@@ -12,12 +12,12 @@ async function main() {
   const context = vm.createContext({
     api: { getJob: (...args) => getJob(...args), SessionError },
     ui: { toast: (...args) => messages.push(args) },
-    overview() {}, network() {}, browser() {}, snapshots() {}, updates() {}, logs() {}, help() {},
+    software() {}, overview() {}, network() {}, browser() {}, snapshots() {}, updates() {}, logs() {}, help() {},
     browserHasDraft: () => true, updatesHasDraft: () => true,
     setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; }, clearTimeout() {},
     console,
   });
-  const refreshContext = vm.createContext({ overview() {}, network() {}, browser() {}, snapshots() {},
+  const refreshContext = vm.createContext({ software() {}, overview() {}, network() {}, browser() {}, snapshots() {},
     updates() {}, logs() {}, help() {}, api: {}, ui: {}, console,
     browserHasDraft: () => true, updatesHasDraft: () => true });
   vm.runInContext(source + `
@@ -86,7 +86,7 @@ async function main() {
   assert.equal(fresh.children[1], newStatus);
   assert.equal(fresh.children[2], form, 'form survives inserted warnings through stable keys');
   assert.equal(fresh.children[3], log, 'open logs must survive status refresh');
-  const raceContext = vm.createContext({ overview() {}, network() {}, browser() {}, snapshots() {},
+  const raceContext = vm.createContext({ software() {}, overview() {}, network() {}, browser() {}, snapshots() {},
     updates() {}, logs() {}, help() {}, api: {}, ui: {}, console });
   vm.runInContext(source + `
     let respond;
@@ -107,7 +107,7 @@ async function main() {
   const posts = [];
   let acceptJob;
   const bannerContext = vm.createContext({
-    overview() {}, network() {}, browser() {}, snapshots() {}, updates() {}, logs() {}, help() {},
+    software() {}, overview() {}, network() {}, browser() {}, snapshots() {}, updates() {}, logs() {}, help() {},
     document: { getElementById: () => host }, console,
     api: { startJob: payload => { posts.push(payload); return new Promise(r => acceptJob = r); } },
     ui: {

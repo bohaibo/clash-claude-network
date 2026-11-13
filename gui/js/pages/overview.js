@@ -4,7 +4,6 @@ import * as ui from '../ui.js';
 const IMPACT = [
   { title: 'Clash 客户端', text: '为所选订阅关联独立的项目增强脚本与固定节点组；保留原自定义脚本和现有节点。' },
   { title: '严格出站防火墙', text: '保留四条项目放行并阻断 SharedAccess 服务出站。Mihomo 停止时国内公网也会断开。' },
-  { title: '全浏览器 WebRTC', text: '设置 Chrome、Edge、Firefox 策略；可能影响网页语音和视频，Firefox 关闭 WebRTC。需重启浏览器，其他浏览器和实际泄露效果未验证。' },
   { title: '系统 IPv6', text: '全局关闭并关闭现有网卡的 IPv6 绑定；依赖 IPv6 的内网资源可能不可用，需要重启 Windows 才完全生效。' },
   { title: '系统自动定位', text: '通过 Windows 策略关闭系统定位，地图、天气等定位功能会受影响；恢复时还原原有策略。' },
   { title: '区域与时区', text: '关闭自动时区和自动校时，按所选节点地区设置系统国家、Windows 语言和区域页面中的区域格式（日期和数字）及时区。区域格式可能需注销后重新登录或重启生效；恢复会还原原格式和时间设置。长期关闭校时可能产生误差。' },
@@ -84,12 +83,11 @@ export function refreshStatus(ctx) {
 function statusGrid(ctx) {
   const state = ctx.state;
   const verification = state.verification || {};
-  const browser = state.browser || {};
   const update = state.update || {};
   const tiles = [
     {
       label: '网络配置',
-      value: !state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : verification.dns_failed ? 'DNS 验收失败' : verification.available && verification.success ? '验收通过' : '已写入',
+      value: !state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : verification.dns_failed ? 'DNS 验收失败' : verification.available && verification.success ? '历史验收通过' : '已写入',
       tone: !state.configured ? 'warn' : state.last_run?.success === false || verification.dns_failed ? 'bad' : verification.available && verification.success ? 'ok' : 'warn',
       detail: state.configured ? ('节点 ' + (state.plan.node || '—') + (verification.available ? ' · 上次验收 ' + ui.relativeTime(verification.time) : ' · 尚未验收')) : '首次配置会先保存原始快照',
       action: state.configured ? () => ctx.navigate('network') : null,
@@ -102,15 +100,8 @@ function statusGrid(ctx) {
       action: () => ctx.navigate('updates'),
     },
     {
-      label: '沙箱浏览器',
-      value: browser.running ? '运行中' : browser.engine?.name ? '未运行' : '不可用',
-      tone: browser.running ? 'ok' : browser.engine?.name ? 'neutral' : 'warn',
-      detail: browser.engine?.name ? (browser.engine.name === 'chrome' ? 'Chrome 独立资料目录' : 'Edge 独立资料目录') : '需要安装 Chrome 或 Edge',
-      action: () => ctx.navigate('browser'),
-    },
-    {
       label: '上次验收',
-      value: verification.available ? (verification.success ? '通过' : '未通过') : '未验证',
+      value: verification.available ? (verification.success ? '历史通过' : '历史未通过') : '未验证',
       tone: verification.available ? (verification.success ? 'ok' : 'bad') : 'neutral',
       detail: verification.available ? ui.relativeTime(verification.time) : '配置完成后自动运行',
       action: () => ctx.navigate('logs'),
@@ -191,7 +182,6 @@ function renderImpact(ctx) {
     ['国家或地区', countryName(now.country_code), after(target.label)],
     ['区域格式（日期和数字）', languageName(now.culture), after(languageName(target.culture))],
     ['时区', now.timezone === 'China Standard Time' ? '中国标准时间' : zoneName(Object.values(preview.regions || {}).find((r) => r.timezone_id === now.timezone)?.iana), after(zoneName(target.iana))],
-    ['独立浏览器语言', /尚未设置/.test(now.browser_language || '') ? '尚未设置' : languageName(now.browser_language), after(languageName(target.browser_language))],
     ['IPv6 网络', now.ipv6_state, '关闭'],
     ['严格联网保护', now.firewall_state, '开启'],
     ['Windows 手动代理', now.proxy_state, '关闭'],
@@ -219,7 +209,6 @@ function renderImpact(ctx) {
   const groups = [
     ['系统与地区', rows.slice(0, 7)],
     ['网络保护', [...rows.slice(7, 9),
-      ['WebRTC 防泄露（全浏览器）', now.webrtc_protection, '开启', '覆盖 Chrome、Edge、Firefox 普通窗口；需重启浏览器，其他浏览器未验证'],
       ['DNS 防泄露', now.dns_protection, '开启', '防止域名查询绕过代理']], '开启表示已写入保护策略；实际效果需检测，Edge 个人账号资料可能不采用策略。'],
     ['代理设置', rows.slice(9, 15), '关闭之前分散在各处的代理设置，统一由 TUN 模式接管网络。'],
     ['网站访问', rows.slice(15)],
@@ -241,8 +230,7 @@ function renderImpact(ctx) {
           ui.el('th', { scope: 'row' }, ui.el('span', { text: label }), description ? ui.el('small', { class: 'config-explanation', text: description }) : null),
           ui.el('td', { 'data-label': '当前' }, valueBadge(current)),
           ui.el('td', { 'data-label': '配置后', class: 'config-target' }, valueBadge(desired))))))),
-    ui.note('配置前会备份。配置时网络会短暂中断；代理核心停止运行时，所有外网连接都会被拦住。关闭自动校时后，时间可能逐渐出现误差。浏览器语言需重新打开后生效，部分设置需要重启电脑。Windows 界面语言保持不变。WebRTC 保护会修改 Chrome、Edge、Firefox 的浏览器策略，可能影响网页语音和视频通话；Firefox 将关闭 WebRTC。', 'warn')));
-
+    ui.note('本地设置检查不代表实际网络通过；外部浏览器由用户自行管理。', 'info')));
 }
 
 async function loadChoices(ctx) {
@@ -355,9 +343,9 @@ function renderChoices(ctx) {
     : null;
   const regionHint = form.node
     ? (form.regionAuto
-        ? ui.note('出口地区已按节点名自动填为 ' + form.regionAuto.code + '。实际出口由配置后的网络验收核对；如识别错误可直接修改。配置时系统与沙箱浏览器会同步切换到该地区。', 'info')
+        ? ui.note('出口地区已按节点名自动填为 ' + form.regionAuto.code + '。实际出口由配置后的网络验收核对；如识别错误可直接修改。配置时系统地区及时区会同步切换到该地区。', 'info')
         : form.regionManual
-          ? ui.note('已手动选择出口地区 ' + form.region + '；配置时系统与沙箱浏览器会同步切换到该地区。', 'info')
+          ? ui.note('已手动选择出口地区 ' + form.region + '；配置时系统地区及时区会同步切换到该地区。', 'info')
           : ui.note('未能从节点名识别出口地区，请手动选择。实际出口由配置后的网络验收核对。', 'warn'))
     : null;
   choicesHost.replaceChildren(...[
@@ -370,7 +358,7 @@ function renderChoices(ctx) {
     missingHint,
     ui.el('div', { class: 'ack-row' }, ack),
     ui.el('div', { class: 'choice-foot' },
-      ui.el('p', { class: 'muted', text: '配置会请求管理员权限。界面本身以普通用户运行；沙箱浏览器也不会被提权。' }),
+      ui.el('p', { class: 'muted', text: '配置会请求管理员权限。界面本身以普通用户运行。' }),
       start),
   ].filter(Boolean));
   renderNodeList(ctx, filtered);
@@ -442,7 +430,7 @@ async function beginApply(ctx) {
   const ok = await ctx.confirm({
     title: '开始配置网络？',
     subtitle: form.node + ' · 出口 ' + form.region,
-    description: '配置会关闭 Clash Verge、写入项目增强脚本、按节点地区应用系统与沙箱浏览器设置，并运行网络验收。界面与默认浏览器不会被关闭。WebRTC 保护将应用到 Chrome、Edge、Firefox，网页通话可能受影响；需重启浏览器。',
+    description: '生成并校验网络规则，应用系统设置，再运行网络验收；浏览器由用户自行管理。',
     items: IMPACT,
     note: 'Mihomo 停止时所有公网（包括国内网站）都会短暂断开；请先保存正在进行的网络工作。',
     noteType: 'warn',
@@ -466,6 +454,7 @@ async function quickReapply(ctx) {
     title: '按当前记录重新配置？',
     subtitle: plan.node + ' · 出口 ' + (plan.region || 'SG'),
     description: '沿用上次配置记录的精确节点、订阅和出口地区；如果该节点已从当前订阅消失，配置会在写入前停止。',
+    description: '生成并校验网络规则，应用系统设置，再运行网络验收；浏览器由用户自行管理。',
     items: IMPACT,
     confirmText: '重新配置',
     requireCheck: '我已了解重新配置会关闭 Clash 并短暂中断网络。',

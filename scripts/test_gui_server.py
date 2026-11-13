@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import client
 import gui_server
-import sandbox_browser
+import gui_window
 
 
 class GuiServer(unittest.TestCase):
@@ -26,7 +26,7 @@ class GuiServer(unittest.TestCase):
         self.app.app_state = lambda: {'ok': True, 'configured': False}
         self.app.task_status = lambda: {'installed': False}
         self.app.service_status = lambda: {'service': 'Unknown'}
-        self.close_patch = patch.object(sandbox_browser, 'close', return_value={'closed': 0})
+        self.close_patch = patch.object(gui_window, 'close', return_value={'closed': 0})
         self.close_patch.start()
         self.addCleanup(self.close_patch.stop)
         self.thread = threading.Thread(target=self.app.run, daemon=True)
@@ -72,6 +72,59 @@ class GuiServer(unittest.TestCase):
         status, _, data = self.request('GET', '/')
         self.assertEqual(status, 403)
         self.assertIn(b'error', data)
+
+    def test_snapshot_delete_auth_confirmation_protection_and_busy(self):
+        first = self.local / 'snapshots' / 'first'
+        old = self.local / 'snapshots' / 'old'
+        for folder in (first, old):
+            folder.mkdir(parents=True)
+            (folder / 'manifest.json').write_text('{}', encoding='utf-8')
+        (self.local / 'baseline-selection.json').write_text('{"snapshot":"first"}', encoding='utf-8')
+        cookie = self.session_cookie()
+        headers = {'Cookie': cookie, **self.token_headers()}
+        body = json.dumps({'snapshot': 'old', 'confirm': 'old'})
+        self.assertEqual(self.request('POST', '/api/snapshot-delete', {'Cookie': cookie}, body)[0], 403)
+        self.assertEqual(self.request('POST', '/api/snapshot-delete', headers, '{"snapshot":"old"}')[0], 400)
+        self.app._settings_busy = True
+        self.assertEqual(self.request('POST', '/api/snapshot-delete', headers, body)[0], 409)
+        self.app._settings_busy = False
+        self.assertEqual(self.request('POST', '/api/snapshot-delete', headers,
+                                     '{"snapshot":"first","confirm":"first"}')[0], 409)
+        rows = {row['name']: row for row in self.app.snapshots()}
+        self.assertTrue(rows['first']['baseline'])
+        self.assertTrue(rows['first']['delete_reason'])
+        self.assertFalse(rows['old']['delete_reason'])
+        self.assertEqual(self.request('POST', '/api/snapshot-delete', headers, body)[0], 200)
+        self.assertFalse(old.exists())
+        self.assertTrue(first.exists())
+
+    def test_software_check_is_authenticated_and_does_not_block_response(self):
+        cookie = self.session_cookie()
+        with patch.object(self.app, 'request_software_check', return_value={'checking': True}) as check:
+            status, _, _ = self.request('POST', '/api/software-check', {'Cookie': cookie}, '{}')
+            self.assertEqual(status, 403)
+            check.assert_not_called()
+            status, _, data = self.request('POST', '/api/software-check',
+                                          {'Cookie': cookie, **self.token_headers()}, '{}')
+            self.assertEqual(status, 202)
+            self.assertTrue(json.loads(data)['checking'])
+
+    def test_clean_package_download_requires_session_and_returns_verified_zip(self):
+        import hashlib, io, zipfile
+        cookie = self.session_cookie()
+        status, _, data = self.request('POST', '/api/package',
+                                      {'Cookie': cookie, **self.token_headers()}, '{}')
+        self.assertEqual(status, 200, data)
+        package = json.loads(data)['package']
+        self.assertEqual(self.request('GET', package['download_url'])[0], 403)
+        status, headers, raw = self.request('GET', package['download_url'], {'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Content-Type'], 'application/zip')
+        self.assertIn('attachment', headers['Content-Disposition'])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), package['sha256'])
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            self.assertIsNone(archive.testzip())
+            self.assertFalse(any('/.local/' in name or '/.runtime/' in name for name in archive.namelist()))
 
     def test_token_sets_session_and_serves_html(self):
         cookie = self.session_cookie()

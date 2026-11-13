@@ -25,6 +25,7 @@ function secureMain(config,data,node,group) {
     }
   }
   config.mode = 'rule';
+  config['geodata-mode'] = true;
   // Process rules need process lookup. PyYAML may decode an upstream bare
   // `off` as false; always publish Mihomo's explicit, supported strict mode.
   config['find-process-mode'] = 'strict';
@@ -54,6 +55,7 @@ function secureMain(config,data,node,group) {
     ...data.extraExact.map(d => 'DOMAIN,'+d+','+group),
     'DOMAIN,servd-anthropic-website.b-cdn.net,'+group,
     'DOMAIN,challenges.cloudflare.com,'+group,
+    'GEOSITE,geolocation-!cn,'+group,
     'RULE-SET,strict-cn-domain,DIRECT',
     'RULE-SET,strict-cncidr,DIRECT,no-resolve',
     'GEOIP,CN,DIRECT,no-resolve',
@@ -67,6 +69,7 @@ function secureMain(config,data,node,group) {
   policy['rule-set:strict-private-domain'] = ['system'];
   policy['challenges.cloudflare.com'] = overseas;
   policy['servd-anthropic-website.b-cdn.net'] = overseas;
+  policy['geosite:geolocation-!cn'] = overseas;
   policy['rule-set:strict-cn-domain'] = domestic;
   policy['+.lan'] = ['system']; policy['+.local'] = ['system'];
   config.dns = {

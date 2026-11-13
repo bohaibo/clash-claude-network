@@ -12,7 +12,7 @@ def tracked_files():
 
 def check():
  tracked=tracked_files();missing=[p for p in tracked if not p.is_file()]
- require({p.name for p in missing}<={'browser_settings.py','browser_languages.py','test_browser_settings.py'},
+ require({p.name for p in missing}<={'browser_settings.py','browser_languages.py','test_browser_settings.py','sandbox_browser.py','test_sandbox_browser.py','browser.js','sandbox-check.html','sandbox-check.js','sandbox-check.css'},
          'Unexpected tracked file is missing: '+','.join(p.name for p in missing))
  files=[p for p in tracked if p.is_file()];require(files,'No project files found')
  private_list=LOCAL/'publish-forbidden-values.json'
@@ -32,9 +32,9 @@ def check():
   require(not any(value in text for value in banned),'Original machine data found in '+str(relative))
   require(not re.search(r'S-1-5-21-\d+-\d+-\d+-\d+',text),'Machine SID found')
  require({p.name for p in PROJECT.glob('*.cmd')}=={'一键网络.cmd'},'Expected exactly one public entry: 一键网络.cmd')
- for name in ('scripts/bootstrap.ps1','scripts/gui_server.py','scripts/gui.ps1','scripts/sandbox_browser.py',
+ for name in ('scripts/bootstrap.ps1','scripts/gui_server.py','scripts/gui.ps1','scripts/gui_window.py',
               'scripts/node_region.py','scripts/region_profile.py','gui/index.html','gui/styles.css','gui/js/app.js',
-              'gui/sandbox-check.html','gui/sandbox-check.js','gui/sandbox-check.css','INSTALL.md'):
+              'INSTALL.md'):
   require((PROJECT/name).is_file(),'Missing GUI file: '+name)
  gui_server=(PROJECT/'scripts/gui_server.py').read_text(encoding='utf-8')
  require("('127.0.0.1', 0)" in gui_server,'GUI server must bind loopback on an ephemeral port')

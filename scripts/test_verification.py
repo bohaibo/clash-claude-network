@@ -43,7 +43,8 @@ class Verification(unittest.TestCase):
   self.assertEqual(result.stdout.decode().split(),['OUTAGE','post-recovery'])
  def fake_api(self,root,method,path,body=None):
   if method=='PUT':self.broken=client.yaml.safe_load(body['payload'])['proxies'][0]['port']==1;return {}
-  if path=='/configs':return {'mode':'rule'}
+  if path=='/configs':return {'mode':'rule','find-process-mode':'strict'}
+  if path=='/rules':return {'rules':[{'type':'GeoSite','payload':'geolocation-!cn','proxy':client.GROUP},{'type':'RuleSet','payload':'strict-cn-domain','proxy':'DIRECT'}]}
   if path=='/connections':return {'connections':[]}
   return {'proxies':{client.GROUP:{'all':['Chosen'],'now':'Chosen'}}}
  def fake_curl(self,url,head=False):
