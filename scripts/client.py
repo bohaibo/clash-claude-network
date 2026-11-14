@@ -522,6 +522,7 @@ def apply_client():
  write(journal_path,journal) # Commit recovery metadata before changing any association.
  if not plan['script_existed']:profiles['items'].append({'uid':plan['script_uid'],'type':'script','file':plan['script_file'],'desc':'Portable Claude network enhancement','updated':int(__import__('time').time())})
  item.setdefault('option',{})['script']=plan['script_uid'];profiles['current']=item['uid']
+ if plan.get('chain'):managed_chain.sync_traffic(profiles,plan['chain'])
  targets={root/'profiles.yaml':yaml_dumps(profiles,allow_unicode=True,sort_keys=False),
   safe_file(root,'profiles/'+plan['script_file']):(LOCAL/'candidate.js').read_text(encoding='utf-8'),root/'clash-verge.yaml':text}
  chain_target=None

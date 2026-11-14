@@ -546,6 +546,7 @@ function renderChainChoices(ctx,mode) {
   choicesHost.replaceChildren(mode,
     savedPicker,
     ui.note('原订阅和原节点保持不变。链式配置使用与普通配置相同的分流、TUN、DNS、IPv6、防火墙及受管 WebRTC 防护；任一跳故障均不切换到直连。','neutral'),
+    ui.note('流量条按两份订阅的剩余额度取较小者，显示该账户的已用量/总量，并采用较早到期日。使用 Clash 缓存数据，缺少数据不显示；不是此链路独占的实时用量。','info'),
     picker('前置（第一跳）','front'),picker('后置 / 最终出口（第二跳）','exit'),
     ui.el('div',{class:'choice-grid'},ui.field('链式节点名称',name),
       ui.field('最终出口地区',ui.select(REGIONS.map(([value,label])=>({value,label})),form.region,value=>{

@@ -443,6 +443,7 @@ class App:
             'unchanged': bool(last.get('unchanged')),
             'migrated': bool(last.get('migrated')),
             'chain_profile_updated': bool(last.get('chain_profile_updated')),
+            'chain_traffic_updated': bool(last.get('chain_traffic_updated')),
             'recovery_required': bool(last.get('recovery_required')),
             'source': 'Loyalsoldier/clash-rules' if last.get('source') == 'Loyalsoldier/clash-rules' else '',
             'changes': {key: {field: value for field, value in row.items()

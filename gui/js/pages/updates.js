@@ -139,6 +139,7 @@ function lastResultCard(ctx, update) {
       ['时间', ui.formatTime(last.time)],
       ['结果', last.skipped ? '未执行（订阅或脚本关联已变化）' : !last.success ? '更新未完成' : last.unchanged ? '规则内容未变化，无需重载' : '已发布并核对新配置'],
       ...(last.chain_profile_updated ? [['链式配置', '已同步分流规则']] : []),
+      ...(last.chain_traffic_updated ? [['链式流量', '已同步原订阅缓存用量，Clash 客户端可能需重新打开显示']] : []),
       ...(last.reason || last.error ? [['原因', last.reason || last.error]] : []),
       ...counts,
     ]),

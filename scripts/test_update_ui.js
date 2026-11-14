@@ -16,6 +16,7 @@ for (const [last, expected] of [
   [{success:true, unchanged:true}, '已是最新'],
   [{success:true, migrated:true}, '已切换来源'],
   [{success:true, chain_profile_updated:true}, '成功'],
+  [{success:true, unchanged:true, chain_traffic_updated:true}, '已是最新'],
   [{success:false, recovery_required:true}, '未完成'],
 ]) {
   context.show({}, {last:{time:'fixture', ...last, changes:{domains:{after:110189, added:2, removed:1}}}});
@@ -24,4 +25,5 @@ for (const [last, expected] of [
 assert(rows.some(([label, text]) => label === '国内域名' && text.includes('110189')));
 assert(notes.some(text => text.includes('恢复尚未完成')));
 assert(rows.some(([label, text]) => label === '链式配置' && text.includes('已同步')));
+assert(rows.some(([label, text]) => label === '链式流量' && text.includes('缓存用量')));
 console.log('Offline update UI checks passed: skipped, unchanged, migrated, recovery and counts');

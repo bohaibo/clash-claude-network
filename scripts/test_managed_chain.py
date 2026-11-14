@@ -76,6 +76,91 @@ class ManagedChain(unittest.TestCase):
         self.request.update(front_subscription='exit',front_node='Exit')
         with self.assertRaises(AssertionError):self.prepare()
 
+    def account_traffic(self):
+        index=client.load(self.root/'profiles.yaml')
+        for item in index['items']:
+            if item['uid']=='front':item['extra']={'upload':10,'download':20,'total':100,'expire':2000}
+            if item['uid']=='exit':item['extra']={'upload':100,'download':860,'total':1000,'expire':1000}
+        self.put('profiles.yaml',index)
+        return index
+
+    def test_traffic_uses_remaining_not_smallest_total_or_used_and_earliest_expiry(self):
+        index=self.account_traffic();record=managed_chain.resolve(self.root,index,self.request,self.local)
+        result=managed_chain.traffic(index,record)
+        self.assertEqual(result['source_uid'],'exit');self.assertEqual(result['remaining'],40)
+        self.assertEqual(result['extra'],{'upload':100,'download':860,'total':1000,'expire':1000})
+        index['items'][1]['extra']['expire']=500
+        self.assertEqual(managed_chain.traffic(index,record)['extra']['expire'],500)
+        index['items'][0]['extra']['download']=1100
+        self.assertEqual(managed_chain.traffic(index,record)['remaining'],0)
+
+    def test_unknown_or_invalid_traffic_removes_stale_bar_without_inventing_usage(self):
+        index=self.account_traffic();record=managed_chain.resolve(self.root,index,self.request,self.local)
+        entry={'uid':record['uid'],'file':record['file'],'type':'local','extra':{'total':999}}
+        index['items'].append(entry)
+        for bad in [None,{}, {'upload':True,'download':0,'total':10},
+                    {'upload':0,'download':0,'total':0}, {'upload':-1,'download':0,'total':10},
+                    {'upload':0,'download':0,'total':10,'expire':'unknown'}]:
+            with self.subTest(bad=bad):
+                index['items'][1]['extra']=bad;entry['extra']={'total':999}
+                self.assertTrue(managed_chain.sync_traffic(index,record));self.assertNotIn('extra',entry)
+        record['front_uid']=record['source_uid']
+        self.assertTrue(managed_chain.traffic(index,record)['shared_subscription'])
+
+    def test_apply_copies_account_counters_without_changing_original_subscriptions(self):
+        index=self.account_traffic();before=copy.deepcopy(index['items'])
+        plan=self.apply();index=client.load(self.root/'profiles.yaml')
+        entry=next(i for i in index['items'] if i['uid']==plan['subscription_uid'])
+        self.assertEqual(entry['extra']['total'],1000)
+        self.assertEqual(entry['extra']['upload']+entry['extra']['download'],960)
+        for old in before:self.assertEqual(next(i for i in index['items'] if i['uid']==old['uid']),old)
+
+    def test_traffic_only_rule_update_does_not_rebuild_or_reload_core(self):
+        self.account_traffic();plan=self.apply()
+        index=client.load(self.root/'profiles.yaml');next(i for i in index['items'] if i['uid']=='front')['extra']['download']=85
+        self.put('profiles.yaml',index)
+        runtime=(self.root/'clash-verge.yaml').read_bytes()
+        with patch.object(update,'LOCAL',self.local),patch.object(update,'download_rules',return_value=copy.deepcopy(self.data)),\
+             patch.object(update,'build') as build,patch.object(update,'api') as api:
+            result=update.update()
+        self.assertTrue(result['unchanged']);self.assertTrue(result['chain_traffic_updated'])
+        build.assert_not_called();api.assert_not_called()
+        self.assertEqual((self.root/'clash-verge.yaml').read_bytes(),runtime)
+        entry=next(i for i in client.load(self.root/'profiles.yaml')['items'] if i['uid']==plan['subscription_uid'])
+        self.assertEqual(entry['extra']['total'],100);self.assertEqual(entry['extra']['download'],85)
+
+    def test_failed_rule_publish_rolls_back_traffic_metadata_together_with_rules(self):
+        self.account_traffic();self.apply()
+        index=client.load(self.root/'profiles.yaml');index['items'][0]['extra']['download']=999
+        self.put('profiles.yaml',index);before=(self.root/'profiles.yaml').read_bytes()
+        self.data['domains'].append('+.example.cn')
+        original=update.atomic_bytes
+        failed=False
+        def fail(path,value):
+            nonlocal failed
+            if path.name=='profiles.yaml' and not failed:
+                failed=True;raise PermissionError('offline failure')
+            return original(path,value)
+        with patch.object(update,'atomic_bytes',side_effect=fail),self.assertRaises(PermissionError):self.run_update()
+        self.assertEqual((self.root/'profiles.yaml').read_bytes(),before)
+        self.assertFalse((self.local/'rule-update-pending.json').exists())
+
+    def test_traffic_only_publish_failure_rolls_back_and_preserves_original_bytes(self):
+        self.account_traffic();self.apply()
+        index=client.load(self.root/'profiles.yaml');index['items'][0]['extra']['download']=999
+        self.put('profiles.yaml',index);before=(self.root/'profiles.yaml').read_bytes()
+        updated=managed_chain.traffic_profiles(self.root,index,self.local)
+        original=update.atomic_bytes;failed=False
+        def fail(path,value):
+            nonlocal failed
+            if not failed:
+                failed=True;raise PermissionError('offline failure')
+            return original(path,value)
+        with patch.object(update,'LOCAL',self.local),patch.object(update,'atomic_bytes',side_effect=fail),self.assertRaises(PermissionError):
+            update.publish_traffic(self.root,index,updated)
+        self.assertEqual((self.root/'profiles.yaml').read_bytes(),before)
+        self.assertFalse((self.local/'rule-update-pending.json').exists())
+
     def test_failed_publish_rolls_back_index_runtime_source_and_registration(self):
         self.prepare();before={p:p.read_bytes() for p in (self.root/'profiles.yaml',self.root/'clash-verge.yaml')}
         with patch.object(client,'api',side_effect=[RuntimeError('offline failure'),{}]):

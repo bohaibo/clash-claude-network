@@ -9,6 +9,55 @@ REGISTRY = 'managed-chains.json'
 FRONT = chain_profile.FRONT
 
 
+def traffic(profiles, record):
+    """Use the remaining-quota bottleneck's account counters, never invented chain usage."""
+    sources = []
+    for key in ('front_uid', 'source_uid'):
+        item = next((i for i in profiles['items'] if i.get('uid') == record[key] and i.get('type') == 'remote'), None)
+        extra = item.get('extra') if item else None
+        if not isinstance(extra, dict):
+            return None
+        values = {k: extra.get(k) for k in ('upload', 'download', 'total')}
+        if any(type(v) is not int or not 0 <= v <= 2**64-1 for v in values.values()) or not values['total']:
+            return None
+        if values['upload'] + values['download'] > 2**64-1:
+            return None
+        expiry = extra.get('expire', 0)
+        if type(expiry) is not int or not 0 <= expiry <= 253402300799:
+            return None
+        sources.append(dict(uid=item['uid'], **values, expire=expiry,
+                            remaining=max(0, values['total']-values['upload']-values['download'])))
+    limiting = min(sources, key=lambda s: s['remaining'])
+    expiries = [s['expire'] for s in sources if s['expire'] > 0]
+    extra = {k: limiting[k] for k in ('upload', 'download', 'total')}
+    extra['expire'] = min(expiries, default=0)
+    return {'extra': extra, 'remaining': limiting['remaining'],
+            'source_uid': limiting['uid'], 'shared_subscription': record['front_uid'] == record['source_uid']}
+
+
+def sync_traffic(profiles, record):
+    item = next((i for i in profiles['items'] if i.get('uid') == record['uid'] and
+                 i.get('type') == 'local' and i.get('file') == record['file']), None)
+    if item is None:
+        return False
+    summary = traffic(profiles, record)
+    extra = summary['extra'] if summary else None
+    changed = item.get('extra') != extra
+    if extra is None:
+        item.pop('extra', None)
+    else:
+        item['extra'] = extra
+    return changed
+
+
+def traffic_profiles(root, profiles, local):
+    updated = copy.deepcopy(profiles)
+    for record in records(root, local).values():
+        if not record.get('legacy'):
+            sync_traffic(updated, record)
+    return updated
+
+
 def records(root, local):
     path = Path(local) / REGISTRY
     rows = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}

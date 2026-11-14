@@ -22,6 +22,7 @@ def digest(value):return hashlib.sha256(value).hexdigest() if value is not None 
 
 def transaction_targets(record):
  root=root_path(record['root'])
+ if record.get('metadata_only'):return root,{'profiles':root/'profiles.yaml'}
  targets={'script':safe_file(root,'profiles/'+record['script_file']),
           'plan':LOCAL/'plan.json','sources':LOCAL/'sources.json'}
  if record.get('chain_file'):
@@ -34,6 +35,7 @@ def transaction_targets(record):
   require(bool(re.fullmatch(r'companion-[0-9]+-(?:script|source)',key)),'Invalid companion update target')
   targets[key]=chain_profile.profile_file(root,filename)
  if record.get('companion_registry'):targets['managed_registry']=LOCAL/managed_chain.REGISTRY
+ if record.get('profile_metadata'):targets['profiles']=root/'profiles.yaml'
  if record['active']:targets['runtime']=root/'clash-verge.yaml'
  return root,targets
 
@@ -97,6 +99,27 @@ def companion_contexts(root,profiles,plan,fresh,migrate_source):
  return contexts,needed
 
 
+def publish_traffic(root, profiles, updated):
+ """One-file metadata transaction; no core reload or source subscription requests."""
+ if profiles==updated:return False
+ path=root/'profiles.yaml';before=path.read_bytes()
+ require(load(path)==profiles,'Client configuration changed during update')
+ after=yaml_dumps(updated,allow_unicode=True,sort_keys=False).encode('utf-8')
+ token=uuid.uuid4().hex;folder=LOCAL/'rule-updates'/token;folder.mkdir(parents=True)
+ (folder/'profiles.before').write_bytes(before)
+ record={'root':str(root),'metadata_only':True,'active':False,'current_uid':profiles['current'],
+         'state':'prepared','files':{'profiles':{'before':digest(before),'after':digest(after)}}}
+ write(folder/'transaction.json',record);write(LOCAL/'rule-update-pending.json',{'id':token})
+ try:
+  require(path.read_bytes()==before,'Client configuration changed during update')
+  atomic_bytes(path,after)
+  record['state']='committed';write(folder/'transaction.json',record)
+  (LOCAL/'rule-update-pending.json').unlink()
+ except Exception:
+  recover_pending();raise
+ return True
+
+
 def build_companions(root,profiles,contexts,fresh):
  from client import preparation_inputs,assert_preparation_inputs
  results=[]
@@ -128,6 +151,8 @@ def publish(plan,profiles,wrapper,text,metadata,chain=None,managed=None,companio
  values={'script':wrapper.encode('utf-8'),
          'plan':json.dumps(new_plan,ensure_ascii=False,indent=2).encode('utf-8'),
          'sources':json.dumps(metadata,ensure_ascii=False,indent=2).encode('utf-8')}
+ updated_profiles=managed_chain.traffic_profiles(root,profiles,LOCAL)
+ if updated_profiles!=profiles:values['profiles']=yaml_dumps(updated_profiles,allow_unicode=True,sort_keys=False).encode('utf-8')
  if chain:
   values['chain']=chain['text'].encode('utf-8')
   values['chain_registry']=json.dumps(chain['record'],ensure_ascii=False,indent=2).encode('utf-8')
@@ -152,6 +177,7 @@ def publish(plan,profiles,wrapper,text,metadata,chain=None,managed=None,companio
  if active:values['runtime']=runtime_text.encode('utf-8')
  record={'root':str(root),'script_file':plan['script_file'],'active':active,
          'current_uid':profiles['current'],'state':'prepared','files':{}}
+ if 'profiles' in values:record['profile_metadata']=True
  if chain:record['chain_file']=chain['record']['file']
  if managed:record['managed_file']=managed['record']['file']
  if companions:record['companion_files']=companion_files;record['companion_registry']='managed_registry' in values
@@ -160,6 +186,7 @@ def publish(plan,profiles,wrapper,text,metadata,chain=None,managed=None,companio
  token=uuid.uuid4().hex;folder=LOCAL/'rule-updates'/token;folder.mkdir(parents=True)
  for name,path in targets.items():
   before=path.read_bytes() if path.exists() else None
+  if name=='profiles':require(load(path)==profiles,'Client configuration changed during update')
   if chain and name in ('chain','chain_registry'):
    require(before==chain['before' if name=='chain' else 'registry_before'],'Client configuration changed during update')
   if managed and name=='managed_source':require(before==managed['before'],'Client configuration changed during update')
@@ -227,7 +254,8 @@ def update(migrate_source=False):
  refresh=(record.get('source_fingerprint')!=chain_profile.source_fingerprint(root,profiles,record)) if record else chain_profile.refresh_required(LOCAL,root,profiles,plan)
  contexts,companions_changed=companion_contexts(root,profiles,plan,fresh,migrate_source)
  if unchanged and not migration and plan.get('source_digest')==source_digest() and not refresh and not companions_changed:
-  return dict(result,unchanged=True,active_profile_reloaded=False)
+  traffic_updated=publish_traffic(root,profiles,managed_chain.traffic_profiles(root,profiles,LOCAL))
+  return dict(result,unchanged=True,active_profile_reloaded=False,chain_traffic_updated=traffic_updated)
  item=select(root,plan['node'],plan['subscription_uid'])
  if record:
   original=managed_chain.source(root,profiles,record)
@@ -244,7 +272,9 @@ def update(migrate_source=False):
  # Native client edits are outside our operation lock. Refuse stale publication.
  require(load(root/'profiles.yaml')==profiles and script.read_text(encoding='utf-8')==old and (root/'clash-verge.yaml').read_bytes()==old_runtime,'Client configuration changed during update')
  active=publish(plan,profiles,wrapper,text,metadata,chain,managed,companions)
- return dict(result,unchanged=False,active_profile_reloaded=active,chain_profile_updated=bool(chain or managed or any(c.get('record') for c in companions)))
+ return dict(result,unchanged=False,active_profile_reloaded=active,
+             chain_traffic_updated=managed_chain.traffic_profiles(root,profiles,LOCAL)!=profiles,
+             chain_profile_updated=bool(chain or managed or any(c.get('record') for c in companions)))
 
 def failure_result(exc):
  import traceback
