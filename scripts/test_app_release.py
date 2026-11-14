@@ -8,7 +8,8 @@ class SoftwareRelease(unittest.TestCase):
  def setUp(self):
   temp=tempfile.TemporaryDirectory(dir=client.LOCAL,prefix='software-test-');self.addCleanup(temp.cleanup)
   self.local=Path(temp.name);self.checker=release.ReleaseChecker(local=self.local)
-  self.raw={'tag_name':'v2.4.0','html_url':'https://github.com/bohaibo/clash-claude-network/releases/tag/v2.4.0',
+  self.next_version=str(release.version_tuple(self.checker.info['version'])[0]+1)+'.0.0'
+  self.raw={'tag_name':'v'+self.next_version,'html_url':'https://github.com/bohaibo/clash-claude-network/releases/tag/v'+self.next_version,
    'draft':False,'prerelease':False,'body':'Changes','published_at':'2026-11-14T00:00:00Z'}
  def test_numeric_versions_do_not_use_lexical_order(self):
   self.assertGreater(release.version_tuple('2.10.0'),release.version_tuple('2.9.0'))
@@ -16,9 +17,9 @@ class SoftwareRelease(unittest.TestCase):
    with self.subTest(value=value),self.assertRaises(ValueError):release.version_tuple(value)
  def test_new_stable_version_has_validated_release_link(self):
   result=release.parse_release(json.dumps(self.raw),self.checker.info)
-  self.assertEqual(result['status'],'available');self.assertEqual(result['latest_version'],'2.4.0')
+  self.assertEqual(result['status'],'available');self.assertEqual(result['latest_version'],self.next_version)
  def test_old_or_equal_version_never_prompts_update(self):
-  for version in ['2.1.0','2.2.0','2.3.0']:
+  for version in ['2.1.0','2.2.0','2.3.0',self.checker.info['version']]:
    raw=dict(self.raw,tag_name=version,html_url='https://github.com/bohaibo/clash-claude-network/releases/tag/'+version)
    self.assertEqual(release.parse_release(json.dumps(raw),self.checker.info)['status'],'current')
  def test_draft_prerelease_and_untrusted_links_are_rejected(self):
