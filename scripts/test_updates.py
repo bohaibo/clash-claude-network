@@ -133,11 +133,93 @@ class Updates(unittest.TestCase):
   with patch.object(app,'task_status',return_value={'installed':False}):
    client.write(self.local/'update-result.json',{'success':True,'skipped':True,
     'time':__import__('datetime').datetime.now().astimezone().isoformat(),
-    'changes':{'domains':{'after':110189,'added':1,'removed':0,'secret':'withheld'},'unapproved':{}}})
+    'chain_profile_updated':True,'changes':{'domains':{'after':110189,'added':1,'removed':0,'secret':'withheld'},'unapproved':{}}})
    summary=app.update_summary()
   self.assertTrue(summary['stale']);self.assertTrue(summary['last']['skipped'])
+  self.assertTrue(summary['last']['chain_profile_updated'])
   self.assertEqual(summary['last']['changes'],{'domains':{'after':110189,'added':1,'removed':0}})
   command,_=app._job_command('update',{},self.local)
   self.assertIn('--migrate-source',command)
+
+ def add_chain(self,active=False):
+  import chain_profile
+  self.profiles['items'][0].update(type='remote',file='source.yaml')
+  self.profiles['items'] += [{'uid':'front','type':'remote','file':'front.yaml'},
+                            {'uid':'chain','type':'local','file':'chain.yaml'}]
+  if active:self.profiles['current']='chain'
+  client.write(self.root/'profiles.yaml',self.profiles)
+  client.write(self.root/'profiles/source.yaml',{'proxies':[{'name':'Chosen'}]})
+  client.write(self.root/'profiles/front.yaml',{'proxies':[{'name':'Front'}]})
+  self.config['rules']=['RULE-SET,'+name+',DIRECT' for name in self.config['rule-providers']]+['MATCH,'+client.GROUP]
+  for provider in self.config['rule-providers'].values():provider['type']='inline'
+  self.build.side_effect=lambda *args:(self.wrapper(args[-1]),json.dumps(self.config),self.config,None)
+  record={'root':str(self.root),'uid':'chain','file':'chain.yaml','source_uid':'a',
+          'source_file':'source.yaml','exit_node':'Chosen','front_uid':'front',
+          'front_file':'front.yaml','front_node':'Front','node':'Chain'}
+  value=chain_profile.render(self.config,record,self.root,self.profiles)
+  self.chain=self.root/'profiles/chain.yaml'
+  self.chain.write_text(client.yaml_dumps(value,allow_unicode=True,sort_keys=False),encoding='utf-8')
+  record['sha256']=chain_profile.digest(self.chain.read_bytes())
+  client.write(self.local/chain_profile.REGISTRY,record)
+  self.native=self.enterContext(patch.object(chain_profile,'validate_native'))
+  self.enterContext(patch.object(client,'actual_core',return_value='fixture.exe'))
+
+ def test_active_chain_is_updated_and_reloaded_with_chain_payload(self):
+  self.add_chain(active=True);self.mutate_domains()
+  current=client.load(self.root/'clash-verge.yaml')
+  current.update(secret='fixture-controller',**{'external-controller-pipe':'fixture-pipe'})
+  client.write(self.root/'clash-verge.yaml',current)
+  result=update.update()
+  self.assertTrue(result['chain_profile_updated']);self.assertTrue(result['active_profile_reloaded'])
+  self.assertIn('chain-exit-source',client.load(self.root/'clash-verge.yaml')['proxy-providers'])
+  self.assertEqual(client.load(self.root/'clash-verge.yaml')['secret'],'fixture-controller')
+  self.assertEqual(client.load(self.root/'clash-verge.yaml')['external-controller-pipe'],'fixture-pipe')
+  self.assertNotIn('secret',client.load(self.chain))
+  self.native.assert_called_once()
+  self.assertEqual(client.load(self.local/'plan.json')['snapshot'],'original-preserved')
+
+ def test_chain_transaction_rolls_back_companion_and_registry(self):
+  self.add_chain(active=True);self.mutate_domains()
+  paths=[self.chain,self.local/'chain-profile.json',*self.snapshot_files()]
+  before={p:p.read_bytes() for p in paths}
+  original=update.atomic_bytes
+  def fail(path,value):
+   if path.name=='sources.json' and value!=before[path]:raise PermissionError('fixture')
+   return original(path,value)
+  with patch.object(update,'atomic_bytes',side_effect=fail),self.assertRaises(PermissionError):update.update()
+  self.assertEqual({p:p.read_bytes() for p in paths},before)
+  self.assertFalse((self.local/'rule-update-pending.json').exists())
+
+ def test_chain_user_edit_stops_before_publication(self):
+  self.add_chain();self.mutate_domains();self.chain.write_text('user edit')
+  with self.assertRaisesRegex(AssertionError,'Chain profile changed'):update.update()
+  self.assertEqual(self.chain.read_text(),'user edit');self.api.assert_not_called()
+
+ def test_inactive_chain_update_preserves_another_active_subscription(self):
+  self.add_chain();self.profiles['current']='another'
+  client.write(self.root/'profiles.yaml',self.profiles)
+  before=(self.root/'clash-verge.yaml').read_bytes();self.mutate_domains()
+  result=update.update()
+  self.assertTrue(result['chain_profile_updated']);self.assertFalse(result['active_profile_reloaded'])
+  self.assertEqual((self.root/'clash-verge.yaml').read_bytes(),before);self.api.assert_not_called()
+
+ def test_missing_chain_node_never_selects_a_replacement(self):
+  self.add_chain();self.mutate_domains()
+  client.write(self.root/'profiles/front.yaml',{'proxies':[{'name':'Other'}]})
+  before=self.chain.read_bytes()
+  with self.assertRaisesRegex(AssertionError,'Exact chain source node'):update.update()
+  self.assertEqual(self.chain.read_bytes(),before);self.api.assert_not_called()
+
+ def test_node_refresh_is_published_even_if_rule_lists_are_unchanged(self):
+  import chain_profile
+  self.add_chain()
+  registry=client.load(self.local/chain_profile.REGISTRY)
+  registry['source_fingerprint']=chain_profile.source_fingerprint(self.root,self.profiles,registry)
+  client.write(self.local/chain_profile.REGISTRY,registry)
+  result=update.update();self.assertTrue(result['unchanged']);self.build.assert_not_called()
+  client.write(self.root/'profiles/front.yaml',{'proxies':[{'name':'Front','port':4321}]})
+  result=update.update()
+  self.assertTrue(result['chain_profile_updated']);self.assertFalse(result['unchanged'])
+  self.assertEqual(client.load(self.chain)['proxy-providers']['chain-front-source']['payload'][0]['port'],4321)
 
 if __name__=='__main__':unittest.main()

@@ -1,4 +1,4 @@
-﻿param([ValidateSet('apply','supplement','restore','snapshot','list-snapshots','reconfigure','audit')][string]$Action,[string]$Node,[string]$Subscription,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[string]$EventsFile,[string]$Python)
+﻿param([ValidateSet('apply','supplement','restore','snapshot','list-snapshots','reconfigure','audit')][string]$Action,[string]$Node,[string]$Subscription,[string]$ChainSpecPath,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[string]$EventsFile,[string]$Python)
 $ErrorActionPreference='Stop'
 $env:PYTHONNOUSERSITE='1'
 . (Join-Path $PSScriptRoot 'firewall_rules.ps1')
@@ -251,6 +251,7 @@ $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
   $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),'-Action',$Action,'-Region',$Region)
   if($Node){$arguments+=@('-Node',('"'+$Node+'"'))};if($Subscription){$arguments+=@('-Subscription',('"'+$Subscription+'"'))}
+  if($ChainSpecPath){$arguments+=@('-ChainSpecPath',('"'+$ChainSpecPath+'"'))}
   if($Snapshot){$arguments+=@('-Snapshot',('"'+$Snapshot+'"'))}
   if($Acknowledged){$arguments+='-Acknowledged'};if($NoPause){$arguments+='-NoPause'}
   if($Python){$arguments+=@('-Python',('"'+$Python+'"'))}
@@ -504,6 +505,13 @@ try {
  elseif(Get-Command node.exe -ErrorAction SilentlyContinue){$env:CCN_NODE=(Get-Command node.exe).Source}
  else{throw '未找到项目内 Node.js。请重新运行「一键网络.cmd」修复 .runtime；未关闭应用或写入配置。'}
 }
+  if($ChainSpecPath){
+   & $python (Join-Path $PSScriptRoot 'client.py') chain-preflight --chain-spec $ChainSpecPath --node $Node --subscription $Subscription
+   if($LASTEXITCODE -ne 0){throw '链式代理的精确节点或名称校验失败；未关闭 Clash 或修改系统。'}
+  }elseif($matches[0].chain){
+   & $python (Join-Path $PSScriptRoot 'client.py') chain-preflight --node $Node --subscription $Subscription
+   if($LASTEXITCODE -ne 0){throw '已有链式配置的源节点或关联已改变；未关闭 Clash 或修改系统。'}
+  }
   Write-Step '先下载并严格校验四份规则；失败时不关闭 Clash 客户端'
   $rulePreparation=& $python (Join-Path $PSScriptRoot 'client.py') prefetch-rules
   if($LASTEXITCODE -ne 0){throw '规则准备失败，未关闭 Clash 或写入配置；详情见 .local/client-error.log。'}
@@ -514,8 +522,10 @@ try {
   Stop-ClashClient
   $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region,'--rules-bundle',$rulesBundle)
   if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
+  if($ChainSpecPath){$prepareArguments+=@('--chain-spec',$ChainSpecPath)}
   $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw '候选配置/备份生成失败，未改动任何系统设置。规则下载或内核检查详情见 .local/client-error.log。'}
   $planState=($prepared | Select-Object -Last 1) | ConvertFrom-Json
+  $Node=[string]$planState.node
   $env:CCN_SNAPSHOT=$planState.snapshot
   Write-Step ('首次保存系统原值；已有记录则沿用，不覆盖。关联快照：'+$planState.snapshot)
   & (Join-Path $PSScriptRoot 'system.ps1') -Action snapshot -Python $python
@@ -548,7 +558,7 @@ try {
    Assert-StrictFirewall -coreProgram ([string]$firewallPlan.core_program)
    & (Join-Path $PSScriptRoot 'system.ps1') -Action recheck-ipv6 -Python $python
    if($LASTEXITCODE -ne 0){throw '内核重启后的 IPv6 绑定复查未通过。'}
-   & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from client import api,root_path,load,LOCAL,GROUP;from config_health import assert_live;p=load(LOCAL/''plan.json'');r=root_path(p[''root'']);assert_live(api(r,''GET'',''/configs''),api(r,''GET'',''/rules''));g=api(r,''GET'',''/proxies'')[''proxies''][GROUP];assert g[''all'']==[p[''node'']] and g[''now'']==p[''node'']' $PSScriptRoot
+   & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from client import api,root_path,load,LOCAL,GROUP;from config_health import assert_live;p=load(LOCAL/''plan.json'');r=root_path(p[''root'']);assert_live(api(r,''GET'',''/configs''),api(r,''GET'',''/rules''));g=api(r,''GET'',''/proxies'')[''proxies''][GROUP];assert g[''all'']==[p[''node'']] and g[''now'']==p[''node''];__import__(''managed_chain'').assert_live(p,api(r,''GET'',''/proxies'')) if p.get(''chain'') else None' $PSScriptRoot
    if($LASTEXITCODE -ne 0){throw '本机内核配置写入确认未通过。'}
    $result.configuration_verified=$true
    $result.network_tested=$false

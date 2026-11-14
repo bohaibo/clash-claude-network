@@ -232,6 +232,13 @@ def verify(outage=False,stage=None):
   report['runtime_configuration']='passed'
   report['runtime_mode']='rule'
   group=api(root,'GET','/proxies')['proxies'][GROUP];require(group['all']==[node] and group['now']==node,'配置检查未通过，请查看本地记录。')
+  if plan.get('chain'):
+   import managed_chain
+   from client import validate
+   managed_chain.check_fresh(root,load(root/'profiles.yaml'),plan['chain'])
+   validate(load(root/'clash-verge.yaml'),load(root/'profiles'/plan['chain']['file']),node)
+   managed_chain.assert_live(plan,api(root,'GET','/proxies'))
+   report['chain_configuration']='passed'
   check='domestic'
   cn=curl('https://www.baidu.com',True);require(cn['exit']==0 and cn['http']==200,'配置检查未通过，请查看本地记录。')
   taobao=curl('https://www.taobao.com',True);require(taobao['exit']==0 and taobao['http'] in (200,301,302),'配置检查未通过，请查看本地记录。')
@@ -281,19 +288,24 @@ def verify(outage=False,stage=None):
   if scope['wsl_installed']:report['not_tested'].append('wsl_egress')
   if outage:
    check='node_outage'
-   current=(root/'clash-verge.yaml').read_text(encoding='utf-8');broken=__import__('yaml').safe_load(current)
-   for value in broken['proxies']:
-    if value['name']==node:value['port']=1
-   try:
-    api(root,'PUT','/configs?force=true',{'payload':__import__('yaml').safe_dump(broken,allow_unicode=True,sort_keys=False)})
-    for connection in api(root,'GET','/connections').get('connections',[]):
-     if node in connection.get('chains',[]):
-      try:api(root,'DELETE','/connections/'+connection['id'])
-      except Exception:pass
-    require(curl('https://ipinfo.io/json')['exit']!=0,'Foreign traffic remained reachable during node outage')
-    require(curl('https://www.baidu.com',True)['http']==200,'配置检查未通过，请查看本地记录。')
-    report['node_failure_blocks_foreign_preserves_domestic']=True
-   finally:api(root,'PUT','/configs?force=true',{'payload':current})
+   current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
+   targets=([__import__('managed_chain').FRONT,node] if plan.get('chain') else [node])
+   for failed_node in targets:
+    check='chain_front_outage' if failed_node!=node else 'node_outage'
+    broken=__import__('yaml').safe_load(current)
+    for value in broken['proxies']:
+     if value['name']==failed_node:value['port']=1
+    try:
+     api(root,'PUT','/configs?force=true',{'payload':__import__('yaml').safe_dump(broken,allow_unicode=True,sort_keys=False)})
+     for connection in api(root,'GET','/connections').get('connections',[]):
+      if node in connection.get('chains',[]) or failed_node in connection.get('chains',[]):
+       try:api(root,'DELETE','/connections/'+connection['id'])
+       except Exception:pass
+     require(curl('https://ipinfo.io/json')['exit']!=0,'Foreign traffic remained reachable during node outage')
+     require(curl('https://www.baidu.com',True)['http']==200,'配置检查未通过，请查看本地记录。')
+     key='chain_front_failure_blocks_foreign_preserves_domestic' if failed_node!=node else 'node_failure_blocks_foreign_preserves_domestic'
+     report[key]=True
+    finally:api(root,'PUT','/configs?force=true',{'payload':current})
    check='recovery'
    report['recovery_attempts']=[];recovery_ok=False
    for attempt in range(3):

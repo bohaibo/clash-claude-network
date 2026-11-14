@@ -442,6 +442,7 @@ class App:
             'time': str(last.get('time') or ''),
             'unchanged': bool(last.get('unchanged')),
             'migrated': bool(last.get('migrated')),
+            'chain_profile_updated': bool(last.get('chain_profile_updated')),
             'recovery_required': bool(last.get('recovery_required')),
             'source': 'Loyalsoldier/clash-rules' if last.get('source') == 'Loyalsoldier/clash-rules' else '',
             'changes': {key: {field: value for field, value in row.items()
@@ -683,6 +684,7 @@ class App:
             'snapshot': snapshot_name,
             'snapshot_ok': snapshot_ok,
             'core_program': str(plan.get('core_program') or ''),
+            'chain': __import__('managed_chain').selection(plan['chain']) if plan.get('chain') else None,
         }
         active = self.active_job_view()
         last_run = read_json(self.local / 'last-run.json', {})
@@ -691,6 +693,7 @@ class App:
         return {
             'preview': self.background_value('preview', self.configuration_preview,
                 {'current': {}, 'regions': region_profile.PROFILES, 'read_at': ''}),
+            'capabilities': {'managed_chain': True},
             'version': VERSION,
             'software': self.software_summary(),
             'admin': is_admin(),
@@ -791,13 +794,21 @@ class App:
             uid = str(row.get('uid') or '')
             nodes = [str(x) for x in row.get('nodes', []) if isinstance(x, str)]
             name = str(row.get('name') or '')
-            subscriptions.append({'uid': uid, 'name': name, 'nodes': nodes})
+            clean_row={'uid': uid, 'name': name, 'nodes': nodes}
+            if isinstance(row.get('chain'), dict):
+                clean_row['chain']={k:str(row['chain'].get(k) or '') for k in ('name','exit_subscription','exit_node','front_subscription','front_node')}
+            subscriptions.append(clean_row)
             regions[uid] = {}
             subscription_hint = node_region.infer(name)
             for node in nodes:
                 hint = node_region.infer(node) or subscription_hint
                 if hint:
                     regions[uid][node] = hint
+        for row in subscriptions:
+            chain=row.get('chain')
+            if chain:
+                hint=regions.get(chain['exit_subscription'],{}).get(chain['exit_node'])
+                if hint:regions[row['uid']][chain['name']]=hint
         plan = self.plan()
         result = {
             'subscriptions': subscriptions,
@@ -806,6 +817,7 @@ class App:
             'plan_subscription': str(plan.get('subscription_uid') or ''),
             'plan_region': str(plan.get('region') or 'SG'),
             'regions': regions,
+            'chain_defaults': next((r['chain'] for r in subscriptions if r.get('chain')), None),
         }
         self._nodes_cache = (now, result)
         return result
@@ -979,6 +991,14 @@ class App:
             if not REGION_RE.fullmatch(region):
                 raise ApiError(400, '出口地区须为两位国家代码，例如 SG。')
             params.update(node=node, subscription=subscription, region=region)
+            if payload.get('chain') is not None:
+                chain=payload['chain']
+                keys=('name','exit_subscription','exit_node','front_subscription','front_node')
+                if not isinstance(chain,dict) or set(chain)!=set(keys) or any(not isinstance(chain[k],str) or not chain[k].strip() or len(chain[k])>200 or any(ord(c)<32 for c in chain[k]) for k in keys):
+                    raise ApiError(400,'链式代理需要完整名称和两个精确节点。')
+                if chain['exit_node']!=node or chain['exit_subscription']!=subscription:
+                    raise ApiError(400,'链式代理的最终出口与所选节点不一致。')
+                params['chain']=dict(chain)
         if action in ('supplement', 'reconfigure', 'update', 'verify', 'audit') and not plan:
             raise ApiError(400, '还没有配置记录；请先完成一次配置。')
         if action in ('supplement', 'reconfigure') and not self.baseline_name():
@@ -1041,6 +1061,9 @@ class App:
                 command += ['-Node', params['node'], '-Region', params['region']]
                 if params.get('subscription'):
                     command += ['-Subscription', params['subscription']]
+                if params.get('chain'):
+                    atomic_json(folder/'chain-selection.json',params['chain'])
+                    command += ['-ChainSpecPath',str(folder/'chain-selection.json')]
             elif action == 'restore':
                 command += ['-Snapshot', params['snapshot']]
             if action in ('apply', 'supplement', 'restore', 'reconfigure', 'audit'):

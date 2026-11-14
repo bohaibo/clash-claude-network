@@ -1,6 +1,13 @@
 function secureMain(config,data,node,group) {
 
   if (!(config.proxies || []).some(p => p.name === node)) throw new Error('Selected node missing: refuse configuration');
+  if (data.chainPin) {
+    const exit = (config.proxies || []).find(p => p.name === data.chainPin.node);
+    const front = (config.proxies || []).find(p => p.name === data.chainPin.front);
+    if (config.proxies.length !== 2 || !exit || !front ||
+        exit['dialer-proxy'] !== data.chainPin.front || front['dialer-proxy'])
+      throw new Error('Chain direction changed: refuse configuration');
+  }
   // Also runs when the native client reapplies an updated subscription.
   for (const field of ['listeners','tunnels']) {
     const entries = config[field] || [];
@@ -83,6 +90,7 @@ function secureMain(config,data,node,group) {
     'respect-rules':true,'use-system-hosts':false
   };
   config.ipv6 = false;
+  if (data.chainNodeDns) config.dns['proxy-server-nameserver-policy'] = data.chainNodeDns;
   config.tun = {
     ...(config.tun || {}),enable:true,stack:'mixed',
     'auto-route':true,'auto-detect-interface':true,'strict-route':true,

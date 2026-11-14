@@ -48,6 +48,27 @@ class Verification(unittest.TestCase):
   probe.write_text('param($python,$scripts)\n$PSScriptRoot=$scripts\n'+commands[0],encoding='utf-8-sig')
   result=subprocess.run(['powershell.exe','-NoProfile','-File',str(probe),sys.executable,str(self.local)],capture_output=True,timeout=15)
   self.assertEqual(result.returncode,0,result.stderr)
+ def test_chain_drill_exercises_each_hop_and_restores_after_each(self):
+  import managed_chain
+  plan={'root':str(self.local),'node':'Chosen','region':'SG','chain':{'file':'chain.yaml'}}
+  (self.local/'plan.json').write_text(json.dumps(plan));(self.local/'profiles').mkdir()
+  (self.local/'profiles.yaml').write_text('{}')
+  (self.local/'profiles/chain.yaml').write_text('{}')
+  (self.local/'clash-verge.yaml').write_text(json.dumps({'proxies':[{'name':'Chosen','port':1234},{'name':managed_chain.FRONT,'port':5678}]}))
+  failed=[];original_api=self.fake_api
+  def api(root,method,path,body=None):
+   if method=='PUT':
+    nodes=client.yaml.safe_load(body['payload'])['proxies'];self.broken=any(n['port']==1 for n in nodes)
+    if self.broken:failed.extend(n['name'] for n in nodes if n['port']==1)
+    return {}
+   value=original_api(root,method,path,body)
+   if path=='/proxies':value['proxies'].update({'Chosen':{'dialer-proxy':managed_chain.FRONT},managed_chain.FRONT:{'dialer-proxy':''}})
+   return value
+  with patch.object(managed_chain,'check_fresh'),patch.object(client,'validate'),patch.object(verify,'api',side_effect=api):
+   report=verify.verify(outage=True)
+  self.assertEqual(failed,[managed_chain.FRONT,'Chosen']);self.assertFalse(self.broken)
+  self.assertTrue(report['chain_front_failure_blocks_foreign_preserves_domestic'])
+  self.assertTrue(report['node_failure_blocks_foreign_preserves_domestic'])
  def fake_api(self,root,method,path,body=None):
   if method=='PUT':self.broken=client.yaml.safe_load(body['payload'])['proxies'][0]['port']==1;return {}
   if path=='/configs':return {'mode':'rule','find-process-mode':'strict'}

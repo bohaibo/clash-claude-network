@@ -9,7 +9,7 @@ GROUP = 'Claude-Overseas-Pinned'
 
 def source_digest(project=PROJECT):
     digest = hashlib.sha256()
-    for name in ('assets/secure-main.js', 'assets/claude-policy.json', 'scripts/client.py', 'scripts/safe_yaml.py'):
+    for name in ('assets/secure-main.js', 'assets/claude-policy.json', 'scripts/client.py', 'scripts/safe_yaml.py', 'scripts/managed_chain.py', 'scripts/chain_profile.py'):
         digest.update((project / name).read_bytes())
     return digest.hexdigest()
 
@@ -26,6 +26,20 @@ def inspect(config, current, plan):
     dns = config.get('dns') or {}
     add('海外 DNS 优先', bool(dns.get('nameserver')) and dns.get('nameserver-policy', {}).get('geosite:geolocation-!cn') == dns.get('nameserver'), True, '重新配置')
     add('进程匹配', config.get('find-process-mode'), 'strict', '重新配置')
+    if plan.get('chain'):
+        import managed_chain
+        from safe_yaml import loads
+        try:
+            managed_chain.check_source(Path(plan['root']), plan['chain'])
+            managed_chain.check_fresh(Path(plan['root']), loads((Path(plan['root'])/'profiles.yaml').read_bytes()), plan['chain'])
+            source = loads((Path(plan['root']) / 'profiles' / plan['chain']['file']).read_bytes())
+            if source.get('x-portable-chain') != managed_chain.selection(plan['chain']):
+                raise ValueError('Managed chain marker changed')
+            managed_chain.audit(config, source)
+            good = True
+        except (OSError, ValueError, AssertionError, KeyError, TypeError):
+            good = False
+        add('链式方向与节点 DNS', good, True, '重新配置')
     add('配置生成版本', plan.get('source_digest'), source_digest(), '重新配置')
     add('启用的 IPv6 绑定数', current.get('ipv6_enabled_bindings'), 0, '补充配置')
     add('IPv6 全局禁用值', current.get('ipv6'), '255', '重新配置')

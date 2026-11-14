@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import argparse,copy,datetime,hashlib,ipaddress,json,os,re,shutil,socket,subprocess,sys,urllib.error,urllib.request,uuid
 import yaml
 import base64,time
+import managed_chain
 from safe_yaml import loads as yaml_loads, dumps as yaml_dumps
 from performance import timed,stage
 from atomic_files import replace_file
@@ -87,12 +88,19 @@ def discover(root):
   if not source.is_file():continue
   value=load(source) or {}
   rows.append({'uid':item['uid'],'name':item.get('name'),'nodes':[n['name'] for n in value.get('proxies',[])]})
+ for uid,record in managed_chain.records(root,LOCAL).items():
+  if any(i.get('uid')==uid and i.get('type')=='local' and i.get('file')==record['file'] for i in profiles['items']):
+   rows.append({'uid':uid,'name':record['name'],'nodes':[record['node']],'chain':managed_chain.selection(record)})
  return {'client':'Clash Verge Rev','root':str(root),'active_uid':profiles['current'],'subscriptions':rows}
 @timed("client.select")
 def select(root,node,subscription=None,profiles=None):
  profiles=profiles if profiles is not None else load(root/'profiles.yaml')
  matches=[]
  for item in profiles['items']:
+  if item.get('type')=='local' and item.get('file'):
+   record=managed_chain.registered(root,profiles,item['uid'],LOCAL)
+   if record and node==record['node'] and (subscription is None or subscription in (item.get('name'),item['uid'])):matches.append(item)
+   continue
   if item.get('type')!='remote' or not item.get('file'):continue
   if subscription is not None and subscription not in (item.get('name'),item.get('uid')):continue
   source=safe_file(root,'profiles/'+item['file'])
@@ -229,12 +237,15 @@ def api(root,method,path,body=None):
   value=decoded
  return json.loads(value) if value else None
 @timed("config.build")
-def build(root,item,node,data=None,*,runtime=None,profiles=None):
- original=load(safe_file(root,'profiles/'+item['file']));config=copy.deepcopy(original)
+def build(root,item,node,data=None,*,runtime=None,profiles=None,original=None):
+ original=original if original is not None else load(safe_file(root,'profiles/'+item['file']));config=copy.deepcopy(original)
  effective=load(root/'clash-verge.yaml')
  for key in ('mixed-port','port','socks-port','allow-lan','log-level','external-controller','external-controller-pipe','secret','find-process-mode','profile'):
   if key in effective:config[key]=copy.deepcopy(effective[key])
  data=copy.deepcopy(data or download_rules());data.update(json.loads((PROJECT/'assets/claude-policy.json').read_text(encoding='utf-8')))
+ if original.get('x-portable-chain'):
+  data['chainNodeDns']=original['dns'].get('proxy-server-nameserver-policy',{})
+  data['chainPin']={'node':node,'front':managed_chain.FRONT}
  lan_audit=[]
  data['lanSourceCidrs']=list(data['lanCidrs'])
  data['lanCidrs']=normalize_lan_cidrs(data['lanCidrs'],lan_audit)
@@ -303,6 +314,7 @@ def build(root,item,node,data=None,*,runtime=None,profiles=None):
   require(result.returncode==0,'Mihomo validation failed; see .local/candidate-validation.stdout.log and .local/candidate-validation.stderr.log')
  return wrapper,text,candidate,entry
 def validate(config,original,node):
+ managed_chain.audit(config,original)
  require(config['proxies']==original['proxies'],'Node definitions changed')
  require(config.get('mode')=='rule','Only rule mode is allowed; direct/global mode rejected')
  require(config.get('geodata-mode') is True,'Overseas geosite requires geodata mode')
@@ -362,6 +374,9 @@ def validate(config,original,node):
  for value in config['dns'].get('nameserver-policy',{}).values():
   values=value if isinstance(value,list) else [value]
   require(all(filtered(v) for v in values),'DNS policy path bypasses type filter')
+ for value in config['dns'].get('proxy-server-nameserver-policy',{}).values():
+  values=value if isinstance(value,list) else [value]
+  require(all(filtered(v) for v in values),'Node DNS policy path bypasses type filter')
 def already_configured(root):
  for candidate in (root/'profiles').glob('*'):
   if candidate.suffix not in ('.js','.yaml','.yml'):continue
@@ -425,13 +440,27 @@ def assert_preparation_inputs(root,inputs):
          'Client configuration changed during preparation; retry without publishing')
 
 @timed("client.prepare")
-def prepare(root,node,subscription,region,rules_bundle=None):
+def prepare(root,node,subscription,region,rules_bundle=None,chain_spec=None):
  data=consume_rules(rules_bundle) if rules_bundle else None
  index_bytes=(root/'profiles.yaml').read_bytes();profiles=yaml_loads(index_bytes);item=select(root,node,subscription,profiles)
  inputs=preparation_inputs(root,item,profiles)
+ record=managed_chain.resolve(root,profiles,chain_spec,LOCAL) if chain_spec else managed_chain.registered(root,profiles,item['uid'],LOCAL) if item.get('type')=='local' else None
+ original=None;new_profile=False
+ if record:
+  if chain_spec:require(item['uid']==record['source_uid'] and node==record['exit_node'],'Chain exit selection changed')
+  managed_chain.check_source(root,record)
+  exit_item=next(i for i in profiles['items'] if i['uid']==record['source_uid'])
+  inputs.update(preparation_inputs(root,exit_item,profiles))
+  for name in managed_chain.input_files(record):inputs[name]=hashlib.sha256(safe_file(root,name).read_bytes()).hexdigest()
+  original=managed_chain.source(root,profiles,record);node=record['node']
+  existing=next((i for i in profiles['items'] if i['uid']==record['uid']),None)
+  new_profile=existing is None
+  item=existing or {'uid':record['uid'],'type':'local','name':record['name'],'file':record['file'],'option':{}}
  inputs['profiles.yaml']=hashlib.sha256(index_bytes).hexdigest()
  runtime=executables()
- path=snapshot_dir(create=True);backup(root,path);wrapper,text,candidate,entry=build(root,item,node,data,runtime=runtime,profiles=profiles)
+ path=snapshot_dir(create=True);backup(root,path)
+ if record:wrapper,text,candidate,entry=build(root,item,node,data,runtime=runtime,profiles=profiles,original=original)
+ else:wrapper,text,candidate,entry=build(root,item,node,data,runtime=runtime,profiles=profiles)
  assert_preparation_inputs(root,inputs)
  pin_baseline(LOCAL,default_snapshot(LOCAL) or path)
  # Never overwrite an existing user script. Reuse only our own generated wrapper.
@@ -441,6 +470,11 @@ def prepare(root,node,subscription,region,rules_bundle=None):
  from config_health import source_digest
  plan={'source_digest':source_digest(),'input_sha256':inputs,'root':str(root),'node':node,'subscription_uid':item['uid'],'script_uid':uid,'script_file':file,
   'script_existed':bool(owned),'region':region,'core_program':runtime[1],'snapshot':str(path),'generated_files':['profiles/'+file]}
+ if record:
+  source_text=yaml_dumps(original,allow_unicode=True,sort_keys=False)
+  (LOCAL/'managed-chain-source.yaml').write_bytes(source_text.encode('utf-8'))
+  plan['chain']=managed_chain.refreshed(record,source_text,root,profiles)
+  plan['chain_profile_entry']=item
  if (LOCAL/'plan.json').exists():
   earlier=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'))
   require(Path(earlier['root']).resolve()==root.resolve(),'Previous plan targets another client directory')
@@ -475,7 +509,11 @@ def apply_client():
   require(plan['source_digest']==source_digest(),'Generator changed after preparation; retry without publishing')
   assert_preparation_inputs(root,plan['input_sha256'])
  text=(LOCAL/'candidate.yaml').read_text(encoding='utf-8');current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
- profiles=load(root/'profiles.yaml');item=next(x for x in profiles['items'] if x['uid']==plan['subscription_uid'])
+ profiles=load(root/'profiles.yaml')
+ item=next((x for x in profiles['items'] if x['uid']==plan['subscription_uid']),None)
+ if item is None and plan.get('chain'):
+  item=copy.deepcopy(plan['chain_profile_entry']);profiles['items'].append(item)
+ require(item is not None,'Selected subscription disappeared before apply')
  journal_path=(Path(plan['snapshot']) if plan.get('snapshot') else snapshot_dir())/'client-changes.json'
  journal=json.loads(journal_path.read_text(encoding='utf-8-sig')) if journal_path.exists() else {'subscriptions':{}}
  record=journal['subscriptions'].setdefault(item['uid'],{'had_option':'option' in item,'had_script':'script' in item.get('option',{}),
@@ -486,12 +524,20 @@ def apply_client():
  item.setdefault('option',{})['script']=plan['script_uid'];profiles['current']=item['uid']
  targets={root/'profiles.yaml':yaml_dumps(profiles,allow_unicode=True,sort_keys=False),
   safe_file(root,'profiles/'+plan['script_file']):(LOCAL/'candidate.js').read_text(encoding='utf-8'),root/'clash-verge.yaml':text}
+ chain_target=None
+ if plan.get('chain'):
+  chain_target=safe_file(root,'profiles/'+plan['chain']['file'])
+  targets[chain_target]=(LOCAL/'managed-chain-source.yaml').read_text(encoding='utf-8')
+  registry=managed_chain.records(root,LOCAL);registry[plan['subscription_uid']]=plan['chain']
+  targets[LOCAL/managed_chain.REGISTRY]=json.dumps(registry,ensure_ascii=False,indent=2)
  for filename,updates in [('verge.yaml',{'enable_tun_mode':True,'enable_system_proxy':False,'enable_dns_settings':False}),('config.yaml',{'mode':'rule','ipv6':False,'tun':yaml_loads(text)['tun']})]:
   value=load(root/filename) or {};value.update(updates);targets[root/filename]=yaml_dumps(value,allow_unicode=True,sort_keys=False)
  old={p:p.read_bytes() if p.exists() else None for p in targets}
  try:
   api(root,'PUT','/configs?force=true',{'payload':text})
-  for path,value in targets.items():path.write_text(value,encoding='utf-8')
+  for path,value in targets.items():
+   if path==chain_target:path.write_bytes(value.encode('utf-8'))
+   else:path.write_text(value,encoding='utf-8')
  except Exception:
   for path,value in old.items():
    if value is not None:path.write_bytes(value)
@@ -734,15 +780,30 @@ def create_snapshot(root=None,node=None):
 
 if __name__=='__main__':
  try:
-  parser=argparse.ArgumentParser();parser.add_argument('action',choices=['discover','prefetch-rules','prepare','seal','apply-client','restore-client','finish-restore','create-snapshot'])
-  parser.add_argument('--rules-bundle');parser.add_argument('--root');parser.add_argument('--node');parser.add_argument('--subscription');parser.add_argument('--region',default='SG');args=parser.parse_args()
+  parser=argparse.ArgumentParser();parser.add_argument('action',choices=['discover','prefetch-rules','chain-preflight','prepare','seal','apply-client','restore-client','finish-restore','create-snapshot'])
+  parser.add_argument('--chain-spec');parser.add_argument('--rules-bundle');parser.add_argument('--root');parser.add_argument('--node');parser.add_argument('--subscription');parser.add_argument('--region',default='SG');args=parser.parse_args()
+  chain_spec=None
+  if args.chain_spec:
+   spec_path=Path(args.chain_spec).resolve()
+   require(spec_path.is_relative_to(LOCAL.resolve()) and spec_path.stat().st_size<=16384,'Chain selection must stay under .local')
+   chain_spec=json.loads(spec_path.read_text(encoding='utf-8-sig'))
   if not re.fullmatch('[a-f0-9]{32}',os.environ.get('CCN_OPERATION_ID','')):
    os.environ['CCN_OPERATION_ID']=uuid.uuid4().hex
    os.environ['CCN_OPERATION_ACTION']={'discover':'discover','restore-client':'restore','finish-restore':'restore','create-snapshot':'snapshot'}.get(args.action,'apply')
   if args.action=='discover':result=discover(root_path(args.root))
   elif args.action=='prefetch-rules':result=prefetch_rules()
+  elif args.action=='chain-preflight':
+   root=root_path(args.root);profiles=load(root/'profiles.yaml')
+   if chain_spec:
+    record=managed_chain.resolve(root,profiles,chain_spec,LOCAL)
+    require(args.node==record['exit_node'] and args.subscription==record['source_uid'],'Chain exit selection changed')
+   else:
+    item=select(root,args.node,args.subscription,profiles);record=managed_chain.registered(root,profiles,item['uid'],LOCAL)
+    require(record is not None,'Managed chain registration missing')
+   managed_chain.check_source(root,record);managed_chain.source(root,profiles,record)
+   result={'valid':True}
   elif args.action=='prepare':
-   require(args.node,'Exact node name is required');result=prepare(root_path(args.root),args.node,args.subscription,args.region,args.rules_bundle)
+   require(args.node,'Exact node name is required');result=prepare(root_path(args.root),args.node,args.subscription,args.region,args.rules_bundle,chain_spec)
   elif args.action=='seal':result=seal()
   elif args.action=='create-snapshot':result=create_snapshot(args.root,args.node)
   elif args.action=='apply-client':result=apply_client()

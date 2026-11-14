@@ -29,6 +29,10 @@ const REGIONS = [
 ];
 
 const form = {
+  mode: 'single',
+  frontSubscription: '',
+  frontNode: '',
+  chainName: '',
   node: '',
   subscription: '',
   region: 'SG',
@@ -38,6 +42,9 @@ const form = {
   regionAuto: null,
   regionManual: false,
 };
+const modeDrafts = { single: null, chain: null };
+const draftFields = ['node','subscription','region','regionAuto','regionManual','search',
+  'frontSubscription','frontNode','chainName'];
 
 let nodesState = { loading: false, error: '', data: null };
 let subscriptionUid = '';
@@ -53,6 +60,9 @@ export function render(ctx) {
     form.region = plan.region || 'SG';
     form.subscription = plan.subscription || '';
     form.node = plan.node || '';
+    if (plan.chain) {
+      form.mode='chain';loadChainSelection(ctx,plan.chain);
+    }
     form.initialized = true;
   }
 
@@ -134,6 +144,7 @@ function setupCard(ctx) {
 
   const currentBand = configured ? ui.el('div', { class: 'current-band' },
     ui.el('div', {}, ui.el('strong', { text: plan.node || '—' })),
+    plan.chain ? ui.el('p',{class:'muted small',text:'链式：'+plan.chain.front_node+' → '+plan.chain.exit_node+'；完整防护状态请查看网络环境。'}) : null,
     ui.el('div', { class: 'current-meta' },
       ui.pill('订阅 ' + (plan.subscription ? plan.subscription.slice(0, 8) : '—'), 'neutral'),
       ui.pill('出口 ' + (plan.region || 'SG'), 'neutral'),
@@ -249,10 +260,12 @@ async function loadChoices(ctx) {
     const data = await ctx.loadNodes(true);
     nodesState.data = data;
     nodesState.error = '';
-    if (data.plan_node && !form.node) form.node = data.plan_node;
-    if (data.plan_subscription && !form.subscription) form.subscription = data.plan_subscription;
-    if (!form.subscription) form.subscription = data.active_uid || data.subscriptions?.[0]?.uid || '';
-    if (!form.node && data.plan_node) form.node = data.plan_node;
+    if (form.mode==='single') {
+      const singles=(data.subscriptions || []).filter(row=>!row.chain);
+      const planned=singles.find(row=>row.uid===data.plan_subscription);
+      if (!form.subscription) form.subscription=planned?.uid || singles.find(row=>row.uid===data.active_uid)?.uid || singles[0]?.uid || '';
+      if (!form.node && planned?.uid===form.subscription && planned.nodes.includes(data.plan_node)) form.node=data.plan_node;
+    }
     renderChoices(ctx);
   } catch (error) {
     nodesState.error = error.message || '读取订阅失败。';
@@ -264,14 +277,45 @@ async function loadChoices(ctx) {
 }
 
 function currentSubscription(ctx) {
-  const subscriptions = nodesState.data?.subscriptions || [];
+  const subscriptions = (nodesState.data?.subscriptions || []).filter(row=>!row.chain);
   return subscriptions.find((row) => row.uid === form.subscription) || subscriptions[0] || null;
+}
+
+function loadChainSelection(ctx, saved) {
+  form.subscription=saved.exit_subscription;form.node=saved.exit_node;
+  form.frontSubscription=saved.front_subscription;form.frontNode=saved.front_node;form.chainName=saved.name;
+  form.regionManual=false;form.regionAuto=null;form.acknowledged=false;
+  applyRegionHint(ctx,form.node);
+}
+
+function switchMode(ctx, value) {
+  if (value===form.mode) return;
+  modeDrafts[form.mode]=Object.fromEntries(draftFields.map(key=>[key,form[key]]));
+  form.mode=value;form.acknowledged=false;
+  if (modeDrafts[value]) Object.assign(form,modeDrafts[value]);
+  else if (value==='chain' && nodesState.data?.chain_defaults) loadChainSelection(ctx,nodesState.data.chain_defaults);
+  else {
+    form.node='';form.subscription='';form.frontSubscription='';form.frontNode='';form.chainName='';
+    form.region='SG';form.regionAuto=null;form.regionManual=false;form.search='';
+  }
+  renderChoices(ctx);
 }
 
 function renderChoices(ctx) {
   if (!choicesHost) return;
   const data = nodesState.data;
-  const subscriptions = data?.subscriptions || [];
+  const subscriptions = (data?.subscriptions || []).filter(row=>!row.chain);
+  const mode = ui.field('配置方式', ui.select([
+    {value:'single',label:'单一节点配置'},
+    {value:'chain',label:'链式代理配置'},
+  ], form.mode, value => switchMode(ctx,value)), '两种配置可以先后添加并同时保留，切换表单不会清空另一种方式的选择。');
+  if (form.mode==='chain') {
+    if (!ctx.state.capabilities?.managed_chain) {
+      choicesHost.replaceChildren(mode,ui.note('软件后台仍是旧版本。请点击退出界面后，重新运行「一键网络.cmd」，再创建链式代理。','warn'));
+      return;
+    }
+    renderChainChoices(ctx,mode);return;
+  }
   if (form.node && !form.regionAuto && !form.regionManual) applyRegionHint(ctx, form.node);
   if (!subscriptions.length) {
     choicesHost.replaceChildren(ui.note('当前 Clash Verge 中没有可读取的远程订阅。请先在 Clash 更新订阅；本项目不会创建或猜测节点。', 'warn'));
@@ -284,7 +328,7 @@ function renderChoices(ctx) {
   }
   const nodeNames = current.nodes || [];
   const selectedInside = form.node && nodeNames.includes(form.node);
-  const planNodeMissing = data?.plan_node && !subscriptions.some((row) => row.nodes.includes(data.plan_node));
+  const planNodeMissing = data?.plan_node && !(data.subscriptions || []).some((row) => row.nodes.includes(data.plan_node));
   const filter = form.search.trim().toLowerCase();
   const filtered = filter ? nodeNames.filter((name) => name.toLowerCase().includes(filter)) : nodeNames;
 
@@ -351,6 +395,7 @@ function renderChoices(ctx) {
   const regionHint = form.node && !form.regionAuto && !form.regionManual
     ? ui.note('未识别出口地区，请手动选择。', 'warn') : null;
   choicesHost.replaceChildren(...[
+    mode,
     columns,
     hint,
     toolbar,
@@ -414,24 +459,30 @@ function updateStartButton(ctx) {
   if (!button) return;
   const current = currentSubscription(ctx);
   const inside = Boolean(current && (current.nodes || []).includes(form.node));
-  button.disabled = !form.node || !inside || !form.acknowledged || ctx.busy;
+  button.disabled = !form.node || !inside || (form.mode==='chain' && !chainReady()) || !form.acknowledged || ctx.busy;
   button.title = form.node && !inside ? '所选节点不在当前订阅中，请重新选择。' : '';
 }
 
 function stateText(ctx) {
-  return ctx.state.configured ? '使用所选节点重新配置' : '开始配置';
+  return form.mode==='chain' ? '配置此链式代理' : '配置此单一节点';
 }
 
 async function beginApply(ctx) {
+  if (form.mode==='chain' && !ctx.state.capabilities?.managed_chain) {
+    ui.toast('请先退出并重新打开软件，加载链式代理功能。','warn');return;
+  }
   if (!form.node) return;
   if (!form.acknowledged) {
     ui.toast('请先勾选确认。', 'warn');
     return;
   }
   const subscription = currentSubscription(ctx);
+  const chain=form.mode==='chain' ? {name:form.chainName.trim(),exit_subscription:form.subscription,
+    exit_node:form.node,front_subscription:form.frontSubscription,front_node:form.frontNode} : null;
+  if (chain && !chainReady()) return;
   const ok = await ctx.confirm({
     title: '开始配置网络？',
-    subtitle: form.node + ' · 出口 ' + form.region,
+    subtitle: (chain ? chain.name+'：电脑 → '+chain.front_node+' → '+chain.exit_node : form.node) + ' · 最终出口 ' + form.region,
     description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，不自动运行联网检查或故障演练；外部指纹浏览器自行管理。',
     items: IMPACT,
     note: 'Mihomo 停止时所有公网（包括国内网站）都会短暂断开；请先保存正在进行的网络工作。',
@@ -445,8 +496,64 @@ async function beginApply(ctx) {
     node: form.node,
     subscription: subscription?.uid || form.subscription,
     region: form.region,
+    ...(chain ? {chain} : {}),
     confirm: 'APPLY',
   });
+}
+
+function chainReady() {
+  const rows=(nodesState.data?.subscriptions || []).filter(r=>!r.chain);
+  return Boolean(form.chainName.trim() && rows.some(r=>r.uid===form.subscription && r.nodes.includes(form.node)) &&
+    rows.some(r=>r.uid===form.frontSubscription && r.nodes.includes(form.frontNode)) &&
+    !(form.subscription===form.frontSubscription && form.node===form.frontNode));
+}
+
+function renderChainChoices(ctx,mode) {
+  const rows=(nodesState.data?.subscriptions || []).filter(r=>!r.chain);
+  const getSub=uid=>rows.find(r=>r.uid===uid);
+  const subOptions=[{value:'',label:'请选择原订阅'},...rows.map(r=>({value:r.uid,label:r.name}))];
+  const picker=(label,side)=>{
+    const front=side==='front';const uid=front?form.frontSubscription:form.subscription;
+    const node=front?form.frontNode:form.node;
+    return ui.el('div',{class:'choice-grid'},
+      ui.field(label+'订阅',ui.select(subOptions,uid,value=>{
+        if(front){form.frontSubscription=value;form.frontNode='';}else{form.subscription=value;form.node='';}
+        form.acknowledged=false;renderChoices(ctx);
+      })),
+      ui.field(label+'节点',ui.select([{value:'',label:'请选择精确节点'},...(getSub(uid)?.nodes || []).map(n=>({value:n,label:n}))],node,value=>{
+        if(front)form.frontNode=value;else{form.node=value;form.regionManual=false;applyRegionHint(ctx,value);}
+        form.acknowledged=false;renderChoices(ctx);
+      })));
+  };
+  let acknowledgement;
+  const name=ui.input(form.chainName,{'aria-label':'链式节点名称',placeholder:'请输入新链式节点名称',oninput:event=>{
+    form.chainName=event.target.value;form.acknowledged=false;
+    const check=acknowledgement?.querySelector?.('input');if(check)check.checked=false;
+    updateStartButton(ctx);
+  }});
+  acknowledgement=ui.checkbox(form.acknowledged,'我已核对两跳节点及最终出口，并了解将应用完整网络防护。',value=>{form.acknowledged=value;updateStartButton(ctx);});
+  const start=ui.button(stateText(ctx),{variant:'ink',icon:'play',disabled:!chainReady() || !form.acknowledged || ctx.busy,onClick:()=>beginApply(ctx)});
+  start.id='start-apply';
+  const saved=(nodesState.data?.subscriptions || []).filter(row=>row.chain);
+  const selected=saved.find(row=>row.chain.name===form.chainName && row.chain.front_subscription===form.frontSubscription &&
+    row.chain.front_node===form.frontNode && row.chain.exit_subscription===form.subscription && row.chain.exit_node===form.node);
+  const savedPicker=ui.field('链式配置',ui.select([{value:'',label:'新建链式配置'},...saved.map(row=>({value:row.uid,label:row.chain.name}))],selected?.uid || '',value=>{
+    const row=saved.find(row=>row.uid===value);
+    if(row)loadChainSelection(ctx,row.chain);
+    else{form.chainName='';form.frontSubscription='';form.frontNode='';form.acknowledged=false;}
+    renderChoices(ctx);
+  }),'已有链式配置可再次选择；新建链式配置会保留已配置的单一节点。');
+  choicesHost.replaceChildren(mode,
+    savedPicker,
+    ui.note('原订阅和原节点保持不变。链式配置使用与普通配置相同的分流、TUN、DNS、IPv6、防火墙及受管 WebRTC 防护；任一跳故障均不切换到直连。','neutral'),
+    picker('前置（第一跳）','front'),picker('后置 / 最终出口（第二跳）','exit'),
+    ui.el('div',{class:'choice-grid'},ui.field('链式节点名称',name),
+      ui.field('最终出口地区',ui.select(REGIONS.map(([value,label])=>({value,label})),form.region,value=>{
+        form.region=value;form.regionManual=true;form.acknowledged=false;renderChoices(ctx);
+      }),'以第二跳所在地区为准；不会使用前置节点的地区。')),
+    ui.el('p',{class:'muted',text:'电脑 → '+(form.frontNode || '前置节点')+' → '+(form.node || '最终出口节点')+' → 目标网站'}),
+    acknowledgement,start);
+  renderImpact(ctx);
 }
 
 async function quickReapply(ctx) {

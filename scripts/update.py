@@ -6,6 +6,9 @@ from atomic_files import replace_file
 from config_health import source_digest,assert_live
 from operation_lock import operation_lock
 from performance import timed
+import chain_profile
+import managed_chain
+from safe_yaml import dumps as yaml_dumps
 
 KEYS=('domains','ips','privateDomains','lanCidrs')
 
@@ -21,6 +24,16 @@ def transaction_targets(record):
  root=root_path(record['root'])
  targets={'script':safe_file(root,'profiles/'+record['script_file']),
           'plan':LOCAL/'plan.json','sources':LOCAL/'sources.json'}
+ if record.get('chain_file'):
+  targets['chain']=chain_profile.profile_file(root,record['chain_file'])
+  targets['chain_registry']=LOCAL/chain_profile.REGISTRY
+ if record.get('managed_file'):
+  targets['managed_source']=chain_profile.profile_file(root,record['managed_file'])
+  targets['managed_registry']=LOCAL/managed_chain.REGISTRY
+ for key,filename in record.get('companion_files',{}).items():
+  require(bool(re.fullmatch(r'companion-[0-9]+-(?:script|source)',key)),'Invalid companion update target')
+  targets[key]=chain_profile.profile_file(root,filename)
+ if record.get('companion_registry'):targets['managed_registry']=LOCAL/managed_chain.REGISTRY
  if record['active']:targets['runtime']=root/'clash-verge.yaml'
  return root,targets
 
@@ -51,30 +64,117 @@ def recover_pending():
  require(not errors,'Rule update rollback incomplete')
  pending.unlink();return True
 
+
+def companion_contexts(root,profiles,plan,fresh,migrate_source):
+ """Keep other project-owned normal/chain profiles on the same reviewed rule version."""
+ contexts=[];needed=False;registry=managed_chain.records(root,LOCAL)
+ policy=json.loads((PROJECT/'assets/claude-policy.json').read_text(encoding='utf-8'))
+ for item in profiles['items']:
+  if item.get('uid')==plan['subscription_uid'] or item.get('type') not in ('remote','local'):continue
+  record=registry.get(item['uid']) if item.get('type')=='local' else None
+  if item.get('type')=='local' and (not record or record.get('legacy')):continue
+  sid=item.get('option',{}).get('script')
+  if not str(sid).startswith('PortableClaude'):continue
+  script=next((s for s in profiles['items'] if s.get('uid')==sid and s.get('type')=='script'),None)
+  require(script is not None,'Configured companion script missing')
+  before=safe_file(root,'profiles/'+script['file']).read_bytes()
+  _,_,previous,node=parse_project_wrapper(before.decode('utf-8-sig'))
+  for key,value in policy.items():require(value==previous[key],'Reviewed Claude policy changed; explicit reconfiguration required')
+  migration=any(previous.get('ruleSources',{}).get(k,{}).get('url')!=url for k,url in SOURCES.items())
+  require(not migration or migrate_source,'Rule source migration requires manual update')
+  different=False
+  for key in KEYS:
+   a=set(previous.get('lanSourceCidrs',previous[key]) if key=='lanCidrs' else previous[key]);b=set(fresh[key])
+   if key in ('privateDomains','lanCidrs'):require(a==b,'Private/LAN source changed; review before publishing')
+   elif not(migration and key=='domains'):require(len(a^b)<=max(100,int(len(a)*.1)),'Large source delta requires manual review')
+   different=different or a!=b
+  if record:
+   require(node==record['node'],'Managed chain script node changed')
+   managed_chain.check_source(root,record)
+   different=different or record.get('source_fingerprint')!=chain_profile.source_fingerprint(root,profiles,record)
+  contexts.append({'item':item,'record':record,'node':node,'script_file':script['file'],'script_before':before})
+  needed=needed or different or migration
+ return contexts,needed
+
+
+def build_companions(root,profiles,contexts,fresh):
+ from client import preparation_inputs,assert_preparation_inputs
+ results=[]
+ for context in contexts:
+  item=context['item'];record=context['record'];original=None
+  inputs=preparation_inputs(root,item,profiles)
+  if record:
+   original=managed_chain.source(root,profiles,record)
+   for name in managed_chain.input_files(record):inputs[name]=digest(safe_file(root,name).read_bytes())
+  else:select(root,context['node'],item['uid'],profiles)
+  if record:wrapper,text,_,_=build(root,item,context['node'],fresh,original=original)
+  else:wrapper,text,_,_=build(root,item,context['node'],fresh)
+  assert_preparation_inputs(root,inputs)
+  entry={'uid':item['uid'],'node':context['node'],'script_file':context['script_file'],'script':wrapper,
+         'runtime':text,'before':{context['script_file']:context['script_before']}}
+  if record:
+   source_text=yaml_dumps(original,allow_unicode=True,sort_keys=False)
+   entry.update(source_file=record['file'],source=source_text,record=managed_chain.refreshed(record,source_text,root,profiles))
+   entry['before'][record['file']]=safe_file(root,'profiles/'+record['file']).read_bytes()
+  results.append(entry)
+ return results
+
 @timed('rules.publish')
-def publish(plan,profiles,wrapper,text,metadata):
- root=root_path(plan['root']);active=profiles['current']==plan['subscription_uid']
+def publish(plan,profiles,wrapper,text,metadata,chain=None,managed=None,companions=None):
+ companions=companions or []
+ root=root_path(plan['root']);active=profiles['current']==plan['subscription_uid'] or bool(chain and chain['active']) or any(c['uid']==profiles['current'] for c in companions)
  new_plan=dict(plan,source_digest=source_digest())
+ if managed:new_plan['chain']=managed['record']
  values={'script':wrapper.encode('utf-8'),
          'plan':json.dumps(new_plan,ensure_ascii=False,indent=2).encode('utf-8'),
          'sources':json.dumps(metadata,ensure_ascii=False,indent=2).encode('utf-8')}
- if active:values['runtime']=text.encode('utf-8')
+ if chain:
+  values['chain']=chain['text'].encode('utf-8')
+  values['chain_registry']=json.dumps(chain['record'],ensure_ascii=False,indent=2).encode('utf-8')
+ if managed:
+  values['managed_source']=managed['text'].encode('utf-8')
+ if managed or any(c.get('record') for c in companions):
+  registry=managed_chain.records(root,LOCAL)
+  if managed:registry[plan['subscription_uid']]=managed['record']
+  for companion in companions:
+   if companion.get('record'):registry[companion['uid']]=companion['record']
+  values['managed_registry']=json.dumps(registry,ensure_ascii=False,indent=2).encode('utf-8')
+ runtime_text=chain['runtime_text'] if chain and chain['active'] else text
+ runtime_plan=new_plan
+ companion_files={};expected={}
+ for index,companion in enumerate(companions):
+  for field,filename in [('script',companion['script_file']),('source',companion.get('source_file'))]:
+   if not filename:continue
+   key='companion-'+str(index)+'-'+field
+   companion_files[key]=filename;values[key]=companion[field].encode('utf-8');expected[key]=companion['before'][filename]
+  if profiles['current']==companion['uid']:
+   runtime_text=companion['runtime'];runtime_plan={'node':companion['node'],'chain':companion.get('record')}
+ if active:values['runtime']=runtime_text.encode('utf-8')
  record={'root':str(root),'script_file':plan['script_file'],'active':active,
          'current_uid':profiles['current'],'state':'prepared','files':{}}
+ if chain:record['chain_file']=chain['record']['file']
+ if managed:record['managed_file']=managed['record']['file']
+ if companions:record['companion_files']=companion_files;record['companion_registry']='managed_registry' in values
  _,targets=transaction_targets(record)
+ require(len(set(targets.values()))==len(targets),'Shared project script associations require review')
  token=uuid.uuid4().hex;folder=LOCAL/'rule-updates'/token;folder.mkdir(parents=True)
  for name,path in targets.items():
   before=path.read_bytes() if path.exists() else None
+  if chain and name in ('chain','chain_registry'):
+   require(before==chain['before' if name=='chain' else 'registry_before'],'Client configuration changed during update')
+  if managed and name=='managed_source':require(before==managed['before'],'Client configuration changed during update')
+  if name in expected:require(before==expected[name],'Client configuration changed during update')
   if before is not None:(folder/(name+'.before')).write_bytes(before)
   record['files'][name]={'before':digest(before),'after':digest(values[name])}
  write(folder/'transaction.json',record)
  write(LOCAL/'rule-update-pending.json',{'id':token})
  try:
   record['state']='publishing';write(folder/'transaction.json',record)
-  if active:api(root,'PUT','/configs?force=true',{'payload':text})
+  if active:api(root,'PUT','/configs?force=true',{'payload':values['runtime'].decode('utf-8')})
   for name,path in targets.items():atomic_bytes(path,values[name])
   if active:
    assert_live(api(root,'GET','/configs'),api(root,'GET','/rules'))
+   managed_chain.assert_live(runtime_plan,api(root,'GET','/proxies')) if runtime_plan.get('chain') else None
    providers=api(root,'GET','/providers/rules')['providers']
    expected=load(root/'clash-verge.yaml')['rule-providers']
    for name in ('strict-cn-domain','strict-cncidr','strict-private-domain','strict-lancidr'):
@@ -119,14 +219,32 @@ def update(migrate_source=False):
  result={'success':True,'source':'Loyalsoldier/clash-rules','sources':metadata,'changes':changes,
          'migrated':migration,'recovered_previous_update':recovered,'claude_automatic_merge':False}
  unchanged=not any(v['added'] or v['removed'] for v in changes.values())
- if unchanged and not migration and plan.get('source_digest')==source_digest():
+ managed=None;record=None
+ if plan.get('chain'):
+  record=managed_chain.registered(root,profiles,plan['subscription_uid'],LOCAL)
+  require(record is not None,'Managed chain registration missing')
+  managed_chain.check_source(root,record)
+ refresh=(record.get('source_fingerprint')!=chain_profile.source_fingerprint(root,profiles,record)) if record else chain_profile.refresh_required(LOCAL,root,profiles,plan)
+ contexts,companions_changed=companion_contexts(root,profiles,plan,fresh,migrate_source)
+ if unchanged and not migration and plan.get('source_digest')==source_digest() and not refresh and not companions_changed:
   return dict(result,unchanged=True,active_profile_reloaded=False)
  item=select(root,plan['node'],plan['subscription_uid'])
- wrapper,text,_,_=build(root,item,plan['node'],fresh)
+ if record:
+  original=managed_chain.source(root,profiles,record)
+  wrapper,text,candidate,_=build(root,item,plan['node'],fresh,original=original)
+  source_text=yaml_dumps(original,allow_unicode=True,sort_keys=False)
+  managed={'record':managed_chain.refreshed(record,source_text,root,profiles),'text':source_text,
+           'before':safe_file(root,'profiles/'+record['file']).read_bytes()}
+ else:wrapper,text,candidate,_=build(root,item,plan['node'],fresh)
+ chain=None if record else chain_profile.prepare_update(LOCAL,root,profiles,plan,candidate)
+ if chain:
+  from client import actual_core
+  chain_profile.validate_native(chain['config'],actual_core(),root,LOCAL/'chain-validation')
+ companions=build_companions(root,profiles,contexts,fresh)
  # Native client edits are outside our operation lock. Refuse stale publication.
  require(load(root/'profiles.yaml')==profiles and script.read_text(encoding='utf-8')==old and (root/'clash-verge.yaml').read_bytes()==old_runtime,'Client configuration changed during update')
- active=publish(plan,profiles,wrapper,text,metadata)
- return dict(result,unchanged=False,active_profile_reloaded=active)
+ active=publish(plan,profiles,wrapper,text,metadata,chain,managed,companions)
+ return dict(result,unchanged=False,active_profile_reloaded=active,chain_profile_updated=bool(chain or managed or any(c.get('record') for c in companions)))
 
 def failure_result(exc):
  import traceback
@@ -139,6 +257,10 @@ def failure_result(exc):
   'Rule source migration requires manual update':'需要首次切换到 Loyalsoldier，请在规则更新页点击立即更新；定时任务不会自动切换来源。',
   'Overbroad public suffix requires review':'上游新增了未经审核的顶级域直连规则，已停止更新。',
   'Client configuration changed during update':'下载期间 Clash 配置发生变化，请重试。',
+  'Chain profile changed; review required':'链式配置已被手动修改，已停止更新；请先检查改动。',
+  'Chain profile enhancement changed; review required':'链式配置的增强脚本或覆写已改变，已停止更新。',
+  'Chain rule source changed; review required':'链式配置关联的原规则配置已改变，需要检查后再更新。',
+  'Exact chain source node missing or duplicated':'链式代理的指定源节点缺失或重名，已停止更新，不自动替换。',
   'Loaded rule provider count mismatch':'内核加载的规则数量不符，已尝试恢复更新前配置。',
  }
  pending=(LOCAL/'rule-update-pending.json').exists()
