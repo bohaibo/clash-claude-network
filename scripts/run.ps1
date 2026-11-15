@@ -302,6 +302,7 @@ $operationStream=[IO.File]::Open((Join-Path $local 'operation.lock'),[IO.FileMod
 try{$operationStream.Lock(0,1)}catch{$operationStream.Dispose();throw '本项目另一个操作正在执行，请稍后重试。'}
 try {
 Resolve-PendingFirewall -LocalDir $local -Python $python
+Assert-NoPendingRules -LocalDir $local
 Assert-NoPendingSettings -LocalDir $local
 & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from operation_lock import check_pending_tun;from pathlib import Path;check_pending_tun(Path(sys.argv[2]))' $PSScriptRoot $local
 if($LASTEXITCODE -ne 0){throw 'TUN 演练恢复仍待处理，请先等待本机看护并查看恢复记录。'}

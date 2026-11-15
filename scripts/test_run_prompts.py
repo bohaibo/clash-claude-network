@@ -22,6 +22,7 @@ function Get-Service { return $null }
 function Assert-FirewallAvailable { return $null }
 function Resolve-PendingFirewall { return $null }
 function Assert-NoPendingSettings { return $null }
+function Assert-NoPendingRules { return $null }
 $script:answers=New-Object 'System.Collections.Generic.Queue[string]'
 $entries=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../answers.json') -Raw | ConvertFrom-Json
 foreach($entry in $entries){$script:answers.Enqueue([string]$entry)}
@@ -55,6 +56,17 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   self.assertEqual(result.returncode,1,text);self.assertIn('没有这个精确节点',text)
   self.assertIn('无需为此执行恢复',text);self.assertNotIn('Unexpected process',text)
   self.assertNotIn('重试之前请先执行',text)
+
+ def test_pending_rule_recovery_blocks_real_console_entry(self):
+  script=self.scripts/'run.ps1'
+  script.write_text(script.read_text(encoding='utf-8-sig').replace('function Assert-NoPendingRules { return $null }',''),encoding='utf-8-sig')
+  (self.scripts/'operation_guard.ps1').write_text((client.PROJECT/'scripts/operation_guard.ps1').read_text(encoding='utf-8-sig'),encoding='utf-8-sig')
+  (self.local/'rule-update-pending.json').write_text('{broken',encoding='utf-8')
+  for action in ('apply','supplement','restore','snapshot','audit'):
+   with self.subTest(action=action):
+    result,text=self.run_entry(action,(),'-Acknowledged','-Snapshot','fixture')
+    self.assertNotEqual(result.returncode,0);self.assertIn('规则更新恢复尚未完成',text)
+    self.assertNotIn('Unexpected',text)
  def test_events_record_progress_and_failure_without_browser_steps(self):
   events=self.local/'events.jsonl'
   result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Missing','-EventsFile',str(events))

@@ -1,6 +1,6 @@
 import * as ui from '../ui.js';
 import { configurationDetails } from './network.js';
-import { packageCard, updateInstructions } from './software.js';
+import { packageCard, updateInstructions, render as softwareVersion } from './software.js';
 
 export function render(ctx) {
   const root = document.createElement('div');
@@ -72,6 +72,7 @@ export function render(ctx) {
       ui.el('li', {}, '恢复后本项目注册的规则更新任务会被移除；如仍需定时更新，请在「规则更新」重新保存。'),
       ui.el('li', {}, '恢复不运行网络验收，需要自行确认联网。'))));
   root.append(ui.disclosure({ title: '当前配置与浏览器详情' }, ...configurationDetails(ctx)));
+  root.append(ui.disclosure({ title: '软件版本与更新检查' }, softwareVersion(ctx, {id: 'help-check-software-update'})));
   root.append(updateInstructions());
   root.append(packageCard(ctx));
 

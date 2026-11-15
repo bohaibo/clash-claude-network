@@ -17,4 +17,14 @@ foreach($phase in @('committed','rolled_back')){
 }
 Remove-Item -LiteralPath $journal
 Assert-NoPendingSettings -LocalDir $fixture
+$pendingRules=Join-Path $fixture 'rule-update-pending.json'
+Assert-NoPendingRules -LocalDir $fixture
+foreach($data in @('{}','{broken',('{"id":"'+('b'*32)+'"}'))){
+ Set-Content -LiteralPath $pendingRules -Value $data -Encoding UTF8
+ $blocked=$false
+ try{Assert-NoPendingRules -LocalDir $fixture}catch{$blocked=$true}
+ if(!$blocked){throw 'Unresolved rule transaction was accepted'}
+}
+Remove-Item -LiteralPath $pendingRules
+Assert-NoPendingRules -LocalDir $fixture
 Write-Output 'Offline settings guard passed: pending, malformed, terminal, legacy'

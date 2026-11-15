@@ -2,7 +2,7 @@
 import argparse,ctypes,json,os,subprocess,sys,time,uuid
 from pathlib import Path
 import baseline,client
-from operation_lock import check_pending_settings
+from operation_lock import check_pending_settings,check_pending_rules
 
 def save(folder,name,value):client.write(folder/name,value)
 
@@ -179,6 +179,7 @@ def validate_apply_result(report,job,previous_id):
  return report['configuration_id']
 
 def reconfigure():
+ check_pending_rules(client.LOCAL)
  check_pending_settings(client.LOCAL)
  if os.name!='nt' or not ctypes.windll.shell32.IsUserAnAdmin():raise RuntimeError('Administrator required')
  active=client.LOCAL/'reconfigure-active.json'

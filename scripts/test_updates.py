@@ -1,5 +1,5 @@
 """Offline fixtures only: source parsing, migration, publishing and recovery."""
-import copy,json,tempfile,unittest
+import copy,contextlib,io,json,os,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 import client,update,gui_server
@@ -38,7 +38,8 @@ class Updates(unittest.TestCase):
    domains=['+.cn'],ips=['1.0.1.0/24'],privateDomains=['+.lan'],lanCidrs=['10.0.0.0/8'],ruleSources=self.metadata)
   self.script=self.root/'profiles/project.js';self.script.write_text(self.wrapper(self.data),encoding='utf-8')
   self.plan={'root':str(self.root),'subscription_uid':'a','script_uid':'project','script_file':'project.js','node':'Chosen','source_digest':update.source_digest(),'snapshot':'original-preserved'}
-  self.profiles={'current':'a','items':[{'uid':'a','option':{'script':'project'}},{'uid':'project','file':'project.js'}]}
+  self.profiles={'current':'a','items':[{'uid':'a','type':'remote','file':'source.yaml','option':{'script':'project'}},{'uid':'project','type':'script','file':'project.js'}]}
+  client.write(self.root/'profiles/source.yaml',{'proxies':[{'name':'Chosen'}]})
   client.write(self.root/'profiles.yaml',self.profiles);client.write(self.local/'plan.json',self.plan)
   self.config={'mode':'rule','find-process-mode':'strict','rule-providers':{
    name:{'payload':['fixture']} for name in ('strict-cn-domain','strict-cncidr','strict-private-domain','strict-lancidr')}}
@@ -61,6 +62,73 @@ class Updates(unittest.TestCase):
   return {p:p.read_bytes() for p in (self.script,self.root/'clash-verge.yaml',self.local/'plan.json',self.local/'sources.json')}
  def test_no_change_does_not_reload_or_build(self):
   result=update.update();self.assertTrue(result['unchanged']);self.api.assert_not_called();self.build.assert_not_called()
+
+ def test_changed_or_deleted_source_during_build_stops_before_reload(self):
+  self.mutate_domains();source=self.root/'profiles/source.yaml';original_build=self.build.side_effect
+  for remove in (False,True):
+   client.write(source,{'proxies':[{'name':'Chosen'}]});before=self.snapshot_files()
+   def build(*args):
+    result=original_build(*args)
+    if remove:source.unlink()
+    else:client.write(source,{'proxies':[{'name':'Changed'}]})
+    return result
+   self.build.side_effect=build
+   with self.subTest(remove=remove),self.assertRaises((AssertionError,FileNotFoundError)):update.update()
+   self.api.assert_not_called();self.assertEqual(self.snapshot_files(),before)
+   self.assertFalse((self.local/'rule-update-pending.json').exists())
+
+ def test_legacy_chain_hop_change_during_build_stops_before_reload(self):
+  self.add_chain();self.mutate_domains();before=self.snapshot_files();original_build=self.build.side_effect
+  def build(*args):
+   result=original_build(*args)
+   client.write(self.root/'profiles/front.yaml',{'proxies':[{'name':'Front','port':7654}]})
+   return result
+  self.build.side_effect=build
+  with self.assertRaisesRegex(AssertionError,'changed during preparation'):update.update()
+  self.api.assert_not_called();self.assertEqual(self.snapshot_files(),before)
+
+ def test_source_change_during_download_blocks_unchanged_fast_path(self):
+  def download():
+   client.write(self.root/'profiles/source.yaml',{'proxies':[]})
+   return copy.deepcopy(self.fresh)
+  self.download.side_effect=download
+  with self.assertRaisesRegex(AssertionError,'changed during preparation'):update.update()
+  self.api.assert_not_called();self.build.assert_not_called()
+
+ def test_companion_new_broad_cidr_is_rejected_even_if_main_already_has_it(self):
+  companion_data=copy.deepcopy(self.data);self.data['ips']=self.fresh['ips']=['1.0.0.0/8']
+  self.script.write_text(self.wrapper(self.data),encoding='utf-8')
+  script=self.root/'profiles/companion.js';script.write_text(self.wrapper(companion_data),encoding='utf-8')
+  client.write(self.root/'profiles/other.yaml',{'proxies':[{'name':'Chosen'}]})
+  self.profiles['items'] += [{'uid':'b','type':'remote','file':'other.yaml','option':{'script':'PortableClaudeOther'}},
+                           {'uid':'PortableClaudeOther','type':'script','file':'companion.js'}]
+  client.write(self.root/'profiles.yaml',self.profiles);before=script.read_bytes()
+  for migrate in (False,True):
+   with self.subTest(migrate=migrate),self.assertRaisesRegex(AssertionError,'New broad direct CIDR'):update.update(migrate)
+  self.api.assert_not_called();self.build.assert_not_called();self.assertEqual(script.read_bytes(),before)
+
+ def test_recover_only_restores_pending_transaction_and_never_downloads(self):
+  self.mutate_domains();before=self.snapshot_files();self.api.side_effect=RuntimeError('offline fixture')
+  with self.assertRaises(AssertionError):update.update()
+  self.api.side_effect=self.controller;self.download.reset_mock();self.build.reset_mock()
+  settings=self.local/'gui/settings-transactions'/('c'*32);settings.mkdir(parents=True)
+  client.write(settings/'transaction.json',{'phase':'recovery_failed'})
+  with patch.dict(os.environ),contextlib.redirect_stdout(io.StringIO()):self.assertEqual(update.main(['--recover-only']),0)
+  self.assertEqual(self.snapshot_files(),before);self.download.assert_not_called();self.build.assert_not_called()
+  result=client.load(self.local/'update-result.json');self.assertTrue(result['recovery_only'])
+  self.assertFalse((self.local/'rule-update-pending.json').exists())
+  app=gui_server.App(local=self.local,open_browser=False,idle_exit=False)
+  with patch.object(app,'task_status',return_value={'installed':False}):summary=app.update_summary()
+  self.assertTrue(summary['last']['recovery_only']);self.assertTrue(summary['stale'])
+  self.assertEqual(client.load(settings/'transaction.json'),{'phase':'recovery_failed'})
+
+ def test_recovery_job_does_not_require_a_current_configuration(self):
+  app=gui_server.App(local=self.local,open_browser=False,idle_exit=False)
+  with patch.object(app,'configured',side_effect=AssertionError('must not inspect configuration')):
+   self.assertEqual(app._validate_job({'action':'update-recover','confirm':'RECOVER-RULES'}),('update-recover',{}))
+  with self.assertRaises(gui_server.ApiError):app._validate_job({'action':'update-recover','confirm':'wrong'})
+  command,_=app._job_command('update-recover',{},self.local)
+  self.assertIn('--recover-only',command);self.assertNotIn('--migrate-source',command)
  def test_scheduled_source_migration_stops_before_download(self):
   legacy=copy.deepcopy(self.data);legacy.pop('ruleSources');self.script.write_text(self.wrapper(legacy))
   with self.assertRaisesRegex(AssertionError,'migration requires manual'):update.update()

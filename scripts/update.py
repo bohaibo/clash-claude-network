@@ -1,7 +1,7 @@
 """Transactional updates of fixed Loyalsoldier sources. No service probes."""
 from checks import require
 import argparse,datetime,hashlib,json,ipaddress,os,re,sys,uuid
-from client import LOCAL,PROJECT,SOURCES,root_path,load,select,build,download_rules,api,safe_file,write,parse_project_wrapper
+from client import LOCAL,PROJECT,SOURCES,root_path,load,select,build,download_rules,api,safe_file,write,parse_project_wrapper,preparation_inputs,assert_preparation_inputs
 from atomic_files import replace_file
 from config_health import source_digest,assert_live
 from operation_lock import operation_lock
@@ -19,6 +19,31 @@ def atomic_bytes(path,value):
  finally:temp.unlink(missing_ok=True)
 
 def digest(value):return hashlib.sha256(value).hexdigest() if value is not None else None
+
+def review_changes(previous,fresh,migration):
+ changes={}
+ for key in KEYS:
+  before=set(previous.get('lanSourceCidrs',previous[key]) if key=='lanCidrs' else previous[key]);after=set(fresh[key])
+  changes[key]={'before':len(before),'after':len(after),'added':len(after-before),'removed':len(before-after)}
+  if key in ('privateDomains','lanCidrs'):
+   require(before==after,'Private/LAN source changed; review before publishing')
+  elif not (migration and key=='domains'):
+   require(len(after^before)<=max(100,int(len(before)*.1)),'Large source delta requires manual review')
+ for value in set(fresh['ips'])-set(previous['ips']):
+  require(ipaddress.ip_network(value).prefixlen>=16,'New broad direct CIDR requires manual review')
+ return changes
+
+def update_inputs(root,profiles,selected):
+ """Pin every participating source before downloads and native validation."""
+ inputs={};items={item['uid']:item for item in profiles['items']}
+ participating={selected['uid']} | {item['uid'] for item in profiles['items']
+  if item.get('type') in ('remote','local') and str(item.get('option',{}).get('script','')).startswith('PortableClaude')}
+ for uid in participating:inputs.update(preparation_inputs(root,items[uid],profiles))
+ for uid,record in managed_chain.records(root,LOCAL).items():
+  if uid not in items or not (uid in participating or record.get('legacy') and record['source_uid'] in participating):continue
+  for name in managed_chain.input_files(record):inputs[name]=digest(safe_file(root,name).read_bytes())
+  inputs.update(preparation_inputs(root,items[record['source_uid']],profiles))
+ return inputs
 
 def transaction_targets(record):
  root=root_path(record['root'])
@@ -84,12 +109,8 @@ def companion_contexts(root,profiles,plan,fresh,migrate_source):
   for key,value in policy.items():require(value==previous[key],'Reviewed Claude policy changed; explicit reconfiguration required')
   migration=any(previous.get('ruleSources',{}).get(k,{}).get('url')!=url for k,url in SOURCES.items())
   require(not migration or migrate_source,'Rule source migration requires manual update')
-  different=False
-  for key in KEYS:
-   a=set(previous.get('lanSourceCidrs',previous[key]) if key=='lanCidrs' else previous[key]);b=set(fresh[key])
-   if key in ('privateDomains','lanCidrs'):require(a==b,'Private/LAN source changed; review before publishing')
-   elif not(migration and key=='domains'):require(len(a^b)<=max(100,int(len(a)*.1)),'Large source delta requires manual review')
-   different=different or a!=b
+  changes=review_changes(previous,fresh,migration)
+  different=any(row['added'] or row['removed'] for row in changes.values())
   if record:
    require(node==record['node'],'Managed chain script node changed')
    managed_chain.check_source(root,record)
@@ -223,6 +244,7 @@ def update(migrate_source=False):
  entry=next((x for x in profiles.get('items',[]) if x.get('uid')==plan['script_uid']),None)
  if entry is None or entry.get('file')!=plan['script_file']:
   return {'success':True,'skipped':True,'reason':'配置脚本已移除或关联文件已改变；请重新配置。'}
+ inputs=update_inputs(root,profiles,selected)
  script=safe_file(root,'profiles/'+plan['script_file']);old=script.read_text(encoding='utf-8')
  old_runtime=(root/'clash-verge.yaml').read_bytes()
  _,_,previous,wrapped_node=parse_project_wrapper(old)
@@ -231,16 +253,7 @@ def update(migrate_source=False):
  migration=any(old_sources.get(key,{}).get('url')!=url for key,url in SOURCES.items())
  require(not migration or migrate_source,'Rule source migration requires manual update')
  fresh=download_rules();metadata=fresh['ruleSources']
- changes={}
- for key in KEYS:
-  before=set(previous.get('lanSourceCidrs',previous[key]) if key=='lanCidrs' else previous[key]);after=set(fresh[key])
-  changes[key]={'before':len(before),'after':len(after),'added':len(after-before),'removed':len(before-after)}
-  if key in ('privateDomains','lanCidrs'):
-   require(before==after,'Private/LAN source changed; review before publishing')
-  elif not (migration and key=='domains'):
-   require(len(after^before)<=max(100,int(len(before)*.1)),'Large source delta requires manual review')
- for value in set(fresh['ips'])-set(previous['ips']):
-  require(ipaddress.ip_network(value).prefixlen>=16,'New broad direct CIDR requires manual review')
+ changes=review_changes(previous,fresh,migration)
  policy=json.loads((PROJECT/'assets/claude-policy.json').read_text(encoding='utf-8'))
  for key,value in policy.items():require(value==previous[key],'Reviewed Claude policy changed; explicit reconfiguration required')
  result={'success':True,'source':'Loyalsoldier/clash-rules','sources':metadata,'changes':changes,
@@ -254,6 +267,7 @@ def update(migrate_source=False):
  refresh=(record.get('source_fingerprint')!=chain_profile.source_fingerprint(root,profiles,record)) if record else chain_profile.refresh_required(LOCAL,root,profiles,plan)
  contexts,companions_changed=companion_contexts(root,profiles,plan,fresh,migrate_source)
  if unchanged and not migration and plan.get('source_digest')==source_digest() and not refresh and not companions_changed:
+  assert_preparation_inputs(root,inputs)
   traffic_updated=publish_traffic(root,profiles,managed_chain.traffic_profiles(root,profiles,LOCAL))
   return dict(result,unchanged=True,active_profile_reloaded=False,chain_traffic_updated=traffic_updated)
  item=select(root,plan['node'],plan['subscription_uid'])
@@ -270,6 +284,7 @@ def update(migrate_source=False):
   chain_profile.validate_native(chain['config'],actual_core(),root,LOCAL/'chain-validation')
  companions=build_companions(root,profiles,contexts,fresh)
  # Native client edits are outside our operation lock. Refuse stale publication.
+ assert_preparation_inputs(root,inputs)
  require(load(root/'profiles.yaml')==profiles and script.read_text(encoding='utf-8')==old and (root/'clash-verge.yaml').read_bytes()==old_runtime,'Client configuration changed during update')
  active=publish(plan,profiles,wrapper,text,metadata,chain,managed,companions)
  return dict(result,unchanged=False,active_profile_reloaded=active,
@@ -287,6 +302,7 @@ def failure_result(exc):
   'Rule source migration requires manual update':'需要首次切换到 Loyalsoldier，请在规则更新页点击立即更新；定时任务不会自动切换来源。',
   'Overbroad public suffix requires review':'上游新增了未经审核的顶级域直连规则，已停止更新。',
   'Client configuration changed during update':'下载期间 Clash 配置发生变化，请重试。',
+  'Client configuration changed during preparation; retry without publishing':'生成期间 Clash 订阅、脚本或缓存发生变化，未发布新配置，请重试。',
   'Chain profile changed; review required':'链式配置已被手动修改，已停止更新；请先检查改动。',
   'Chain profile enhancement changed; review required':'链式配置的增强脚本或覆写已改变，已停止更新。',
   'Chain rule source changed; review required':'链式配置关联的原规则配置已改变，需要检查后再更新。',
@@ -298,12 +314,17 @@ def failure_result(exc):
  return {'success':False,'error':type(exc).__name__,'reason':reason,'recovery_required':pending,
          'note':'详细记录保存在 .local/update-error.log。'}
 
-if __name__=='__main__':
- parser=argparse.ArgumentParser();parser.add_argument('--migrate-source',action='store_true');args=parser.parse_args()
+def main(argv=None):
+ parser=argparse.ArgumentParser();parser.add_argument('--migrate-source',action='store_true');parser.add_argument('--recover-only',action='store_true');args=parser.parse_args(argv)
  os.environ['CCN_OPERATION_ID']=uuid.uuid4().hex;os.environ['CCN_OPERATION_ACTION']='update'
  try:
-  with operation_lock(LOCAL):result=update(migrate_source=args.migrate_source)
+  # Recovery-only changes rule files, not the scheduler/settings journal. Allow
+  # this ordering when an older installation has both recoveries pending.
+  with operation_lock(LOCAL,rule_recovery=True,settings_recovery=args.recover_only):
+   result={'success':True,'recovery_only':True,'recovered_previous_update':recover_pending()} if args.recover_only else update(migrate_source=args.migrate_source)
  except Exception as exc:result=failure_result(exc)
  result['time']=datetime.datetime.now().astimezone().isoformat();write(LOCAL/'update-result.json',result)
  print(json.dumps(result,ensure_ascii=False))
- if not result['success']:raise SystemExit(1)
+ return 0 if result['success'] else 1
+
+if __name__=='__main__':raise SystemExit(main())

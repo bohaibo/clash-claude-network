@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm'), assert = require('assert/strict');
 const source = fs.readFileSync('gui/js/pages/software.js', 'utf8').replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
 const buttons = [], links = [], notices = [];
 const ui = new Proxy({}, {get: (_, name) => (...args) => {
- if (name === 'button') buttons.push({label:args[0], ...args[1]});
+ if (name === 'button') {const button={label:args[0], ...args[1]};buttons.push(button);return button;}
  if (name === 'el' && args[0] === 'a') links.push(args[1]);
  if (name === 'note') notices.push(args[0]);
  return {append(){},replaceWith(){}};
@@ -19,7 +19,7 @@ p.render(ctx);
 assert(notices.includes('发布源不可访问'));
 p.packageCard(ctx);
 const exportButton=buttons.find(button=>button.label==='生成 ZIP 安装包');
-exportButton.onClick().then(()=>{
+exportButton.onClick().then(async()=>{
  p.packageCard(ctx);
  assert(links.some(link=>link.download==='package.zip' && link.href==='/api/packages/'+'a'.repeat(32)));
  const button = {attrs:{}, classList:{toggle:(name,value)=>{button.updated=value;}}, setAttribute(k,v){this.attrs[k]=v;}};
@@ -47,5 +47,23 @@ exportButton.onClick().then(()=>{
  const redraws=panel.replaced;
  p.refreshControl(ctx);
  assert.equal(panel.replaced,redraws,'unchanged polling must preserve the open panel contents');
+ // Load the real help page: its retry entry must work even while the top icon is hidden.
+ const helpSource=fs.readFileSync('gui/js/pages/help.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/export /g,'');
+ const helpContext=vm.createContext({ui,configurationDetails:()=>[],softwareVersion:p.render,
+  packageCard:p.packageCard,updateInstructions:()=>({}),document:{createElement:()=>({append(){}})}});
+ vm.runInContext(helpSource+'\nglobalThis.helpPage=render;',helpContext);
+ const requests=[];let refreshed=0,initiated=0;
+ ctx.softwareCheckRequested=()=>{initiated++;};
+ ctx.api.post=async(path)=>{requests.push(path);return {checking:true};};ctx.refresh=async()=>{refreshed++;};
+ for(const status of ['error','current','no_release','unchecked']){
+  ctx.state.software={status,checking:false};buttons.length=0;
+  helpContext.helpPage(ctx);
+  const retry=buttons.find(button=>button.label==='检查软件更新');
+  assert(retry && !retry.disabled,'help page always provides software retry');
+  assert.equal(retry.id,'help-check-software-update','help and popover must not duplicate IDs');
+  await retry.onClick();assert.equal(requests.at(-1),'/api/software-check');
+ }
+ assert.equal(refreshed,4);
+ assert.equal(initiated,4,'manual retry advertises the result after a failed startup request');
  console.log('Offline software UI checks passed: update icon states, stable panel, release links, errors and ZIP download');
 }).catch(error=>{console.error(error);process.exitCode=1;});

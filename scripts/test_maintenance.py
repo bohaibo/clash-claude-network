@@ -218,7 +218,8 @@ if((Get-VerificationFailureMessage 'fallback') -cne 'fallback'){throw 'Missing e
   data=dict(policy,domains=['+.cn'],ips=['1.0.1.0/24'],privateDomains=['+.lan'],lanCidrs=['10.0.0.0/8'],lanSourceCidrs=['10.0.0.0/8','192.0.2.0/24'],ruleSources={k:{'url':v} for k,v in client.SOURCES.items()})
   text='function main(c){return c;}\n// PORTABLE-CLAUDE-NETWORK-V1\n;(()=>{ const before=main; const data='+json.dumps(data)+'; main=function(config){return secureMain(before(config),data,"Chosen","Claude-Overseas-Pinned");};})();\n'
   (folder/'project.js').write_text(text)
-  (self.root/'profiles.yaml').write_text('current: a\nitems:\n- {uid: a, option: {script: project}}\n- {uid: project, file: project.js}\n')
+  (folder/'source.yaml').write_text('proxies: [{name: Chosen}]\n')
+  (self.root/'profiles.yaml').write_text('current: a\nitems:\n- {uid: a, type: remote, file: source.yaml, option: {script: project}}\n- {uid: project, type: script, file: project.js}\n')
   plan={'root':str(self.root),'subscription_uid':'a','script_uid':'project','script_file':'project.js','node':'Chosen'}
   (self.local/'plan.json').write_text(json.dumps(plan))
   fresh={key:data[key] for key in ('domains','ips','privateDomains','ruleSources')};fresh['lanCidrs']=list(data['lanSourceCidrs'])

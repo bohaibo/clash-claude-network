@@ -27,6 +27,43 @@ class PendingSettingsGuard(unittest.TestCase):
                 with operation_lock(self.local):
                     self.fail('entered protected operation')
 
+    def test_pending_rule_transaction_blocks_operations_even_when_malformed(self):
+        pending=self.local/'rule-update-pending.json'
+        for content in ('{}','{broken','{"id":"'+'a'*32+'"}'):
+            pending.write_text(content,encoding='utf-8')
+            for settings_recovery in (False,True):
+                with self.subTest(content=content,settings_recovery=settings_recovery),self.assertRaisesRegex(RuntimeError,'Rule update recovery'):
+                    with operation_lock(self.local,settings_recovery=settings_recovery):self.fail('entered operation')
+            with operation_lock(self.local,rule_recovery=True):pass
+        pending.unlink()
+        with operation_lock(self.local):pass
+
+    def test_rule_recovery_does_not_bypass_settings_or_firewall_guards(self):
+        (self.local/'rule-update-pending.json').write_text('{}',encoding='utf-8')
+        self.journal.write_text('{"phase":"applying"}',encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError,'Settings recovery'):
+            with operation_lock(self.local,rule_recovery=True):pass
+        self.journal.unlink()
+        (self.local/'pending-firewall.json').write_text('{"token":"guard-'+'b'*32+'"}',encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeError,'Firewall rollback'):
+            with operation_lock(self.local,rule_recovery=True):pass
+
+    def test_pending_rules_stop_reconfiguration_before_any_worker(self):
+        import safe_reconfigure
+        (self.local/'rule-update-pending.json').write_text('{}',encoding='utf-8')
+        with patch.object(client,'LOCAL',self.local),patch.object(safe_reconfigure.baseline,'preflight_restore') as baseline,patch.object(safe_reconfigure.subprocess,'Popen') as process:
+            with self.assertRaisesRegex(RuntimeError,'Rule update recovery'):safe_reconfigure.reconfigure()
+        baseline.assert_not_called();process.assert_not_called()
+
+    def test_gui_blocks_new_jobs_before_validation_when_rule_recovery_is_pending(self):
+        import gui_server
+        app=gui_server.App(local=self.local,open_browser=False,idle_exit=False)
+        (self.local/'rule-update-pending.json').write_text('{}',encoding='utf-8')
+        for action in ('apply','supplement','restore','snapshot','reconfigure','verify','audit'):
+            with self.subTest(action=action),patch.object(app,'_validate_job') as validate:
+                with self.assertRaises(gui_server.ApiError):app.start_job({'action':action})
+                validate.assert_not_called()
+
     def test_completed_and_legacy_records_do_not_block(self):
         for phase in ('committed', 'rolled_back'):
             self.journal.write_text(json.dumps({'phase': phase}), encoding='utf-8')

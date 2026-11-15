@@ -23,6 +23,11 @@ export function render(ctx) {
     title: '规则更新',
     actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) })],
   }));
+  if (state.operation?.pending_rule_update) {
+    root.append(ui.card({title: '上次规则更新待恢复'},
+      ui.note('恢复完成前暂停其他配置操作。这里只恢复上次更新，不下载新规则；如检测到后续手动改动，会停止并保留记录。', 'warn'),
+      ui.button('恢复上次更新', {variant: 'secondary', disabled: ctx.busy, onClick: () => recoverRules(ctx)})));
+  }
   root.append(modeCard(ctx, update));
   root.append(statusCard(ctx, update));
   root.append(lastResultCard(ctx, update));
@@ -130,14 +135,14 @@ function lastResultCard(ctx, update) {
     return ui.card({ title: '最近一次更新' }, ui.el('p', { class: 'muted', text: '还没有更新记录' }));
   }
   const tone = last.skipped ? 'warn' : last.success ? 'ok' : 'bad';
-  const outcome = last.skipped ? '已跳过' : !last.success ? '未完成' : last.unchanged ? '已是最新' : last.migrated ? '已切换来源' : '成功';
+  const outcome = last.skipped ? '已跳过' : !last.success ? '未完成' : last.recovery_only ? '已恢复' : last.unchanged ? '已是最新' : last.migrated ? '已切换来源' : '成功';
   const labels = { domains: '国内域名', ips: '国内 IP', privateDomains: '私有域名', lanCidrs: '局域网地址' };
   const counts = Object.entries(last.changes || {}).map(([key, row]) => [labels[key] || key,
     `${row.after ?? '—'} 条（新增 ${row.added ?? 0}，移除 ${row.removed ?? 0}）`]);
   return ui.card({ title: '最近一次更新', actions: ui.badge(outcome, tone) },
     ui.kv([
       ['时间', ui.formatTime(last.time)],
-      ['结果', last.skipped ? '未执行（订阅或脚本关联已变化）' : !last.success ? '更新未完成' : last.unchanged ? '规则内容未变化，无需重载' : '已发布并核对新配置'],
+      ['结果', last.skipped ? '未执行（订阅或脚本关联已变化）' : !last.success ? '更新未完成' : last.recovery_only ? '已处理上次更新的恢复记录，未下载新规则' : last.unchanged ? '规则内容未变化，无需重载' : '已发布并核对新配置'],
       ...(last.chain_profile_updated ? [['链式配置', '已同步分流规则']] : []),
       ...(last.chain_traffic_updated ? [['链式流量', '已同步原订阅缓存用量，Clash 客户端可能需重新打开显示']] : []),
       ...(last.reason || last.error ? [['原因', last.reason || last.error]] : []),
@@ -192,4 +197,11 @@ async function updateNow(ctx) {
   });
   if (!ok) return;
   ctx.startJob({ action: 'update', confirm: 'UPDATE' });
+}
+
+async function recoverRules(ctx) {
+  const ok = await ctx.confirm({title: '恢复上次规则更新？',
+    description: '校验上次更新的备份并恢复受影响文件，必要时重载本机内核。不会下载规则或恢复系统快照，可能短暂重连。',
+    confirmText: '恢复上次更新'});
+  if (ok) ctx.startJob({action: 'update-recover', confirm: 'RECOVER-RULES'});
 }

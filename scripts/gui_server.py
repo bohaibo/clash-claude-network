@@ -55,6 +55,7 @@ CONFIRM = {
     'snapshot': 'SNAPSHOT',
     'reconfigure': 'RECONFIGURE',
     'update': 'UPDATE',
+    'update-recover': 'RECOVER-RULES',
     'verify': 'VERIFY',
     'audit': 'AUDIT',
 }
@@ -444,6 +445,7 @@ class App:
             'migrated': bool(last.get('migrated')),
             'chain_profile_updated': bool(last.get('chain_profile_updated')),
             'chain_traffic_updated': bool(last.get('chain_traffic_updated')),
+            'recovery_only': bool(last.get('recovery_only')),
             'recovery_required': bool(last.get('recovery_required')),
             'source': 'Loyalsoldier/clash-rules' if last.get('source') == 'Loyalsoldier/clash-rules' else '',
             'changes': {key: {field: value for field, value in row.items()
@@ -453,7 +455,7 @@ class App:
         }
         stale = True
         moment = parse_time(clean_last.get('time'))
-        if clean_last.get('success') and not clean_last.get('skipped') and moment is not None:
+        if clean_last.get('success') and not clean_last.get('skipped') and not clean_last.get('recovery_only') and moment is not None:
             stale = (datetime.datetime.now().astimezone() - moment).total_seconds() > 24 * 3600
         elif not clean_last.get('time'):
             stale = True
@@ -721,6 +723,7 @@ class App:
                 'job': active,
                 'reconfigure_active': (self.local / 'reconfigure-active.json').is_file(),
                 'pending_firewall': self.pending_firewall(),
+                'pending_rule_update': (self.local / 'rule-update-pending.json').exists(),
             },
             'last_run': {
                 'success': bool(last_run.get('success')),
@@ -960,8 +963,12 @@ class App:
                     raise ApiError(400, '没有待恢复的设置记录。')
                 return action, {'transaction': transaction}
             raise ApiError(400, '不支持的本地操作。')
-        if action not in RUN_ACTIONS | {'update', 'verify'}:
+        if action not in RUN_ACTIONS | {'update', 'update-recover', 'verify'}:
             raise ApiError(400, '不支持的操作。')
+        if action == 'update-recover':
+            if payload.get('confirm') != CONFIRM[action]:
+                raise ApiError(400, '恢复确认信息不匹配；未执行操作。')
+            return action, {}
         confirm = str(payload.get('confirm') or '')
         params = {}
         plan = self.plan()
@@ -1015,8 +1022,10 @@ class App:
         with self._lock:
             if self.active_job or self._settings_busy or self.stopping or self._shutdown_requested:
                 raise ApiError(409, '另一个操作正在进行，请等待完成。')
-            if payload.get('action') != 'settings-recover' and self.settings_transactions():
+            if payload.get('action') not in ('settings-recover', 'update-recover') and self.settings_transactions():
                 raise ApiError(409, '请先在快照与恢复页面恢复未完成的设置保存。')
+            if (self.local / 'rule-update-pending.json').exists() and payload.get('action') not in ('update', 'update-recover'):
+                raise ApiError(409, '请先在规则更新页面恢复上次更新。')
             action, params = self._validate_job(payload)
             job_id = secrets.token_hex(16)
             self.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -1072,6 +1081,8 @@ class App:
             return command, events
         if action == 'update':
             return [python_console(), str(self.scripts / 'update.py'), '--migrate-source'], events
+        if action == 'update-recover':
+            return [python_console(), str(self.scripts / 'update.py'), '--recover-only'], events
         return [python_console(), str(self.scripts / 'verify.py')], events
 
     def _complete_job(self, job, status):
@@ -1099,7 +1110,7 @@ class App:
             env['CCN_NODE'] = self.node_path()
         try:
             command, events = self._job_command(action, job['params'], folder)
-            if action in ('update', 'verify'):
+            if action in ('update', 'update-recover', 'verify'):
                 append_event(events, {'type': 'start', 'action': action})
             with (folder / 'console.log').open('ab') as output:
                 process = subprocess.Popen(command, cwd=str(self.project), env=env, stdin=subprocess.DEVNULL,
@@ -1193,16 +1204,17 @@ class App:
         cancelled = next((e for e in reversed(events) if e.get('type') == 'cancelled'), None)
         error_event = next((e for e in reversed(events) if e.get('type') == 'error'), None)
         result = None
-        if action in ('update', 'verify'):
+        if action in ('update', 'update-recover', 'verify'):
             result = _last_json_line(console_text)
             success = code == 0 and isinstance(result, dict) and bool(result.get('success'))
             if not success and isinstance(result, dict):
-                error = str(result.get('error') or result.get('note') or '操作未通过。')
+                error = str(result.get('reason') or result.get('error') or result.get('note') or '操作未通过。')
             else:
                 error = '' if success else '操作未通过。'
             append_event(folder / 'events.jsonl', {
                 'type': 'done' if success else 'error',
                 'message': ('规则更新已跳过（订阅或脚本关联变化）。' if success and action == 'update' and isinstance(result, dict) and result.get('skipped')
+                            else '上次规则更新已恢复。' if success and action == 'update-recover'
                             else '规则更新完成。' if success and action == 'update'
                             else '连通性检查完成。' if success else (error or '操作未通过。')),
             })

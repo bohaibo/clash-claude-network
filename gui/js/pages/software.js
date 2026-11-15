@@ -2,16 +2,21 @@ import * as ui from '../ui.js';
 import { icon } from '../icons.js';
 
 let exporting = false;
-export function render(ctx) {
+export function render(ctx, {id = 'check-software-update'} = {}) {
   const info = ctx.state?.software || {};
   const root = document.createElement('div');
   root.className = 'stack';
   const check = ui.button('检查软件更新', {variant: 'secondary', icon: 'refresh', disabled: info.checking,
     onClick: async () => {
-      try { ctx.acceptState('software', await ctx.api.post('/api/software-check', {})); await ctx.refresh(true); }
+      try {
+        const result = await ctx.api.post('/api/software-check', {});
+        ctx.softwareCheckRequested?.();
+        ctx.acceptState('software', result);
+        await ctx.refresh(true);
+      }
       catch (error) { ui.toast(error.message || '更新检查未完成。', 'bad'); }
     }});
-  check.id = 'check-software-update';
+  check.id = id;
   const labels = {available: '发现新版本', current: '当前无需更新', no_release: '尚未发布正式版本', error: '暂时无法检查', unchecked: '尚未检查'};
   root.append(ui.card({title: '软件版本', actions: ui.badge(info.checking ? '正在检查' : labels[info.status] || '尚未检查', info.status === 'available' ? 'ok' : 'neutral')},
     ui.kv([['当前版本', info.current_version || ctx.state?.version || '—'], ['最新正式版', info.latest_version || '—'],

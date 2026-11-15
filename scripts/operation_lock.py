@@ -40,8 +40,12 @@ def check_pending_tun(local):
         if re.fullmatch(r'[a-f0-9]{32}',folder.name) and (folder/'ready').exists() and not (folder/'done').exists():
             raise RuntimeError('TUN drill recovery is pending; wait for local recovery and inspect its report')
 
+def check_pending_rules(local):
+    if (Path(local)/'rule-update-pending.json').exists():
+        raise RuntimeError('Rule update recovery is pending; use the rule update page to recover before other operations')
+
 @contextmanager
-def operation_lock(local,*,settings_recovery=False):
+def operation_lock(local,*,settings_recovery=False,rule_recovery=False):
     path=Path(local)/'operation.lock'
     path.parent.mkdir(parents=True,exist_ok=True)
     with open(path,'a+b') as stream:
@@ -52,6 +56,7 @@ def operation_lock(local,*,settings_recovery=False):
             raise RuntimeError('Another project operation is running; retry later') from None
         try:
             check_pending_firewall(local)
+            if not rule_recovery:check_pending_rules(local)
             if not settings_recovery:check_pending_settings(local)
             yield
         finally:

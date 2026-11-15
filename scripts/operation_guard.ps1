@@ -1,4 +1,10 @@
-﻿function Assert-NoPendingSettings([string]$LocalDir) {
+﻿function Assert-NoPendingRules([string]$LocalDir) {
+ if(Test-Path -LiteralPath (Join-Path $LocalDir 'rule-update-pending.json')){
+  throw '规则更新恢复尚未完成，请先在界面规则更新页面恢复上次更新。'
+ }
+}
+
+function Assert-NoPendingSettings([string]$LocalDir) {
  $root=Join-Path $LocalDir 'gui/settings-transactions'
  foreach($folder in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)){
   if($folder.Name -notmatch '^[a-f0-9]{32}$'){continue}
