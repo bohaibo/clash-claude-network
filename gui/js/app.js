@@ -134,24 +134,29 @@ function updateChrome() {
   if (!data) return;
   const verification = data.verification || {};
   const hasVerification = Boolean(verification.available);
+  const awaitingVerification = data.last_run?.network_tested === false &&
+    (!hasVerification || (Date.parse(verification.time) || 0) < (Date.parse(data.last_run.configuration_time) || Infinity));
   const verified = hasVerification && verification.success && !verification.dns_failed;
   const verifiedAt = verification.time ? new Date(verification.time).getTime() : 0;
+  const configurationAt = Date.parse(data.last_run?.configuration_time);
   const verificationAge = verifiedAt ? (Date.now() - verifiedAt) / 3600000 : Infinity;
-  const verifiedFresh = verified && verificationAge <= 24;
+  const verifiedFresh = verified && Number.isFinite(configurationAt) && verifiedAt >= configurationAt &&
+    !awaitingVerification && verification.source_matches_current !== false && verificationAge >= 0 && verificationAge <= 24;
   const lastRun = data.last_run || {};
   const lastRunFailed = lastRun.success === false && Boolean(lastRun.action);
   const statusTone = !data.configured ? 'warn' : lastRunFailed ? 'bad' : verification.dns_failed ? 'bad' : verifiedFresh ? 'ok' : 'warn';
   const statusText = !data.configured ? '尚未配置网络'
     : lastRunFailed ? ('上次' + (ACTION_LABELS[lastRun.action] || '操作') + '未完成')
+      : awaitingVerification ? '配置已写入 · 本次配置未验收'
       : verification.dns_failed ? '配置已写入 · DNS 验收失败'
         : hasVerification && !verification.success ? '配置已写入 · 上次验收失败'
           : verifiedFresh ? '配置已写入 · 验收通过'
-            : hasVerification ? '配置已写入 · 验收已过期' : '配置已写入 · 未验收';
+            : hasVerification ? (Number.isFinite(configurationAt) ? '配置已写入 · 验收已过期或不匹配' : '配置已写入 · 仅有历史验收记录') : '配置已写入 · 未验收';
   const chips = document.getElementById('top-chips');
   if (chips) {
     chips.replaceChildren(...[
       data.configured
-        ? ui.badge(verification.dns_failed ? 'DNS 验收失败' : verifiedFresh ? '已配置' : '配置已写入', statusTone)
+        ? ui.badge(awaitingVerification ? '本次配置未验收' : verification.dns_failed ? 'DNS 验收失败' : verifiedFresh ? '已配置' : '配置已写入', statusTone)
         : ui.badge('未配置', 'warn'),
       data.update?.mode === 'scheduled'
         ? ui.badge((Number(data.update.days || 1) === 1 ? '定时更新分流规则 ' : '定时更新分流规则 · 每 ' + (data.update.days || 1) + ' 天 ') + (data.update.time || '13:00'), 'neutral')
@@ -180,6 +185,11 @@ function renderBanners() {
   const host = document.getElementById('banners');
   if (!host) return;
   const rows = [];
+  if (app.data?.operation?.pending_rule_update) {
+    rows.push(ui.note(h('div', {class: 'note-with-action'},
+      h('span', {text: '上次规则更新尚未恢复，配置和其他写入操作已暂停。请先恢复上次更新。'}),
+      ui.button('去恢复上次更新', {variant: 'secondary', size: 'small', onClick: () => navigate('updates')})), 'bad'));
+  }
   const labels = { preview: '系统设置', update: '规则更新', service: 'Clash 服务' };
   const collecting = Object.entries(app.data?.collection || {}).filter(([, status]) => status.refreshing);
   if (app.stateLoading || collecting.length) {
@@ -196,7 +206,9 @@ function renderBanners() {
     }
   }
   if (app.data.operation?.settings_pending?.length) {
-    rows.push(ui.note('检测到未完成的设置保存，请到「快照与恢复」恢复原设置后再继续操作。', 'bad'));
+    rows.push(ui.note(app.data.operation?.pending_rule_update
+      ? '另有未完成的设置保存；请先恢复上次规则更新，再到「快照与恢复」恢复原设置。'
+      : '检测到未完成的设置保存，请到「快照与恢复」恢复原设置后再继续操作。', 'bad'));
   }
   if (app.data.admin) {
     rows.push(ui.note('界面以管理员权限运行，界面浏览器也会继承管理员权限。建议关闭后从普通用户终端重新运行「一键网络.cmd」。', 'warn'));
@@ -226,10 +238,10 @@ function renderBanners() {
   if (app.data.app?.node === false) {
     rows.push(ui.note('未找到项目内 Node.js。请重新运行根目录「一键网络.cmd」，启动器会将所需环境安装或修复到项目内，不修改系统 PATH。', 'warn'));
   }
-  if ((app.data.update?.last?.success === false || app.data.update?.last?.skipped) && app.data.update?.last?.time) {
+  if (!app.data.operation?.pending_rule_update && (app.data.update?.last?.success === false || app.data.update?.last?.skipped) && app.data.update?.last?.time) {
     rows.push(ruleUpdateNotice('上次规则更新未完成：' + (app.data.update.last.reason || app.data.update.last.error || '请查看规则更新页。'), 'warn'));
   }
-  if (app.data.update?.mode === 'manual' && app.data.update?.stale) {
+  if (!app.data.operation?.pending_rule_update && app.data.update?.mode === 'manual' && app.data.update?.stale) {
     rows.push(ruleUpdateNotice('手动更新模式：上次成功更新已超过 24 小时或尚无记录。', 'info'));
   }
   if (app.data.update?.mode === 'scheduled' && app.data.update?.task?.installed === false && app.data.configured) {
@@ -388,6 +400,10 @@ async function loadNodes(force = false) {
 }
 
 async function startJob(payload) {
+  if (app.data?.operation?.pending_rule_update && payload.action !== 'update-recover') {
+    ui.toast('请先到规则更新页恢复上次更新。', 'warn');
+    return;
+  }
   if (ctx.busy) {
     ui.toast('另一个操作正在进行，请等待完成。', 'warn');
     return;

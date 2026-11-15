@@ -53,6 +53,8 @@ let choicesHost = null;
 let listHost = null;
 let impactHost = null;
 
+function operationsBlocked(ctx) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update); }
+
 export function render(ctx) {
   const state = ctx.state;
   const plan = state.plan || {};
@@ -87,6 +89,8 @@ export function refreshStatus(ctx) {
   rootNode.querySelector('.tiles')?.replaceWith(statusGrid(ctx));
   renderImpact(ctx);
   updateStartButton(ctx);
+  const reapply = rootNode.querySelector('#quick-reapply');
+  if (reapply) reapply.disabled = operationsBlocked(ctx) || !ctx.state.plan?.node;
 }
 
 function statusGrid(ctx) {
@@ -94,12 +98,17 @@ function statusGrid(ctx) {
   const verification = state.verification || {};
   const awaitingVerification = state.last_run?.network_tested === false &&
     (!verification.available || (Date.parse(verification.time) || 0) < (Date.parse(state.last_run.configuration_time) || Infinity));
+  const verificationAge = (Date.now() - Date.parse(verification.time)) / 3600000;
+  const configurationAt = Date.parse(state.last_run?.configuration_time);
+  const verifiedFresh = verification.available && verification.success && !awaitingVerification &&
+    Number.isFinite(configurationAt) && Date.parse(verification.time) >= configurationAt &&
+    verification.source_matches_current !== false && verificationAge >= 0 && verificationAge <= 24;
   const update = state.update || {};
   const tiles = [
     {
       label: '网络配置',
       value: !state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : '已配置',
-      tone: !state.configured ? 'warn' : state.last_run?.success === false ? 'bad' : awaitingVerification ? 'warn' : verification.dns_failed ? 'bad' : verification.available && verification.success ? 'ok' : 'warn',
+      tone: !state.configured ? 'warn' : state.last_run?.success === false ? 'bad' : awaitingVerification ? 'warn' : verification.dns_failed ? 'bad' : verifiedFresh ? 'ok' : 'warn',
       detail: state.configured ? ('节点 ' + (state.plan.node || '—') + (awaitingVerification ? ' · 网络未验收' : verification.available ? ' · 上次验收 ' + ui.relativeTime(verification.time) : ' · 尚未验收')) : '首次配置会先保存原始快照',
       action: state.configured ? () => ctx.navigate('network') : null,
     },
@@ -137,10 +146,11 @@ function setupCard(ctx) {
     ? ui.button('按当前记录重新配置', {
         variant: 'secondary',
         icon: 'refresh',
-        disabled: ctx.busy || !plan.node,
+        disabled: operationsBlocked(ctx) || !plan.node,
         onClick: () => quickReapply(ctx),
       })
     : null;
+  if (headerActions) headerActions.id = 'quick-reapply';
 
   const currentBand = configured ? ui.el('div', { class: 'current-band' },
     ui.el('div', {}, ui.el('strong', { text: plan.node || '—' })),
@@ -354,6 +364,8 @@ function renderChoices(ctx) {
 
   listHost = document.createElement('div');
   listHost.className = 'node-list';
+  listHost.setAttribute('role', 'radiogroup');
+  listHost.setAttribute('aria-label', '选择精确节点');
   const columns = ui.el('div', { class: 'choice-grid' },
     ui.field('订阅', subSelect),
     ui.field('出口地区', ui.select(REGIONS.map(([value, label]) => ({ value, label })), form.region, (value) => {
@@ -379,7 +391,7 @@ function renderChoices(ctx) {
   const start = ui.button(stateText(ctx), {
     variant: 'ink',
     icon: 'play',
-    disabled: !form.node || !form.acknowledged || ctx.busy,
+    disabled: !form.node || !form.acknowledged || operationsBlocked(ctx),
     onClick: () => beginApply(ctx),
   });
   start.id = 'start-apply';
@@ -423,21 +435,41 @@ function renderNodeList(ctx, filtered) {
     listHost.replaceChildren(ui.el('p', { class: 'muted pad', text: query ? '没有匹配的节点。' : '这个订阅没有可直接选择的节点。' }));
     return;
   }
-  listHost.replaceChildren(...names.slice(0, 800).map((name) => ui.el('button', {
+  const visible = names.slice(0, 800);
+  const tabNode = visible.includes(form.node) ? form.node : visible[0];
+  listHost.replaceChildren(...visible.map((name, index) => ui.el('button', {
     class: 'node-row' + (name === form.node ? ' selected' : ''),
-    type: 'button',
+    type: 'button', role: 'radio', 'aria-checked': String(name === form.node),
+    tabindex: name === tabNode ? 0 : -1,
     title: name,
-    onclick: () => {
-      form.node = name;
-      form.acknowledged = false;
-      form.regionManual = false;
-      applyRegionHint(ctx, name);
-      renderChoices(ctx);
+    onclick: () => selectNode(ctx, name),
+    onkeydown: (event) => {
+      let next;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = (index + 1) % visible.length;
+      else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') next = (index + visible.length - 1) % visible.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = visible.length - 1;
+      else return;
+      event.preventDefault();
+      selectNode(ctx, visible[next]);
     },
   }, ui.el('span', { class: 'node-name', text: name }), name === form.node ? icon('check', 16) : icon('chevron', 14))));
   if (names.length > 800) {
     listHost.append(ui.el('p', { class: 'muted pad', text: '仅显示前 800 个节点，请用搜索缩小范围。' }));
   }
+}
+
+function selectNode(ctx, name) {
+  const scroll = listHost.scrollTop;
+  form.node = name;
+  form.acknowledged = false;
+  form.regionManual = false;
+  applyRegionHint(ctx, name);
+  renderChoices(ctx);
+  listHost.scrollTop = scroll;
+  const selected = listHost.querySelector('[aria-checked="true"]');
+  selected?.focus({preventScroll: true});
+  selected?.scrollIntoView({block: 'nearest'});
 }
 
 function applyRegionHint(ctx, name) {
@@ -459,7 +491,7 @@ function updateStartButton(ctx) {
   if (!button) return;
   const current = currentSubscription(ctx);
   const inside = Boolean(current && (current.nodes || []).includes(form.node));
-  button.disabled = !form.node || !inside || (form.mode==='chain' && !chainReady()) || !form.acknowledged || ctx.busy;
+  button.disabled = !form.node || !inside || (form.mode==='chain' && !chainReady()) || !form.acknowledged || operationsBlocked(ctx);
   button.title = form.node && !inside ? '所选节点不在当前订阅中，请重新选择。' : '';
 }
 
@@ -468,6 +500,7 @@ function stateText(ctx) {
 }
 
 async function beginApply(ctx) {
+  if (operationsBlocked(ctx)) return;
   if (form.mode==='chain' && !ctx.state.capabilities?.managed_chain) {
     ui.toast('请先退出并重新打开软件，加载链式代理功能。','warn');return;
   }
@@ -532,7 +565,7 @@ function renderChainChoices(ctx,mode) {
     updateStartButton(ctx);
   }});
   acknowledgement=ui.checkbox(form.acknowledged,'我已核对两跳节点及最终出口，并了解将应用完整网络防护。',value=>{form.acknowledged=value;updateStartButton(ctx);});
-  const start=ui.button(stateText(ctx),{variant:'ink',icon:'play',disabled:!chainReady() || !form.acknowledged || ctx.busy,onClick:()=>beginApply(ctx)});
+  const start=ui.button(stateText(ctx),{variant:'ink',icon:'play',disabled:!chainReady() || !form.acknowledged || operationsBlocked(ctx),onClick:()=>beginApply(ctx)});
   start.id='start-apply';
   const saved=(nodesState.data?.subscriptions || []).filter(row=>row.chain);
   const selected=saved.find(row=>row.chain.name===form.chainName && row.chain.front_subscription===form.frontSubscription &&
@@ -558,6 +591,7 @@ function renderChainChoices(ctx,mode) {
 }
 
 async function quickReapply(ctx) {
+  if (operationsBlocked(ctx)) return;
   const plan = ctx.state.plan || {};
   if (!plan.node) return;
   const ok = await ctx.confirm({

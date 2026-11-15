@@ -8,6 +8,8 @@ export function hasDraft() { return draft.dirty || saving; }
 
 const draft = { mode: '', time: '', days: 1, dirty: false };
 
+function operationsBlocked(ctx) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update); }
+
 export function render(ctx) {
   currentCtx = ctx;
   const state = ctx.state;
@@ -72,7 +74,7 @@ function modeCard(ctx, update) {
       updateSaveState();
     },
   });
-  const save = ui.button('保存更新方式', { variant: 'ink', disabled: !draft.dirty || ctx.busy || saving, onClick: () => saveSettings(ctx) });
+  const save = ui.button('保存更新方式', { variant: 'ink', disabled: !draft.dirty || operationsBlocked(ctx) || saving, onClick: () => saveSettings(ctx) });
   save.id = 'save-update-settings';
   const card = ui.card({ title: '更新方式', help: configured ? '保存后会立即调整 Windows 计划任务。' : '尚未配置网络；此设置会在首次配置时生效。' },
     ui.el('div', { class: 'mode-grid' },
@@ -80,9 +82,9 @@ function modeCard(ctx, update) {
       option('scheduled', '定时更新', 'refresh')),
     ui.el('div', { class: 'muted small heading-with-help' }, '更新范围', ui.helpTip('仅更新已审核的国内域名、国内 IP、私有域名和局域网规则，不更新内核或节点。手动方式不运行后台任务；定时方式仅在当前用户登录时运行，可设 1–365 天间隔。', '规则更新说明')),
     ui.el('div', { class: 'time-row' },
-      ui.el('div', { class: 'field time-field' }, ui.el('span', { class: 'field-label', text: '更新时间' }), timeInput),
-      ui.el('div', { class: 'field' }, ui.el('span', { class: 'field-label', text: '更新间隔' }), frequency),
-      ui.el('div', { class: 'field days-field' }, ui.el('span', { class: 'field-label', text: '间隔天数' }), daysInput),
+      ui.el('label', { class: 'field time-field' }, ui.el('span', { class: 'field-label', text: '更新时间' }), timeInput),
+      ui.field('更新间隔', frequency),
+      ui.el('label', { class: 'field days-field' }, ui.el('span', { class: 'field-label', text: '间隔天数' }), daysInput),
       save),
     draft.mode === 'scheduled' && configured && update.task?.installed === false
       ? ui.note('当前方式为定时，但尚未检测到计划任务。保存一次即可注册；配置流程也会按此方式注册。', 'warn')
@@ -126,7 +128,7 @@ function statusCard(ctx, update) {
   ]),
   task.error ? ui.note(task.error, 'warn') : null,
   ui.el('div', { class: 'form-foot' },
-    ui.button('立即更新', { variant: 'secondary', icon: 'download', disabled: !configured || ctx.busy, onClick: () => updateNow(ctx) })));
+    ui.button('立即更新', { variant: 'secondary', icon: 'download', disabled: !configured || operationsBlocked(ctx), onClick: () => updateNow(ctx) })));
 }
 
 function lastResultCard(ctx, update) {
@@ -154,11 +156,11 @@ function lastResultCard(ctx, update) {
 
 function updateSaveState() {
   const button = document.getElementById('save-update-settings');
-  if (button) button.disabled = !draft.dirty || saving || currentCtx.busy;
+  if (button) button.disabled = !draft.dirty || saving || operationsBlocked(currentCtx);
 }
 
 async function saveSettings(ctx) {
-  if (saving || ctx.busy) return;
+  if (saving || operationsBlocked(ctx)) return;
   if (!draft.time || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(draft.time)) {
     ui.toast('请输入 00:00–23:59 之间的时间。', 'warn');
     return;
@@ -186,6 +188,7 @@ async function saveSettings(ctx) {
 }
 
 async function updateNow(ctx) {
+  if (operationsBlocked(ctx)) return;
   const ok = await ctx.confirm({
     title: '立即更新分流规则？',
     description: '使用 Loyalsoldier 更新国内/私有规则；旧配置会在本次操作中首次切换来源。后续更新仍受变化阈值保护，不更新内核或节点。',

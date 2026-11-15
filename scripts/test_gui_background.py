@@ -1,5 +1,7 @@
 """Offline background state and frontend behavior checks."""
 import subprocess
+import datetime
+import json
 import threading
 import tempfile
 import time
@@ -12,6 +14,31 @@ import gui_server
 
 
 class BackgroundState(unittest.TestCase):
+    def test_configuration_evidence_reaches_actual_frontend(self):
+        with tempfile.TemporaryDirectory(dir=client.LOCAL,prefix='ui-contract-') as folder:
+            local=Path(folder);app=gui_server.App(local=local,open_browser=False,idle_exit=False)
+            now=datetime.datetime.now().astimezone()
+            record={'success':True,'action':'apply','network_tested':False,
+                    'configuration_time':(now-datetime.timedelta(minutes=30)).isoformat()}
+            client.write(local/'last-run.json',record)
+            methods={'plan':{'node':'Offline chosen'},'configured':(True,''),'snapshots':[],
+                     'baseline_name':'fixture','verification_summary':{'available':True,'success':True,
+                     'source_matches_current':True,'time':(now-datetime.timedelta(hours=1)).isoformat()},
+                     'software_summary':{},'settings_transactions':[],'pending_firewall':False,
+                     'reconfigure_runs':[],'log_files':[],'node_path':'fixture','collection_status':{}}
+            for method,value in methods.items():self.enterContext(patch.object(app,method,return_value=value))
+            self.enterContext(patch.object(app,'background_value',side_effect=lambda name,fn,default,**kw:default))
+            state=app.app_state()
+            self.assertIs(state['last_run']['network_tested'],False)
+            self.assertEqual(state['last_run']['configuration_time'],record['configuration_time'])
+            fixture=local/'state.json';fixture.write_text(json.dumps(state),encoding='utf-8')
+            result=subprocess.run([str(client.PROJECT/'.runtime/node/node.exe'),'scripts/test_ui_accessibility.js',str(fixture)],
+                cwd=client.PROJECT,capture_output=True,text=True,timeout=15)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            for value in (True,None,'false',0):
+                client.write(local/'last-run.json',dict(record,network_tested=value))
+                self.assertIs(app.app_state()['last_run']['network_tested'],value if type(value) is bool else None)
+
     def wait_idle(self, app, name):
         deadline = time.monotonic() + 2
         while app._background[name]['running'] and time.monotonic() < deadline:

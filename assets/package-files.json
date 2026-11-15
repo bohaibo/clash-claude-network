@@ -114,6 +114,7 @@
   "scripts/test_update_task.py",
   "scripts/test_update_task_logic.ps1",
   "scripts/test_update_ui.js",
+  "scripts/test_ui_accessibility.js",
   "scripts/test_updates.py",
   "scripts/test_verification.py",
   "scripts/test_watchdog_timing.py",

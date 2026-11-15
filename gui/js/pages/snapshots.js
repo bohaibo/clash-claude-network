@@ -4,6 +4,8 @@ import * as ui from '../ui.js';
 let selected = '';
 let deleting = false;
 
+function operationsBlocked(ctx) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update); }
+
 export function render(ctx) {
   const state = ctx.state;
   const snapshots = state.snapshots || [];
@@ -15,7 +17,7 @@ export function render(ctx) {
   root.append(ui.pageHeader({
     title: '快照与恢复',
     actions: [
-      ui.button('保存当前快照', { variant: 'secondary', icon: 'plus', disabled: ctx.busy, onClick: () => saveSnapshot(ctx) }),
+      ui.button('保存当前快照', { variant: 'secondary', icon: 'plus', disabled: operationsBlocked(ctx), onClick: () => saveSnapshot(ctx) }),
     ],
   }));
   const pending = settingsRecoveryCard(ctx);
@@ -32,7 +34,7 @@ function settingsRecoveryCard(ctx) {
     pending.length ? pending.map(row => ui.el('div', { class: 'action-row' },
       ui.el('div', {}, ui.el('strong', { text: row.id }),
         ui.el('p', { text: row.error || '检测到中断或恢复失败的设置保存，可恢复修改前的状态。' })),
-      ui.button('恢复原设置', { variant: 'secondary', disabled: ctx.busy, onClick: async () => {
+      ui.button('恢复原设置', { variant: 'secondary', disabled: operationsBlocked(ctx), onClick: async () => {
         const ok = await ctx.confirm({ title: '恢复原设置？',
           description: '还原此次保存前的更新方式和计划任务。不会恢复或删除网络快照，也不会重新配置网络。', confirmText: '恢复原设置' });
         if (ok) ctx.startJob({ action: 'settings-recover', transaction: row.id, confirm: row.id });
@@ -59,7 +61,7 @@ function listCard(ctx, snapshots) {
   const card = ui.card({
     title: '全部快照',
     help: '选择快照后点击恢复所选。首次恢复点和正在使用的快照不可删除。封存不代表完整性已验证，恢复前仍会校验；恢复会中断网络，执行前会再次确认。',
-    actions: ui.button('恢复所选', { variant: 'ink', icon: 'clock', disabled: !selected || ctx.busy, onClick: () => restoreSelected(ctx) }),
+    actions: ui.button('恢复所选', { variant: 'ink', icon: 'clock', disabled: !selected || operationsBlocked(ctx), onClick: () => restoreSelected(ctx) }),
   }, host);
   const restoreButton = card.querySelector('.card-actions .btn');
   const renderList = () => {
@@ -98,7 +100,7 @@ function listCard(ctx, snapshots) {
         !row.sealed ? ui.pill('记录不完整', 'bad') : null),
       ui.el('span', { class: 'snapshot-description', text: row.sealed ? '系统记录已封存 · 可选择恢复' : '缺少已封存系统记录 · 暂不可恢复' }),
       ui.el('span', { class: 'snapshot-description', text: row.files ? row.files + ' 项文件校验记录' : '暂无文件校验记录' }));
-      const deleteButton = ui.button('删除', { variant: 'snapshot-delete', disabled: ctx.busy || deleting || !!row.delete_reason,
+      const deleteButton = ui.button('删除', { variant: 'snapshot-delete', disabled: operationsBlocked(ctx) || deleting || !!row.delete_reason,
         title: row.delete_reason || '永久删除这份快照', onClick: () => deleteSnapshot(ctx, row, deleteButton) });
       return ui.el('article', { class: 'snapshot-tile' + (active ? ' selected' : '') }, pick,
         ui.el('div', { class: 'snapshot-footer' },
@@ -106,19 +108,19 @@ function listCard(ctx, snapshots) {
           deleteButton));
     }));
     host.replaceChildren(summary, grid);
-    if (restoreButton) restoreButton.disabled = ctx.busy || deleting || !chosen?.sealed;
+    if (restoreButton) restoreButton.disabled = operationsBlocked(ctx) || deleting || !chosen?.sealed;
   };
   renderList();
   return card;
 }
 
 async function deleteSnapshot(ctx, row, button) {
-  if (ctx.busy || deleting || row.delete_reason) return;
+  if (operationsBlocked(ctx) || deleting || row.delete_reason) return;
   const ok = await ctx.confirm({ title: '永久删除这份快照？', subtitle: row.name,
     description: '将删除这份快照的全部备份文件，删除后无法用它恢复。当前系统设置和其他快照保持原状。',
     items: [{title: '快照时间', text: ui.formatTime(row.time) || row.name}],
     danger: true, confirmText: '永久删除', requireCheck: '我确认不再需要这份恢复备份。' });
-  if (!ok || deleting || ctx.busy) return;
+  if (!ok || deleting || operationsBlocked(ctx)) return;
   deleting = true;
   if (button) { button.disabled = true; button.textContent = '正在删除…'; }
   try {
@@ -130,7 +132,7 @@ async function deleteSnapshot(ctx, row, button) {
 }
 
 async function saveSnapshot(ctx) {
-  if (ctx.busy || deleting) return;
+  if (operationsBlocked(ctx) || deleting) return;
   const ok = await ctx.confirm({
     title: '保存当前快照？',
     description: '会把当前客户端目录、系统设置和防火墙记录另存为一个新的快照。不会修改网络、浏览器或现有快照，也不会覆盖首次基线。',
@@ -145,7 +147,7 @@ async function saveSnapshot(ctx) {
 }
 
 async function restoreSelected(ctx) {
-  if (ctx.busy || deleting) return;
+  if (operationsBlocked(ctx) || deleting) return;
   const state = ctx.state;
   const row = (state.snapshots || []).find((item) => item.name === selected);
   if (!row) return;

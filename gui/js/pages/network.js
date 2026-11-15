@@ -1,6 +1,8 @@
 import { icon } from '../icons.js';
 import * as ui from '../ui.js';
 
+function operationsBlocked(ctx) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update); }
+
 const FLOW = [
   ['节点连接与真实局域网', '窄范围例外、真实私有地址、已审核的路由器/本地服务域名保持直连。'],
   ['拒绝公网 IPv6', '在代理前阻断公网 IPv6，避免绕过 TUN 的路径。'],
@@ -127,11 +129,11 @@ function actionsCard(ctx) {
       actionRow('只更新分流名单', '只下载并审核规则变化；内容和生成版本均未变化时不重载，不重新应用系统设置。',
         ui.button('去规则更新', { variant: 'secondary', disabled: unavailable || ctx.busy, onClick: () => ctx.navigate('updates') })),
       actionRow('补充配置', '补充防火墙、IPv6、地区和常用浏览器 WebRTC 策略，累积恢复记录。不会关闭浏览器或运行网络测试。',
-        ui.button('补充配置', { variant: 'secondary', icon: 'shield', disabled: unavailable || ctx.busy, onClick: () => supplement(ctx) })),
+        ui.button('补充配置', { variant: 'secondary', icon: 'shield', disabled: unavailable || operationsBlocked(ctx), onClick: () => supplement(ctx) })),
       actionRow('更换节点、地区或重新应用配置', '在一键配置页选择精确节点和地区。沿用首次恢复点，生成并校验新配置；不先执行完整恢复。',
         ui.button('去一键配置', { variant: 'secondary', disabled: ctx.busy, onClick: () => ctx.navigate('overview') })),
       actionRow('恢复最早状态并重新配置', '先恢复固定首次恢复点，再沿用当前精确节点完整配置。需要独立本机看护；失败或超时会尝试恢复网络。',
-        ui.button('恢复并重新配置', { variant: 'danger', icon: 'alert', disabled: !state.baseline || !state.plan?.node || ctx.busy, onClick: () => reconfigure(ctx) })),
+        ui.button('恢复并重新配置', { variant: 'danger', icon: 'alert', disabled: !state.baseline || !state.plan?.node || operationsBlocked(ctx), onClick: () => reconfigure(ctx) })),
     ));
 }
 
@@ -146,12 +148,13 @@ function diagnosticsCard(ctx) {
   return ui.card({ title: '检查与故障演练', help: '一键配置不运行这些检查。可自行选择；故障演练会短暂中断公网。' },
     ui.el('div', { class: 'action-grid' },
       actionRow('重新检查连通性', '运行一次连通性验收（不模拟节点故障或停核），检查出口地区、DNS、IPv6 与工具出口。',
-        ui.button('检查连通性', { variant: 'secondary', icon: 'refresh', disabled: unavailable || ctx.busy, onClick: () => verify(ctx) })),
+        ui.button('检查连通性', { variant: 'secondary', icon: 'refresh', disabled: unavailable || operationsBlocked(ctx), onClick: () => verify(ctx) })),
       actionRow('完整防火墙复核与故障演练', '以管理员权限完整检查防火墙，分别演练节点故障、关闭 TUN 但保持内核运行、内核退出，并在恢复后复测。公网会短暂中断。',
-        ui.button('完整复核与演练', { variant: 'secondary', icon: 'shield', disabled: unavailable || ctx.busy, onClick: () => audit(ctx) }))));
+        ui.button('完整复核与演练', { variant: 'secondary', icon: 'shield', disabled: unavailable || operationsBlocked(ctx), onClick: () => audit(ctx) }))));
 }
 
 async function supplement(ctx) {
+  if (operationsBlocked(ctx)) return;
   const ok = await ctx.confirm({
     title: '执行补充配置？',
     subtitle: '不重新选择节点，不关闭浏览器',
@@ -169,6 +172,7 @@ async function supplement(ctx) {
 }
 
 async function verify(ctx) {
+  if (operationsBlocked(ctx)) return;
   const ok = await ctx.confirm({
     title: '重新检查连通性？',
     description: '会读取当前运行配置并测试国内网站、海外出口地区、DNS A/64/65、TUN 接管、IPv6 阻断以及 Git/npm/UDP。不会模拟节点故障或停核。',
@@ -179,6 +183,7 @@ async function verify(ctx) {
 }
 
 async function audit(ctx) {
+  if (operationsBlocked(ctx)) return;
   const ok = await ctx.confirm({
     title: '完整复核防火墙并演练故障？',
     description: '将请求管理员权限，检查完整生效策略，分别模拟节点故障、关闭 TUN、内核退出，并验证恢复。公网和正在使用的连接会短暂中断，可能需要数分钟。',
@@ -190,6 +195,7 @@ async function audit(ctx) {
 }
 
 async function reconfigure(ctx) {
+  if (operationsBlocked(ctx)) return;
   const state = ctx.state;
   const ok = await ctx.confirm({
     title: '恢复最早状态并重新配置？',

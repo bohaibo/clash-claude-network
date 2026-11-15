@@ -33,12 +33,10 @@ export function render(ctx, {id = 'check-software-update'} = {}) {
 export function packageCard(ctx) {
   const info = ctx.state?.software || {};
   const bundle = info.package;
-  const card = ui.disclosure({title: '导出便携安装包', key: 'help-package'},
-    ui.el('p', {class: 'muted small', text: '仅包含程序、文档和校验清单，不包含本机资料。解压后运行「一键网络.cmd」，新电脑会下载所需运行环境。'}),
-    ui.el('div', {class: 'form-foot'}, ui.button(exporting ? '正在打包…' : '生成 ZIP 安装包', {
-      variant: 'secondary', icon: 'download', disabled: exporting || ctx.busy,
+  const exportButton = ui.button(exporting ? '正在打包…' : '生成 ZIP 安装包', {
+      variant: 'secondary', icon: 'download', disabled: exporting || ctx.busy || ctx.state?.operation?.pending_rule_update,
       onClick: async (event) => {
-        if (exporting || ctx.busy) return;
+        if (exporting || ctx.busy || ctx.state?.operation?.pending_rule_update) return;
         exporting = true;
         if (event?.currentTarget) { event.currentTarget.disabled = true; event.currentTarget.textContent = '正在打包…'; }
         try {
@@ -47,7 +45,11 @@ export function packageCard(ctx) {
         } catch (error) { ui.toast(error.message || '打包未完成。', 'bad'); }
         finally { exporting = false; await ctx.refresh(true); card.replaceWith(packageCard(ctx)); }
       },
-    }), bundle?.download_url && /^\/api\/packages\/[a-f0-9]{32}$/.test(bundle.download_url)
+    });
+  exportButton.id = 'export-package';
+  const card = ui.disclosure({title: '导出便携安装包', key: 'help-package'},
+    ui.el('p', {class: 'muted small', text: '仅包含程序、文档和校验清单，不包含本机资料。解压后运行「一键网络.cmd」，新电脑会下载所需运行环境。'}),
+    ui.el('div', {class: 'form-foot'}, exportButton, bundle?.download_url && /^\/api\/packages\/[a-f0-9]{32}$/.test(bundle.download_url)
       ? ui.el('a', {class: 'btn btn-secondary', href: bundle.download_url, download: bundle.filename, text: '下载安装包'}) : null),
     bundle ? ui.kv([['文件', bundle.filename], ['大小', (bundle.size / 1024).toFixed(0) + ' KB'], ['SHA-256', bundle.sha256]]) : null);
   return card;
@@ -72,6 +74,8 @@ export function control(ctx) {
 }
 
 export function refreshControl(ctx) {
+  const exporter = document.getElementById('export-package');
+  if (exporter) exporter.disabled = exporting || ctx.busy || Boolean(ctx.state?.operation?.pending_rule_update);
   const button = document.getElementById('software-update-button');
   const panel = document.getElementById('software-update-panel');
   if (!button || !panel) return;
