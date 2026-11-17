@@ -86,6 +86,12 @@ async function main() {
   assert.equal(fresh.children[1], newStatus);
   assert.equal(fresh.children[2], form, 'form survives inserted warnings through stable keys');
   assert.equal(fresh.children[3], log, 'open logs must survive status refresh');
+  let guideRefreshes=0;
+  refreshContext.refreshHelp=()=>{guideRefreshes++;};
+  // Use the same live stack shape as a rendered guide; its static DOM stays in place.
+  content.firstElementChild.classList={contains:name=>name==='stack'};
+  vm.runInContext("app.page='help';refreshPage();",refreshContext);
+  assert.equal(guideRefreshes,1,'guide polling must reach its dynamic status refresh');
   const raceContext = vm.createContext({ software() {}, overview() {}, network() {}, browser() {}, snapshots() {},
     updates() {}, logs() {}, help() {}, api: {}, ui: {}, console,
     document: { getElementById: () => null } });

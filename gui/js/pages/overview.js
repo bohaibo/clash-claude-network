@@ -53,7 +53,7 @@ let choicesHost = null;
 let listHost = null;
 let impactHost = null;
 
-function operationsBlocked(ctx) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update); }
+function operationsBlocked(ctx, settingsRecovery = false) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update) || Boolean(ctx.state.operation?.pending_tun?.length) || (!settingsRecovery && Boolean(ctx.state.operation?.settings_pending?.length)); }
 
 export function render(ctx) {
   const state = ctx.state;
@@ -104,11 +104,13 @@ function statusGrid(ctx) {
     Number.isFinite(configurationAt) && Date.parse(verification.time) >= configurationAt &&
     verification.source_matches_current !== false && verificationAge >= 0 && verificationAge <= 24;
   const update = state.update || {};
+  const recovery = ui.recoveryLabel(state.operation);
+  const scopedPass = ['full-network', 'connectivity'].includes(verification.coverage);
   const tiles = [
     {
       label: '网络配置',
-      value: !state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : '已配置',
-      tone: !state.configured ? 'warn' : state.last_run?.success === false ? 'bad' : awaitingVerification ? 'warn' : verification.dns_failed ? 'bad' : verifiedFresh ? 'ok' : 'warn',
+      value: recovery || (!state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : '已配置'),
+      tone: recovery ? 'bad' : !state.configured ? 'warn' : state.last_run?.success === false ? 'bad' : awaitingVerification ? 'warn' : verification.dns_failed ? 'bad' : verifiedFresh && scopedPass ? 'ok' : 'warn',
       detail: state.configured ? ('节点 ' + (state.plan.node || '—') + (awaitingVerification ? ' · 网络未验收' : verification.available ? ' · 上次验收 ' + ui.relativeTime(verification.time) : ' · 尚未验收')) : '首次配置会先保存原始快照',
       action: state.configured ? () => ctx.navigate('network') : null,
     },
@@ -121,8 +123,8 @@ function statusGrid(ctx) {
     },
     {
       label: '上次验收',
-      value: verification.available ? (verification.success ? '历史通过' : '历史未通过') : '待检查',
-      tone: verification.available ? (verification.success ? 'ok' : 'bad') : 'neutral',
+      value: verification.available ? '历史' + ui.verificationLabel(verification) : '待检查',
+      tone: verification.available ? (verification.success ? scopedPass ? 'ok' : 'warn' : 'bad') : 'neutral',
       detail: verification.available ? ui.relativeTime(verification.time) : '在网络环境按需点击检查',
       action: () => ctx.navigate('logs'),
     },

@@ -35,7 +35,7 @@ import region_profile
 import gui_window
 from app_release import VERSION, ReleaseChecker
 from package_app import build_package
-from operation_lock import operation_lock, pending_settings
+from operation_lock import operation_lock, pending_settings, pending_tun, operation_in_use
 from atomic_files import replace_file
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -249,9 +249,91 @@ class App:
         self._task_cache = (0.0, None)
         self._service_cache = (0.0, None)
         self._nodes_cache = (0.0, None)
+        self._recovery_checks = {}
         self.env_state = read_json(self.local / 'env.json', {})
         if not isinstance(self.env_state, dict):
             self.env_state = {}
+        self._restore_job_records()
+
+    def _restore_job_records(self):
+        # Only adopt records here; never start or terminate a process on startup.
+        for folder in sorted(self.jobs_dir.glob('*')):
+            if not JOB_ID_RE.fullmatch(folder.name) or folder.is_symlink() or folder.is_junction() or not folder.is_dir():
+                continue
+            stored = read_json(folder / 'job.json', {})
+            status = read_json(folder / 'status.json', {})
+            if not isinstance(stored, dict) or stored.get('action') not in set(CONFIRM) | {'restore', 'settings-recover'}:
+                continue
+            if isinstance(status, dict) and status.get('state') in ('success', 'failed', 'cancelled', 'interrupted', 'unverified'):
+                continue
+            job = {'action': stored['action'], 'params': stored.get('params', {}), 'created': stored.get('created', ''),
+                   'id': folder.name, 'folder': str(folder), 'state': 'running', 'recovered': True,
+                   'monitor_warning': '已接回重启前的任务记录，正在核实进程和完成记录；无法确认时保留忙碌保护。'}
+            self.jobs[folder.name] = job
+        self.active_job = next(iter(self.jobs.values()), None)
+
+    def _recovered_job(self):
+        return next((row for row in self.jobs.values() if row.get('recovered') and not row.get('completion') and not row.get('forced')), None)
+
+    def _local_recovery_quiescent(self):
+        script = str(self.scripts / 'update_task.ps1').replace("'", "''")
+        command = ("$ErrorActionPreference='Stop';$p=@(Get-CimInstance Win32_Process -ErrorAction Stop | "
+                   "Where-Object {$_.ProcessId -ne $PID -and ((($_.Name -in @('powershell.exe','pwsh.exe')) -and "
+                   "[string]::IsNullOrWhiteSpace($_.CommandLine)) -or ($_.CommandLine -and "
+                   "$_.CommandLine.IndexOf('" + script + "',[StringComparison]::OrdinalIgnoreCase) -ge 0))});"
+                   "if($p.Count -eq 0){'clear'}else{'busy'}")
+        try:
+            result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
+                capture_output=True, text=True, timeout=8, creationflags=_no_window())
+            return result.returncode == 0 and result.stdout.strip() == 'clear'
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _settle_recovered_job(self, job, status, events):
+        terminal = [event for event in events if event.get('type') in ('done', 'error', 'cancelled')]
+        ended = parse_time(terminal[-1].get('time')) if terminal else None
+        started = parse_time(status.get('started') or job.get('created'))
+        if ended and (ended.tzinfo is None or not started or started.tzinfo is None or
+                      ended < started or ended > datetime.datetime.now().astimezone()):
+            ended = None
+        failed = any(event.get('type') == 'error' for event in terminal)
+        cancelled = any(event.get('type') == 'cancelled' for event in terminal)
+        self._complete_job(job, {'state': 'failed' if failed else 'cancelled' if cancelled else 'unverified',
+            'action': job['action'], 'started': status.get('started') or job.get('created'),
+            'finished': ended.isoformat() if ended else None, 'finished_source': 'terminal-event' if ended else 'unknown',
+            'exit_code': None, 'error': '重启前任务已停止，但缺少可靠退出结果，结果待核实。请检查日志及恢复记录；设置恢复可在快照与恢复页面重试。',
+            'params': job.get('params', {})})
+
+    def _recovery_evidence(self, job, status):
+        pid = status.get('pid')
+        key = (job['id'], job['action'], pid if type(pid) is int else None)
+        unknown = {'info': {'alive': None}, 'clear': False, 'checking': True}
+        with self._lock:
+            entry = self._recovery_checks.setdefault(key, {'at': None, 'running': False, 'value': unknown})
+            if entry['running']:
+                return unknown
+            if entry['at'] is not None and time.monotonic() - entry['at'] < 3:
+                return entry['value']
+            entry['running'] = True
+            def collect():
+                value = {'info': {'alive': None}, 'clear': False, 'checking': False}
+                try:
+                    if job['action'] in LOCAL_ACTIONS:
+                        value['clear'] = self._local_recovery_quiescent()
+                    else:
+                        pid = status.get('pid')
+                        if type(pid) is int and pid > 0:
+                            value['info'] = self._process_info(pid)
+                except Exception:
+                    pass
+                finally:
+                    with self._lock:
+                        entry.update(value=value, at=time.monotonic(), running=False)
+            try:
+                threading.Thread(target=collect, daemon=True, name='ccn-recovery-check').start()
+            except Exception:
+                entry.update(value={**unknown, 'checking': False}, at=time.monotonic(), running=False)
+            return unknown
 
     def node_path(self):
         value = self.env_state.get('node') if isinstance(self.env_state, dict) else None
@@ -724,6 +806,7 @@ class App:
                 'reconfigure_active': (self.local / 'reconfigure-active.json').is_file(),
                 'pending_firewall': self.pending_firewall(),
                 'pending_rule_update': (self.local / 'rule-update-pending.json').exists(),
+                'pending_tun': pending_tun(self.local),
             },
             'last_run': {
                 'success': bool(last_run.get('success')),
@@ -848,7 +931,7 @@ class App:
             status = read_json(folder / 'status.json', {})
             if not isinstance(status, dict):
                 continue
-            if status.get('state') not in ('success', 'failed', 'cancelled', 'interrupted'):
+            if status.get('state') not in ('success', 'failed', 'cancelled', 'interrupted', 'unverified'):
                 continue
             completed += 1
             if completed > 30 and folder.resolve().parent == self.jobs_dir.resolve():
@@ -1022,7 +1105,7 @@ class App:
 
     def start_job(self, payload):
         with self._lock:
-            if self.active_job or self._settings_busy or self.stopping or self._shutdown_requested:
+            if self.active_job or self._recovered_job() or self._settings_busy or self.stopping or self._shutdown_requested:
                 raise ApiError(409, '另一个操作正在进行，请等待完成。')
             if payload.get('action') not in ('settings-recover', 'update-recover') and self.settings_transactions():
                 raise ApiError(409, '请先在快照与恢复页面恢复未完成的设置保存。')
@@ -1268,11 +1351,27 @@ class App:
         status = job.get('completion') or read_json(folder / 'status.json', {})
         if not job.get('completion') and job.get('runtime') and (not isinstance(status, dict) or status.get('state') in (None, 'running')):
             status = job['runtime']
-        if not isinstance(status, dict) or not status:
+        if (not isinstance(status, dict) or not status or (job.get('recovered') and
+                status.get('state') not in ('running', 'success', 'failed', 'cancelled', 'interrupted', 'unverified'))):
             status = {'state': job.get('state', 'running'), 'action': job.get('action'), 'exit_code': None}
+        if job.get('recovered') and status.get('state') in ('success', 'failed', 'cancelled', 'interrupted', 'unverified'):
+            self._complete_job(job, status)
         events = read_events(folder / 'events.jsonl')
         elapsed = 0
-        if (status.get('state') == 'running' and not job.get('process')
+        if job.get('recovered') and status.get('state') == 'running':
+            evidence = self._recovery_evidence(job, status)
+            info = evidence['info']
+            terminal = any(event.get('type') in ('done', 'error', 'cancelled') for event in events)
+            local_recovery = job.get('action') in LOCAL_ACTIONS
+            can_settle = evidence['clear'] if local_recovery else info.get('alive') is False and terminal
+            if can_settle and not operation_in_use(self.local):
+                self._settle_recovered_job(job, status, events)
+                status = job.get('completion') or read_json(folder / 'status.json', {})
+            else:
+                job['monitor_warning'] = ('正在后台核实重启前任务，核实完成前保留忙碌保护。' if evidence['checking'] else
+                    '重启前的任务进程仍在运行，请等待。' if info.get('alive') is True else
+                    '重启前的任务尚无法确认结束，保留忙碌保护。请核对日志，必要时使用「结束卡住任务」核实进程。')
+        if (not job.get('recovered') and status.get('state') == 'running' and not job.get('process')
                 and job.get('action') in ('apply', 'restore', 'supplement', 'snapshot', 'reconfigure')):
             terminal_events = [e for e in events if e.get('type') in ('done', 'error', 'cancelled')]
             result_path = self.local / 'last-run.json'
@@ -1286,14 +1385,17 @@ class App:
                     and started.timestamp() - 5 <= result_path.stat().st_mtime <= completed.timestamp() + 30):
                 self._finish_job(job, 0)
                 status = read_json(folder / 'status.json', {})
-        if job.get('started_epoch'):
-            elapsed = int(max(0, time.time() - job['started_epoch']))
-        else:
-            moment = parse_time(status.get('started') or job.get('created'))
-            if moment is not None:
-                elapsed = int(max(0, (datetime.datetime.now().astimezone() - moment).total_seconds()))
+        moment = parse_time(status.get('started') or job.get('created'))
+        started_epoch = job.get('started_epoch') or (moment.timestamp() if moment else None)
+        running = status.get('state') == 'running'
+        finished = parse_time(status.get('finished'))
+        if not running and finished is None and status.get('finished_source') != 'unknown':
+            finished = next((parse_time(event.get('time')) for event in reversed(events)
+                             if event.get('type') in ('done', 'error', 'cancelled') and parse_time(event.get('time'))), None)
+        end_epoch = time.time() if running else finished.timestamp() if finished else None
+        elapsed = int(max(0, end_epoch - started_epoch)) if started_epoch is not None and end_epoch is not None else None
         terminal = any(isinstance(event, dict) and event.get('type') in ('done', 'error', 'cancelled') for event in events)
-        stale = status.get('state') == 'running' and terminal and elapsed >= 15
+        stale = running and (terminal or job.get('recovered')) and elapsed is not None and elapsed >= 15
         return {
             'id': job_id,
             'action': job.get('action') or status.get('action') or '',
@@ -1305,6 +1407,7 @@ class App:
             'record_warning': status.get('record_warning') or (job.get('monitor_warning') if status.get('state') == 'running' else ''),
             'result': status.get('result'),
             'elapsed': elapsed,
+            'elapsed_source': 'running' if running else status.get('finished_source', 'completion-record' if finished else 'unknown'),
             'stale': stale,
             'events': events,
             'log': tail_text(folder / 'console.log', limit=30000, lines=200),
@@ -1313,6 +1416,9 @@ class App:
     def active_job_view(self):
         with self._lock:
             job = self.active_job
+            if not job:
+                job = self._recovered_job()
+                self.active_job = job
         if not job:
             return None
         try:
@@ -1396,7 +1502,7 @@ class App:
     @contextmanager
     def settings_operation(self):
         with self._lock:
-            if self.active_job or self._settings_busy or self.stopping or self._shutdown_requested:
+            if self.active_job or self._recovered_job() or self._settings_busy or self.stopping or self._shutdown_requested:
                 raise ApiError(409, '另一个操作正在进行，请等待完成。')
             if self.settings_transactions():
                 raise ApiError(409, '存在未完成的设置保存，请先在快照与恢复页面恢复原设置。')
@@ -1613,7 +1719,7 @@ class App:
             if self.stopping or not self.idle_exit:
                 continue
             with self._lock:
-                active = self.active_job is not None or self._settings_busy
+                active = self.active_job is not None or self._recovered_job() is not None or self._settings_busy
             if active:
                 continue
             now = time.monotonic()
@@ -1652,7 +1758,7 @@ class App:
         with self._lock:
             if self.stopping:
                 return
-            if self.active_job or self._settings_busy:
+            if self.active_job or self._recovered_job() or self._settings_busy:
                 self.log('shutdown deferred until current operation completes')
                 return False
             self.stopping = True
@@ -1886,11 +1992,11 @@ def make_handler(app):
                     self._json(app.reveal_local())
                 elif parsed.path == '/api/shutdown':
                     with app._lock:
-                        active = app.active_job is not None or app._settings_busy
+                        active = app.active_job is not None or app._recovered_job() is not None or app._settings_busy
                     if active:
                         raise ApiError(409, '操作仍在进行，完成后再退出界面。')
                     with app._lock:
-                        if app.active_job or app._settings_busy:
+                        if app.active_job or app._recovered_job() or app._settings_busy:
                             raise ApiError(409, '操作仍在进行，完成后再退出界面。')
                         app._shutdown_requested = True
                     self._json({'ok': True})

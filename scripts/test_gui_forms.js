@@ -9,7 +9,7 @@ class Element {
   find(id) { if (this.id === id) return this; for (const child of this.children) { const found = child.find(id); if (found) return found; } return null; }
 }
 async function check(page, section) {
-  let root, resolvePost, postCount = 0;
+  let root, resolvePost, sentPayload, postCount = 0;
   const ui = new Proxy({}, { get: (_, name) => (...args) => {
     const node = new Element(...args);
     if (name === 'button') node.disabled = args[1]?.disabled;
@@ -28,7 +28,7 @@ async function check(page, section) {
   const p = context.probe;
   const ctx = { state: { configured: false, browser: { settings: { engine: 'auto', language: 'zh-SG' } },
     update: { mode: 'scheduled', time: '13:00', days: 1 } }, busy: false,
-    api: { post: () => { postCount++; return new Promise(r => { resolvePost = r; }); } },
+    api: { post: (path,payload) => { sentPayload=payload;postCount++; return new Promise(r => { resolvePost = r; }); } },
     acceptState: (key, value) => { ctx.state[key] = value; },
     refresh: async () => { root = p.render(ctx); },
   };
@@ -50,6 +50,22 @@ async function check(page, section) {
   await second;
   assert.equal(p.hasDraft(), false, 'successful unchanged draft becomes clean');
   for (const [key, value] of Object.entries(laterEdit)) assert.equal(p.draft()[key], value);
+  // Invalid disabled schedule fields must not prevent turning the task off.
+  p.edit({mode:'manual',time:'',days:0});
+  const manual = p.saveSettings(ctx);
+  assert.equal(postCount, 3);
+  assert.equal(sentPayload.mode,'manual');
+  assert.equal(sentPayload.time,'10:00','manual mode keeps the saved valid schedule');
+  assert.equal(sentPayload.days,7);
+  resolvePost({mode:'manual',time:'10:00',days:7});
+  await manual;
+  // Scheduled mode still requires valid time and days.
+  p.edit({mode:'scheduled',time:'',days:0});
+  await p.saveSettings(ctx);
+  assert.equal(postCount,3);
+  p.edit({mode:'scheduled',time:'10:00',days:366});
+  await p.saveSettings(ctx);
+  assert.equal(postCount,3,'valid time does not bypass invalid scheduled days');
 }
 Promise.all([check('updates', 'update')])
   .then(() => console.log('Offline form checks passed: duplicate save, in-flight edits, authoritative response'))

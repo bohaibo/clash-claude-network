@@ -34,9 +34,9 @@ export function packageCard(ctx) {
   const info = ctx.state?.software || {};
   const bundle = info.package;
   const exportButton = ui.button(exporting ? '正在打包…' : '生成 ZIP 安装包', {
-      variant: 'secondary', icon: 'download', disabled: exporting || ctx.busy || ctx.state?.operation?.pending_rule_update,
+      variant: 'secondary', icon: 'download', disabled: exporting || ctx.busy || (ctx.state?.operation?.pending_rule_update || ctx.state?.operation?.settings_pending?.length || ctx.state?.operation?.pending_tun?.length),
       onClick: async (event) => {
-        if (exporting || ctx.busy || ctx.state?.operation?.pending_rule_update) return;
+        if (exporting || ctx.busy || (ctx.state?.operation?.pending_rule_update || ctx.state?.operation?.settings_pending?.length || ctx.state?.operation?.pending_tun?.length)) return;
         exporting = true;
         if (event?.currentTarget) { event.currentTarget.disabled = true; event.currentTarget.textContent = '正在打包…'; }
         try {
@@ -75,7 +75,7 @@ export function control(ctx) {
 
 export function refreshControl(ctx) {
   const exporter = document.getElementById('export-package');
-  if (exporter) exporter.disabled = exporting || ctx.busy || Boolean(ctx.state?.operation?.pending_rule_update);
+  if (exporter) exporter.disabled = exporting || ctx.busy || Boolean((ctx.state?.operation?.pending_rule_update || ctx.state?.operation?.settings_pending?.length || ctx.state?.operation?.pending_tun?.length));
   const button = document.getElementById('software-update-button');
   const panel = document.getElementById('software-update-panel');
   if (!button || !panel) return;

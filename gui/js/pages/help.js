@@ -71,12 +71,32 @@ export function render(ctx) {
       ui.el('li', {}, '外部浏览器及旧版浏览器资料不会被关闭或删除；旧版快照中的浏览器记录会被忽略。'),
       ui.el('li', {}, '恢复后本项目注册的规则更新任务会被移除；如仍需定时更新，请在「规则更新」重新保存。'),
       ui.el('li', {}, '恢复不运行网络验收，需要自行确认联网。'))));
-  root.append(ui.disclosure({ title: '当前配置与浏览器详情' }, ...configurationDetails(ctx)));
-  root.append(ui.disclosure({ title: '软件版本与更新检查' }, softwareVersion(ctx, {id: 'help-check-software-update'})));
+  root.append(ui.disclosure({ title: '当前配置与浏览器详情' }, ui.el('div', {id: 'help-configuration', class: 'stack'}, ...configurationDetails(ctx))));
+  root.append(ui.disclosure({ title: '软件版本与更新检查' }, ui.el('div', {id: 'help-software'}, softwareVersion(ctx, {id: 'help-check-software-update'}))));
   root.append(updateInstructions());
   root.append(packageCard(ctx));
 
   return root;
+}
+
+export function refreshStatus(ctx) {
+  const configuration = document.getElementById('help-configuration');
+  const state = ctx.state || {};
+  const configurationSignature = JSON.stringify([state.configured, state.plan, state.service, state.baseline,
+    state.last_run, state.verification, state.preview?.current?.health, state.preview?.current?.webrtc]);
+  if (configuration && configuration.dataset.signature !== configurationSignature) {
+    configuration.dataset.signature = configurationSignature;
+    configuration.replaceChildren(...configurationDetails(ctx));
+  }
+  const software = document.getElementById('help-software');
+  if (software) {
+    const signature = JSON.stringify(ctx.state?.software || {});
+    if (software.dataset.signature === signature) return;
+    software.dataset.signature = signature;
+    const focused = software.contains(document.activeElement) && document.activeElement.id === 'help-check-software-update';
+    software.replaceChildren(softwareVersion(ctx, {id: 'help-check-software-update'}));
+    if (focused) software.querySelector('#help-check-software-update')?.focus({preventScroll: true});
+  }
 }
 
 function row(left, right) {

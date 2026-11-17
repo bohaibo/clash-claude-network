@@ -6,7 +6,7 @@ import { render as network } from './pages/network.js';
 import { render as snapshots } from './pages/snapshots.js';
 import { render as updates, hasDraft as updatesHasDraft } from './pages/updates.js';
 import { render as logs } from './pages/logs.js';
-import { render as help } from './pages/help.js';
+import { render as help, refreshStatus as refreshHelp } from './pages/help.js';
 import { control as softwareControl, refreshControl as refreshSoftwareControl } from './pages/software.js';
 
 const PAGES = [
@@ -50,6 +50,7 @@ let shell = null;
 let refreshPromise = null;
 let forceRefreshPending = false;
 let stateRevision = 0;
+let logRequestRevision = 0;
 
 const ctx = {
   api,
@@ -144,19 +145,22 @@ function updateChrome() {
     !awaitingVerification && verification.source_matches_current !== false && verificationAge >= 0 && verificationAge <= 24;
   const lastRun = data.last_run || {};
   const lastRunFailed = lastRun.success === false && Boolean(lastRun.action);
-  const statusTone = !data.configured ? 'warn' : lastRunFailed ? 'bad' : verification.dns_failed ? 'bad' : verifiedFresh ? 'ok' : 'warn';
-  const statusText = !data.configured ? '尚未配置网络'
+  const recovery = ui.recoveryLabel(data.operation);
+  const scopedVerification = ui.verificationLabel(verification);
+  const scopedPass = ['full-network', 'connectivity'].includes(verification.coverage);
+  const statusTone = recovery ? 'bad' : !data.configured ? 'warn' : lastRunFailed ? 'bad' : verification.dns_failed ? 'bad' : verifiedFresh && scopedPass ? 'ok' : 'warn';
+  const statusText = recovery || (!data.configured ? '尚未配置网络'
     : lastRunFailed ? ('上次' + (ACTION_LABELS[lastRun.action] || '操作') + '未完成')
       : awaitingVerification ? '配置已写入 · 本次配置未验收'
       : verification.dns_failed ? '配置已写入 · DNS 验收失败'
         : hasVerification && !verification.success ? '配置已写入 · 上次验收失败'
-          : verifiedFresh ? '配置已写入 · 验收通过'
-            : hasVerification ? (Number.isFinite(configurationAt) ? '配置已写入 · 验收已过期或不匹配' : '配置已写入 · 仅有历史验收记录') : '配置已写入 · 未验收';
+          : verifiedFresh ? '配置已写入 · ' + scopedVerification
+            : hasVerification ? (Number.isFinite(configurationAt) ? '配置已写入 · 验收已过期或不匹配' : '配置已写入 · 仅有历史验收记录') : '配置已写入 · 未验收');
   const chips = document.getElementById('top-chips');
   if (chips) {
     chips.replaceChildren(...[
-      data.configured
-        ? ui.badge(awaitingVerification ? '本次配置未验收' : verification.dns_failed ? 'DNS 验收失败' : verifiedFresh ? '已配置' : '配置已写入', statusTone)
+      recovery ? ui.badge(recovery, 'bad') : data.configured
+        ? ui.badge(awaitingVerification ? '本次配置未验收' : verification.dns_failed ? 'DNS 验收失败' : verifiedFresh ? scopedVerification : '配置已写入', statusTone)
         : ui.badge('未配置', 'warn'),
       data.update?.mode === 'scheduled'
         ? ui.badge((Number(data.update.days || 1) === 1 ? '定时更新分流规则 ' : '定时更新分流规则 · 每 ' + (data.update.days || 1) + ' 天 ') + (data.update.time || '13:00'), 'neutral')
@@ -185,6 +189,11 @@ function renderBanners() {
   const host = document.getElementById('banners');
   if (!host) return;
   const rows = [];
+  if (app.data?.operation?.pending_tun?.length) {
+    rows.push(ui.note(h('div', {class: 'note-with-action'},
+      h('span', {text: 'TUN 演练恢复尚未确认，后续操作已暂停。请等待独立看护；若报告恢复失败，请查看本地记录，不要删除恢复标记。'}),
+      ui.button('查看恢复记录', {variant: 'secondary', size: 'small', onClick: () => navigate('logs')})), 'bad'));
+  }
   if (app.data?.operation?.pending_rule_update) {
     rows.push(ui.note(h('div', {class: 'note-with-action'},
       h('span', {text: '上次规则更新尚未恢复，配置和其他写入操作已暂停。请先恢复上次更新。'}),
@@ -329,7 +338,7 @@ function refreshPage() {
     renderPage();
     return;
   }
-  if (app.page === 'help') return;
+  if (app.page === 'help') { refreshHelp(ctx); return; }
   if (app.page === 'overview') { refreshOverview(ctx); return; }
   const preserveForm = (app.page === 'updates' && updatesHasDraft());
   const keep = [...stack.querySelectorAll('[data-preserve-key]')]
@@ -400,6 +409,14 @@ async function loadNodes(force = false) {
 }
 
 async function startJob(payload) {
+  if (app.data?.operation?.pending_tun?.length) {
+    ui.toast('TUN 恢复尚未确认，请到日志与验证查看恢复记录。', 'warn');
+    return;
+  }
+  if (app.data?.operation?.settings_pending?.length && !['settings-recover', 'update-recover'].includes(payload.action)) {
+    ui.toast('请先到快照与恢复页面恢复原设置。', 'warn');
+    return;
+  }
   if (app.data?.operation?.pending_rule_update && payload.action !== 'update-recover') {
     ui.toast('请先到规则更新页恢复上次更新。', 'warn');
     return;
@@ -439,6 +456,7 @@ async function finishJob(job) {
   if (job.state === 'success' && job.action === 'update' && job.result?.skipped) {
     ui.toast(job.result?.reason || '规则更新已跳过：订阅或脚本关联已变化。', 'warn', 8000);
   } else if (job.state === 'success') ui.toast(ACTION_LABELS[job.action] + '已完成。', 'ok', 6000);
+  else if (job.state === 'unverified') ui.toast(job.error || '任务结果待核实，请查看日志及恢复记录。', 'warn', 9000);
   else if (job.state === 'cancelled') ui.toast(job.error || '操作已取消，请检查日志确认当前状态。', 'warn', 6000);
   else ui.toast(job.error || '操作未完成，请查看日志。', 'bad', 9000);
   // Do not await an existing refresh which may itself have resumed this job.
@@ -503,16 +521,28 @@ function renderJobDock() {
   if (!job) {
     dock.hidden = true;
     dock.replaceChildren();
+    delete dock.dataset.jobId;
     return;
   }
+  const sameJob = dock.dataset.jobId === job.id;
+  const oldLog = sameJob ? dock.querySelector('.job-log') : null;
+  const scrollState = selector => {
+    const node = sameJob ? dock.querySelector(selector) : null;
+    return node ? {top: node.scrollTop, left: node.scrollLeft,
+      bottom: node.scrollHeight - node.clientHeight - node.scrollTop <= 16} : null;
+  };
+  const eventScroll = scrollState('.job-events');
+  const logScroll = scrollState('.log-block');
+  const logOpen = Boolean(oldLog?.open);
+  dock.dataset.jobId = job.id;
   dock.hidden = false;
   const step = jobStep(job);
   const running = job.state === 'running';
   const total = step?.total || 0;
   const index = step?.index || 0;
   const progress = total ? Math.min(100, Math.round((index / total) * 100)) : 0;
-  const stateTone = running ? 'info' : job.state === 'success' ? 'ok' : job.state === 'cancelled' ? 'warn' : 'bad';
-  const stateLabel = running ? '进行中' : job.state === 'success' ? '已完成' : job.state === 'cancelled' ? '已取消' : '未完成';
+  const stateTone = running ? 'info' : job.state === 'success' ? 'ok' : ['cancelled', 'unverified'].includes(job.state) ? 'warn' : 'bad';
+  const stateLabel = running ? '进行中' : job.state === 'success' ? '已完成' : job.state === 'unverified' ? '结果待核实' : job.state === 'cancelled' ? '已取消' : '未完成';
   const timeline = (job.events || []).filter((event) => ['elevation', 'step', 'done', 'error', 'cancelled'].includes(event.type)).slice(-8);
   const details = [];
   for (const item of timeline) {
@@ -528,6 +558,7 @@ function renderJobDock() {
   const logDetails = job.log ? h('details', { class: 'job-log' },
     h('summary', { text: '控制台输出' }),
     h('pre', { class: 'log-block small' }, job.log)) : null;
+  if (logDetails) logDetails.open = logOpen;
   const actions = [];
   if (running && job.stale) {
     actions.push(h('span', { class: 'job-hint bad-text', text: '任务已结束但界面没有收到退出信号，进程可能卡住。' }));
@@ -549,7 +580,8 @@ function renderJobDock() {
     h('div', { class: 'progress' }, h('div', { class: 'progress-bar ' + (running ? '' : stateTone), style: { width: progress + '%' } })),
     h('div', { class: 'job-meta' },
       h('span', { text: total ? '第 ' + Math.min(index, total) + ' / ' + total + ' 步' : '等待进度' }),
-      h('span', { text: '已用时 ' + (job.elapsed || 0) + ' 秒' }),
+      h('span', { text: Number.isFinite(job.elapsed) ? '已用时 ' + job.elapsed + ' 秒' : '耗时未知' }),
+      job.elapsed_source === 'terminal-event' ? h('span', {text: '按终止记录计算'}) : null,
       job.exit_code !== null && job.exit_code !== undefined ? h('span', { text: '退出码 ' + job.exit_code }) : null),
     details.length ? h('div', { class: 'job-events' }, details) : null,
     job.error && !running ? h('div', { class: 'job-error' }, ui.note(job.error, 'bad')) : null,
@@ -557,6 +589,12 @@ function renderJobDock() {
     app.jobConnectionError ? ui.note(app.jobConnectionError, 'warn') : null,
     logDetails,
     h('div', { class: 'job-actions' }, actions)));
+  for (const [selector, saved] of [['.job-events', eventScroll], ['.log-block', logScroll]]) {
+    const node = dock.querySelector(selector);
+    if (!node) continue;
+    node.scrollTop = !saved || saved.bottom ? Math.max(0, node.scrollHeight - node.clientHeight) : saved.top;
+    node.scrollLeft = saved?.left || 0;
+  }
 }
 
 async function forceCancelJob(job) {
@@ -592,6 +630,7 @@ function showLog(name) {
 }
 
 async function openLogInline(name) {
+  const requestRevision = ++logRequestRevision;
   const host = document.getElementById('log-inline');
   if (!host) {
     app.pendingLog = name;
@@ -600,10 +639,12 @@ async function openLogInline(name) {
   host.replaceChildren(h('div', { class: 'loading-inline' }, h('span', { class: 'spinner' }), '正在读取日志…'));
   try {
     const value = await api.getLog(name);
+    if (requestRevision !== logRequestRevision || !host.isConnected) return;
     host.replaceChildren(
       h('div', { class: 'log-head' }, h('strong', { text: value.name }), ui.button('复制', { variant: 'ghost', size: 'small', onClick: () => ui.copyText(value.text) })),
       h('pre', { class: 'log-block' }, value.text || '空日志。'));
   } catch (error) {
+    if (requestRevision !== logRequestRevision || !host.isConnected) return;
     host.replaceChildren(ui.note(error.message || '读取日志失败。', 'bad'));
   }
 }

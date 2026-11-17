@@ -14,6 +14,28 @@ import gui_server
 
 
 class BackgroundState(unittest.TestCase):
+    def test_job_elapsed_stops_at_completion(self):
+        with tempfile.TemporaryDirectory(dir=client.LOCAL,prefix='elapsed-contract-') as folder:
+            app=gui_server.App(local=Path(folder),open_browser=False,idle_exit=False)
+            token='a'*32;record=app.jobs_dir/token;record.mkdir(parents=True)
+            start=datetime.datetime(2026,1,1,tzinfo=datetime.timezone.utc)
+            client.write(record/'job.json',{'action':'apply','created':start.isoformat()})
+            for state in ('success','failed','cancelled','interrupted'):
+                client.write(record/'status.json',{'state':state,'started':start.isoformat(),
+                    'finished':(start+datetime.timedelta(seconds=60)).isoformat()})
+                with patch.object(gui_server.time,'time',return_value=start.timestamp()+3600):
+                    self.assertEqual(app.job_view(token)['elapsed'],60)
+                app.jobs[token]={'id':token,'action':'apply','started_epoch':start.timestamp()}
+                with patch.object(gui_server.time,'time',return_value=start.timestamp()+7200):
+                    self.assertEqual(app.job_view(token)['elapsed'],60)
+            client.write(record/'status.json',{'state':'running','started':start.isoformat()})
+            with patch.object(gui_server.time,'time',return_value=start.timestamp()+120):
+                self.assertEqual(app.job_view(token)['elapsed'],120)
+            client.write(record/'status.json',{'state':'success','started':start.isoformat()})
+            self.assertIsNone(app.job_view(token)['elapsed'])
+            gui_server.append_event(record/'events.jsonl',{'type':'done','time':(start+datetime.timedelta(seconds=30)).isoformat()})
+            self.assertEqual(app.job_view(token)['elapsed'],30)
+
     def test_configuration_evidence_reaches_actual_frontend(self):
         with tempfile.TemporaryDirectory(dir=client.LOCAL,prefix='ui-contract-') as folder:
             local=Path(folder);app=gui_server.App(local=local,open_browser=False,idle_exit=False)
@@ -35,6 +57,15 @@ class BackgroundState(unittest.TestCase):
             result=subprocess.run([str(client.PROJECT/'.runtime/node/node.exe'),'scripts/test_ui_accessibility.js',str(fixture)],
                 cwd=client.PROJECT,capture_output=True,text=True,timeout=15)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            guard=local/'tun-drills'/('b'*32);guard.mkdir(parents=True);(guard/'ready').touch()
+            self.assertEqual(app.app_state()['operation']['pending_tun'],[{'id':'b'*32,'status':'pending'}])
+            client.write(guard/'recovery.json',{'success':False,'root':'private fixture must not reach API'})
+            self.assertEqual(app.app_state()['operation']['pending_tun'],[{'id':'b'*32,'status':'failed'}])
+            from operation_lock import check_pending_tun
+            with self.assertRaises(RuntimeError):check_pending_tun(local)
+            (guard/'done').touch()
+            self.assertEqual(app.app_state()['operation']['pending_tun'],[])
+            check_pending_tun(local)
             for value in (True,None,'false',0):
                 client.write(local/'last-run.json',dict(record,network_tested=value))
                 self.assertIs(app.app_state()['last_run']['network_tested'],value if type(value) is bool else None)

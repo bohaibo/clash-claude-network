@@ -6,9 +6,10 @@ let revision = 0;
 let currentCtx = null;
 export function hasDraft() { return draft.dirty || saving; }
 
-const draft = { mode: '', time: '', days: 1, dirty: false };
+const PRESETS = [[1, '每天'], [3, '每 3 天'], [7, '每周'], [30, '每月'], [180, '每半年']];
+const draft = { mode: '', time: '', days: 1, custom: false, dirty: false };
 
-function operationsBlocked(ctx) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update); }
+function operationsBlocked(ctx, settingsRecovery = false) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update) || Boolean(ctx.state.operation?.pending_tun?.length) || (!settingsRecovery && Boolean(ctx.state.operation?.settings_pending?.length)); }
 
 export function render(ctx) {
   currentCtx = ctx;
@@ -18,6 +19,7 @@ export function render(ctx) {
     draft.mode = update.mode || 'scheduled';
     draft.time = update.time || '13:00';
     draft.days = Number(update.days) || 1;
+    draft.custom = !PRESETS.some(([value]) => value === draft.days);
   }
   const root = document.createElement('div');
   root.className = 'stack';
@@ -28,7 +30,7 @@ export function render(ctx) {
   if (state.operation?.pending_rule_update) {
     root.append(ui.card({title: '上次规则更新待恢复'},
       ui.note('恢复完成前暂停其他配置操作。这里只恢复上次更新，不下载新规则；如检测到后续手动改动，会停止并保留记录。', 'warn'),
-      ui.button('恢复上次更新', {variant: 'secondary', disabled: ctx.busy, onClick: () => recoverRules(ctx)})));
+      ui.button('恢复上次更新', {variant: 'secondary', disabled: ctx.busy || Boolean(state.operation?.pending_tun?.length), onClick: () => recoverRules(ctx)})));
   }
   root.append(modeCard(ctx, update));
   root.append(statusCard(ctx, update));
@@ -52,13 +54,13 @@ function modeCard(ctx, update) {
     disabled: draft.mode !== 'scheduled',
     oninput: (event) => { draft.time = event.target.value; draft.dirty = true; revision++; updateSaveState(); },
   });
-  const presets = [[1, '每天'], [3, '每 3 天'], [7, '每周'], [30, '每月'], [180, '每半年']];
-  const custom = !presets.some(([value]) => value === Number(draft.days));
+  const custom = draft.custom || !PRESETS.some(([value]) => value === Number(draft.days));
   const frequency = ui.select(
-    [...presets.map(([value, label]) => ({ value: String(value), label })), { value: 'custom', label: '自定义天数' }],
+    [...PRESETS.map(([value, label]) => ({ value: String(value), label })), { value: 'custom', label: '自定义天数' }],
     custom ? 'custom' : String(draft.days),
     (value) => {
-      if (value === 'custom') { draft.days = Number(draft.days) || 7; }
+      draft.custom = value === 'custom';
+      if (draft.custom) { draft.days = Number(draft.days) || 7; }
       else { draft.days = Number(value); }
       draft.dirty = true; revision++;
       rerenderMode(ctx);
@@ -70,6 +72,8 @@ function modeCard(ctx, update) {
     type: 'number', min: 1, max: 365, disabled: draft.mode !== 'scheduled',
     oninput: (event) => {
       draft.days = event.target.value;
+      draft.custom = true;
+      frequency.value = 'custom';
       draft.dirty = true; revision++;
       updateSaveState();
     },
@@ -161,12 +165,14 @@ function updateSaveState() {
 
 async function saveSettings(ctx) {
   if (saving || operationsBlocked(ctx)) return;
-  if (!draft.time || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(draft.time)) {
+  const validTime = value => typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
+  const validDays = value => Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 365;
+  const scheduled = draft.mode === 'scheduled';
+  if (scheduled && !validTime(draft.time)) {
     ui.toast('请输入 00:00–23:59 之间的时间。', 'warn');
     return;
   }
-  const days = Number(draft.days);
-  if (!Number.isInteger(days) || days < 1 || days > 365) {
+  if (scheduled && !validDays(draft.days)) {
     ui.toast('更新间隔必须是 1–365 天。', 'warn');
     return;
   }
@@ -174,7 +180,10 @@ async function saveSettings(ctx) {
   updateSaveState();
   const sentRevision = revision;
   try {
-    const result = await ctx.api.post('/api/update-settings', { mode: draft.mode, time: draft.time, days });
+    const saved = ctx.state.update || {};
+    const time = validTime(draft.time) ? draft.time : validTime(saved.time) ? saved.time : '13:00';
+    const days = Number(validDays(draft.days) ? draft.days : validDays(saved.days) ? saved.days : 1);
+    const result = await ctx.api.post('/api/update-settings', { mode: draft.mode, time, days });
     ctx.acceptState('update', result);
     if (revision === sentRevision) draft.dirty = false;
     ui.toast('规则更新方式已保存。', 'ok');

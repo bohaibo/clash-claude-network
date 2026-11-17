@@ -3,6 +3,17 @@ from pathlib import Path
 from contextlib import contextmanager
 import msvcrt,json,re
 
+def operation_in_use(local):
+    """Check only the byte lock, without bypassing or changing recovery records."""
+    path=Path(local)/'operation.lock'
+    path.parent.mkdir(parents=True,exist_ok=True)
+    with path.open('a+b') as stream:
+        stream.seek(0)
+        try:msvcrt.locking(stream.fileno(),msvcrt.LK_NBLCK,1)
+        except OSError:return True
+        msvcrt.locking(stream.fileno(),msvcrt.LK_UNLCK,1)
+    return False
+
 def pending_settings(local):
     rows=[]
     for folder in sorted((Path(local)/'gui'/'settings-transactions').glob('*')):
@@ -35,10 +46,21 @@ def check_pending_firewall(local):
     if not (Path(local)/(token+'.commit')).exists():
         raise RuntimeError('Firewall rollback is pending; use the root menu to finish recovery before updating')
 
-def check_pending_tun(local):
+def pending_tun(local):
+    rows=[]
     for folder in (Path(local)/'tun-drills').glob('*'):
         if re.fullmatch(r'[a-f0-9]{32}',folder.name) and (folder/'ready').exists() and not (folder/'done').exists():
-            raise RuntimeError('TUN drill recovery is pending; wait for local recovery and inspect its report')
+            try:
+                recovery=json.loads((folder/'recovery.json').read_text(encoding='utf-8-sig'))
+                failed=isinstance(recovery,dict) and recovery.get('success') is False
+            except (OSError,ValueError):
+                failed=False
+            rows.append({'id':folder.name,'status':'failed' if failed else 'pending'})
+    return sorted(rows,key=lambda row:row['id'])
+
+def check_pending_tun(local):
+    if pending_tun(local):
+        raise RuntimeError('TUN drill recovery is pending; wait for local recovery and inspect its report')
 
 def check_pending_rules(local):
     if (Path(local)/'rule-update-pending.json').exists():

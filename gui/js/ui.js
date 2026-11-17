@@ -213,6 +213,20 @@ export function statusTone(value) {
   return 'neutral';
 }
 
+export function verificationLabel(verification = {}) {
+  const scope = { 'full-network': '完整网络验收', connectivity: '连通性检查', partial: '部分阶段检查' }[verification.coverage] || '旧版检查（范围待核对）';
+  return scope + (verification.success ? '通过' : '未通过');
+}
+
+export function recoveryLabel(operation = {}) {
+  if (operation.pending_tun?.length) return 'TUN 演练待恢复';
+  if (operation.pending_firewall) return '防火墙待恢复';
+  if (operation.pending_rule_update) return '规则更新待恢复';
+  if (operation.settings_pending?.length) return '设置保存待恢复';
+  if (operation.reconfigure_active) return '重新配置或恢复进行中';
+  return '';
+}
+
 export function toast(message, type = 'info', timeout = 4200) {
   let host = document.getElementById('toasts');
   if (!host) {

@@ -4,7 +4,7 @@ import * as ui from '../ui.js';
 let selected = '';
 let deleting = false;
 
-function operationsBlocked(ctx) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update); }
+function operationsBlocked(ctx, settingsRecovery = false) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update) || Boolean(ctx.state.operation?.pending_tun?.length) || (!settingsRecovery && Boolean(ctx.state.operation?.settings_pending?.length)); }
 
 export function render(ctx) {
   const state = ctx.state;
@@ -34,7 +34,8 @@ function settingsRecoveryCard(ctx) {
     pending.length ? pending.map(row => ui.el('div', { class: 'action-row' },
       ui.el('div', {}, ui.el('strong', { text: row.id }),
         ui.el('p', { text: row.error || '检测到中断或恢复失败的设置保存，可恢复修改前的状态。' })),
-      ui.button('恢复原设置', { variant: 'secondary', disabled: operationsBlocked(ctx), onClick: async () => {
+      ui.button('恢复原设置', { variant: 'secondary', disabled: operationsBlocked(ctx, true), onClick: async () => {
+        if (operationsBlocked(ctx, true)) return;
         const ok = await ctx.confirm({ title: '恢复原设置？',
           description: '还原此次保存前的更新方式和计划任务。不会恢复或删除网络快照，也不会重新配置网络。', confirmText: '恢复原设置' });
         if (ok) ctx.startJob({ action: 'settings-recover', transaction: row.id, confirm: row.id });

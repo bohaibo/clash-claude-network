@@ -29,10 +29,9 @@ def validate(mode, time_value, days=1):
         raise ValueError('规则更新方式无效。')
     if not isinstance(time_value, str) or not TIME_PATTERN.fullmatch(time_value):
         raise ValueError('更新时间须为 HH:MM（00:00–23:59）。')
-    try:
-        days = int(days)
-    except (TypeError, ValueError):
+    if type(days) is not int and not (isinstance(days, str) and re.fullmatch(r'[0-9]{1,3}', days)):
         raise ValueError('更新间隔必须是 1–365 的整数天。') from None
+    days = int(days)
     if days < 1 or days > MAX_DAYS:
         raise ValueError('更新间隔必须是 1–365 的整数天。')
     return mode, time_value, days

@@ -7,9 +7,24 @@ from unittest.mock import patch
 
 import client
 import gui_settings
+import gui_server
 
 
 class GuiSettings(unittest.TestCase):
+    def test_days_require_an_explicit_integer_before_any_mutation(self):
+        gui_settings.save('manual','13:00',7,self.local)
+        previous=gui_settings.settings_path(self.local).read_bytes()
+        app=gui_server.App(local=self.local,open_browser=False,idle_exit=False)
+        for days in (True,False,1.0,1.9,float('inf'),float('-inf'),float('nan'),None,[],{},'1.9',' 7 ','７','9'*1000):
+            with self.subTest(days=repr(days)):
+                with self.assertRaises(ValueError):gui_settings.save('scheduled','13:00',days,self.local)
+                with patch.object(app,'settings_operation',side_effect=AssertionError('must validate first')):
+                    with self.assertRaises(gui_server.ApiError) as caught:app.save_update_settings({'mode':'scheduled','time':'13:00','days':days})
+                self.assertEqual(caught.exception.status,400)
+                self.assertEqual(gui_settings.settings_path(self.local).read_bytes(),previous)
+        for days in (1,365,'7'):
+            self.assertEqual(gui_settings.validate('scheduled','13:00',days)[2],int(days))
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory(dir=client.LOCAL, prefix='gui-settings-test-')
         self.addCleanup(temp.cleanup)
