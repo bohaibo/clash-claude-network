@@ -9,6 +9,17 @@ from verify_tun import verify_tun
 from verify_core_exit import verify_core_exit
 from operation_lock import check_pending_tun
 from verification_reports import save_report
+from gui_job_console import append_event
+
+STAGES = (
+ '复核生效防火墙',
+ '检查连通性并演练节点故障',
+ '演练关闭 TUN',
+ '演练内核退出',
+ '复查恢复后的 IPv6 绑定',
+ '复测恢复后的网络',
+ '复核恢复后的防火墙',
+)
 
 def recheck_ipv6():
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'))
@@ -25,21 +36,44 @@ def recheck_ipv6():
 def run_audit():
  os.environ['CCN_VERIFY_RUN']=uuid.uuid4().hex
  result={'success':False,'run_id':os.environ['CCN_VERIFY_RUN']}
+ events=os.environ.get('CCN_EVENTS_FILE')
+ completed=0
+ def stage(index, operation):
+  nonlocal completed
+  title=STAGES[index-1]
+  def progress(status):
+   if events:
+    try:
+     append_event(events,{'type':'audit-step','index':index,'total':len(STAGES),
+                          'completed':completed,'title':title,'status':status})
+    except OSError:
+     pass
+  print(f'[{index}/{len(STAGES)}] {title}…',flush=True)
+  progress('running')
+  try:
+   operation()
+  except Exception:
+   print(f'[{index}/{len(STAGES)}] {title}未通过。',flush=True)
+   progress('failed')
+   raise
+  completed+=1
+  print(f'[{index}/{len(STAGES)}] {title}已完成。',flush=True)
+  progress('passed')
  try:
   check_pending_tun(LOCAL)
   from config_health import configuration_revision
   initial_revision=configuration_revision(LOCAL)
-  require(verify_firewall('firewall-before')['success'],'Full firewall preflight not verified; drills stopped')
+  stage(1,lambda:require(verify_firewall('firewall-before')['success'],'Full firewall preflight not verified; drills stopped'))
   try:
-   require(verify(outage=True)['success'],'Node outage verification did not pass')
-   require(verify_tun()['success'],'TUN-off protection or recovery failed')
-   require(verify_core_exit()['success'],'Core-exit protection or recovery failed')
+   stage(2,lambda:require(verify(outage=True)['success'],'Node outage verification did not pass'))
+   stage(3,lambda:require(verify_tun()['success'],'TUN-off protection or recovery failed'))
+   stage(4,lambda:require(verify_core_exit()['success'],'Core-exit protection or recovery failed'))
   finally:
-   try:recheck_ipv6()
+   try:stage(5,recheck_ipv6)
    except Exception:
     save_report({'success':False,'failed_check':'ipv6_bindings'},'post-recovery');raise
-  require(verify(stage='post-recovery')['success'],'Post-recovery verification did not pass')
-  require(verify_firewall('firewall-after')['success'],'Final firewall audit not verified')
+  stage(6,lambda:require(verify(stage='post-recovery')['success'],'Post-recovery verification did not pass'))
+  stage(7,lambda:require(verify_firewall('firewall-after')['success'],'Final firewall audit not verified'))
   require(configuration_revision(LOCAL)==initial_revision,'Configuration changed during the audit')
   result['success']=True
  except Exception as exc:result['error']=type(exc).__name__

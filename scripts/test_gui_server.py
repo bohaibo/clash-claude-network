@@ -283,6 +283,20 @@ class GuiServer(unittest.TestCase):
         status = json.loads((cancelled_folder / 'status.json').read_text(encoding='utf-8'))
         self.assertEqual(status['state'], 'cancelled')
 
+    def test_running_job_and_log_view_include_elevated_console_output(self):
+        job_id = 'c' * 32
+        folder = self.app.jobs_dir / job_id
+        folder.mkdir(parents=True)
+        self.app.jobs[job_id] = {'id': job_id, 'action': 'audit', 'folder': str(folder),
+                                 'created': gui_server.now_iso(), 'state': 'running'}
+        (folder / 'console.log').write_text('等待授权\n', encoding='utf-8')
+        self.assertEqual(self.app.job_view(job_id)['log'], '等待授权')
+        (folder / 'elevated.log').write_text('正在复核防火墙\n', encoding='utf-8')
+        view = self.app.job_view(job_id)
+        self.assertEqual(view['state'], 'running')
+        self.assertEqual(view['log'], '等待授权\n正在复核防火墙')
+        self.assertEqual(self.app.log_text('gui/jobs/' + job_id + '/console.log')['text'], view['log'])
+
     def test_update_settings_persist_and_revert_on_failure(self):
         def checkpoint(action, *args, state_file=None):
             if action == 'snapshot':

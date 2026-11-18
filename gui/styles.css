@@ -356,6 +356,9 @@ select.input { appearance: none; padding-right: 30px; background-image: linear-g
 .job-head-right { display: flex; align-items: center; gap: 4px; }
 .progress { height: 6px; border-radius: 999px; background: var(--soft-2); overflow: hidden; }
 .progress-bar { height: 100%; border-radius: inherit; background: var(--ink); transition: width 0.35s ease; }
+.progress-bar.indeterminate { animation: progress-slide 1.6s ease-in-out infinite alternate; }
+@keyframes progress-slide { to { transform: translateX(233%); } }
+@media (prefers-reduced-motion: reduce) { .progress-bar.indeterminate { animation: none; } }
 .progress-bar.ok { background: var(--ok); }
 .progress-bar.bad { background: var(--bad); }
 .progress-bar.warn { background: #c58a19; }

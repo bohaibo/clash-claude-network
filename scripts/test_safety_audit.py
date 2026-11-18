@@ -1,5 +1,5 @@
 """Offline fault fixtures: never touches live adapters, services or network."""
-import contextlib,io,json,os,socket,tempfile,unittest
+import contextlib,io,json,os,socket,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch,Mock
 import client,verify_tun as tun,firewall_audit as firewall,safety_audit as audit,verification_reports as reports,gui_server
@@ -103,6 +103,19 @@ class SafetyAudit(unittest.TestCase):
   with patch.object(audit,'verify_firewall',return_value={'success':True}),patch.object(audit,'verify',return_value={'success':True}),patch.object(audit,'verify_tun',return_value={'success':False}),patch.object(audit,'verify_core_exit') as core,patch.object(audit,'recheck_ipv6') as recovery:
    self.assertFalse(audit.run_audit()['success'])
   recovery.assert_called_once();core.assert_not_called()
+ def test_audit_reports_each_completed_stage_to_the_gui(self):
+  events=self.local/'events.jsonl'
+  os.environ['CCN_EVENTS_FILE']=str(events)
+  with (patch.object(audit,'verify_firewall',return_value={'success':True}),
+        patch.object(audit,'verify',return_value={'success':True}),
+        patch.object(audit,'verify_tun',return_value={'success':True}),
+        patch.object(audit,'verify_core_exit',return_value={'success':True}),
+        patch.object(audit,'recheck_ipv6')):
+   self.assertTrue(audit.run_audit()['success'])
+  stages=gui_server.read_events(events)
+  self.assertEqual([row['index'] for row in stages if row['status']=='running'],list(range(1,8)))
+  self.assertEqual([row['completed'] for row in stages if row['status']=='passed'],list(range(1,8)))
+  self.assertIn('复测恢复后的网络已完成',sys.stdout.getvalue())
  def test_ipv6_recovery_failure_marks_current_verification_failed(self):
   with patch.object(audit,'verify_firewall',return_value={'success':True}),patch.object(audit,'verify',return_value={'success':True}),patch.object(audit,'verify_tun',return_value={'success':True}),patch.object(audit,'verify_core_exit',return_value={'success':True}),patch.object(audit,'recheck_ipv6',side_effect=OSError('fixture')):
    self.assertFalse(audit.run_audit()['success'])

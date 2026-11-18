@@ -152,6 +152,16 @@ async function main() {
   dp.app.job.state='unverified';dp.app.job.elapsed=null;dp.renderJobDock();
   assert(dock.textContent.includes('结果待核实'));assert(dock.textContent.includes('耗时未知'));
   assert(dock.querySelector('.badge-warn'),'unknown results use a warning rather than a success badge');
+  dp.app.job={id:'audit',action:'audit',state:'running',events:[{type:'elevation'}],log:'UAC'};
+  dp.renderJobDock();
+  assert(dock.textContent.includes('等待管理员授权'));
+  dp.app.job.events.push({type:'start'},{type:'audit-step',index:2,total:7,completed:1,title:'验收阶段测试',status:'running'});
+  dp.app.job.log+='\n阶段输出';
+  dp.renderJobDock();
+  assert(!dock.textContent.includes('等待管理员授权'));
+  assert(dock.textContent.includes('验收阶段 2 / 7'));
+  assert.equal(dock.querySelector('.progress-bar').style.width,'14%');
+  assert(dock.querySelector('.log-block').textContent.includes('阶段输出'));
   dp.app.job.elapsed=60;dp.app.job.elapsed_source='terminal-event';dp.renderJobDock();
   assert(dock.textContent.includes('已用时 60 秒'));assert(dock.textContent.includes('按终止记录计算'));
 

@@ -568,19 +568,27 @@ function renderJobDock() {
   dock.hidden = false;
   const step = jobStep(job);
   const running = job.state === 'running';
+  const events = job.events || [];
+  const auditStep = events.findLast(event => event.type === 'audit-step');
+  const lifecycle = events.findLast(event => ['elevation', 'authorized', 'start', 'step', 'audit-step'].includes(event.type));
+  const awaitingElevation = running && lifecycle?.type === 'elevation';
   const total = step?.total || 0;
   const index = step?.index || 0;
-  const progress = total ? Math.min(100, Math.round((index / total) * 100)) : 0;
+  const auditFraction = auditStep?.total ? auditStep.completed / auditStep.total : 0;
+  const fraction = total ? (auditStep ? index - 1 + auditFraction : index) / total : auditFraction;
+  const progress = job.state === 'success' ? 100 : Math.min(100, Math.round(fraction * 100));
+  const indeterminate = running && !total && !auditStep?.total;
   const stateTone = running ? 'info' : job.state === 'success' ? 'ok' : ['cancelled', 'unverified'].includes(job.state) ? 'warn' : 'bad';
   const stateLabel = running ? '进行中' : job.state === 'success' ? '已完成' : job.state === 'unverified' ? '结果待核实' : job.state === 'cancelled' ? '已取消' : '未完成';
-  const timeline = (job.events || []).filter((event) => ['elevation', 'step', 'done', 'error', 'cancelled'].includes(event.type)).slice(-8);
+  const timeline = events.filter(event => event.type === 'audit-step' ? event.status === 'running'
+    : ['elevation', 'step', 'done', 'error', 'cancelled'].includes(event.type)).slice(-8);
   const details = [];
   for (const item of timeline) {
     if (!running && job.error && item.message === job.error) continue;
-    if (item.type === 'step') details.push(h('div', { class: 'job-event' },
+    if (item.type === 'step' || item.type === 'audit-step') details.push(h('div', { class: 'job-event' },
       h('span', { class: 'job-event-index', text: String(item.index || '') }),
       h('div', {}, h('strong', { text: item.title || '' }), item.note ? h('small', { text: item.note }) : null)));
-    else if (item.type === 'elevation' && running && !step) details.push(h('div', { class: 'job-event muted', text: item.message || '等待管理员授权…' }));
+    else if (item.type === 'elevation' && awaitingElevation) details.push(h('div', { class: 'job-event muted', text: item.message || '等待管理员授权…' }));
     else if (item.type === 'done') details.push(h('div', { class: 'job-event ok', text: item.message || '已完成。' }));
     else if (item.type === 'error') details.push(h('div', { class: 'job-event bad', text: item.message || '操作未完成。' }));
     else if (item.type === 'cancelled') details.push(h('div', { class: 'job-event warn', text: item.message || '已取消。' }));
@@ -594,7 +602,7 @@ function renderJobDock() {
     actions.push(h('span', { class: 'job-hint bad-text', text: '任务已结束但界面没有收到退出信号，进程可能卡住。' }));
     actions.push(ui.button('结束卡住任务', { variant: 'danger', size: 'small', icon: 'close', onClick: () => forceCancelJob(job) }));
   } else if (running) {
-    actions.push(h('span', { class: 'job-hint', text: '请勿关闭此窗口；管理员授权窗口可能已经弹出。' }));
+    actions.push(h('span', { class: 'job-hint', text: awaitingElevation ? '请在 Windows 授权窗口中确认。' : '任务执行期间请保持此窗口打开。' }));
   } else {
     actions.push(ui.button('查看日志', { variant: 'secondary', size: 'small', icon: 'list', onClick: () => showLog('gui/jobs/' + job.id + '/console.log') }));
     actions.push(ui.button('关闭', { variant: 'ghost', size: 'small', onClick: () => { app.job = null; renderJobDock(); } }));
@@ -603,13 +611,17 @@ function renderJobDock() {
     h('div', { class: 'job-head' },
       h('div', {},
         h('span', { class: 'job-kicker', text: ACTION_LABELS[job.action] || job.action }),
-        h('strong', { text: step ? step.title : running ? '准备中…' : stateLabel })),
+        h('strong', { text: auditStep?.title || step?.title || (running ? awaitingElevation ? '等待管理员授权…'
+          : lifecycle ? '正在执行…' : '准备中…' : stateLabel) })),
       h('div', { class: 'job-head-right' },
         ui.badge(stateLabel, stateTone),
         ui.iconButton('close', running ? '操作进行中，不能收起' : '收起', () => { app.job = null; renderJobDock(); }, { size: 16, disabled: running }))),
-    h('div', { class: 'progress' }, h('div', { class: 'progress-bar ' + (running ? '' : stateTone), style: { width: progress + '%' } })),
+    h('div', { class: 'progress', role: 'progressbar', 'aria-label': '任务进度', 'aria-valuenow': indeterminate ? null : progress },
+      h('div', { class: 'progress-bar ' + (indeterminate ? 'indeterminate' : running ? '' : stateTone),
+        style: { width: indeterminate ? '30%' : progress + '%' } })),
     h('div', { class: 'job-meta' },
-      h('span', { text: total ? '第 ' + Math.min(index, total) + ' / ' + total + ' 步' : '等待进度' }),
+      h('span', { text: auditStep ? '验收阶段 ' + auditStep.index + ' / ' + auditStep.total
+        : total ? '第 ' + Math.min(index, total) + ' / ' + total + ' 步' : stateLabel }),
       h('span', { text: Number.isFinite(job.elapsed) ? '已用时 ' + job.elapsed + ' 秒' : '耗时未知' }),
       job.elapsed_source === 'terminal-event' ? h('span', {text: '按终止记录计算'}) : null,
       job.exit_code !== null && job.exit_code !== undefined ? h('span', { text: '退出码 ' + job.exit_code }) : null),

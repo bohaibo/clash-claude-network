@@ -48,6 +48,7 @@
   "scripts/firewall_audit.py",
   "scripts/firewall_rules.ps1",
   "scripts/gui.ps1",
+  "scripts/gui_job_console.py",
   "scripts/gui_server.py",
   "scripts/gui_settings.py",
   "scripts/gui_window.py",

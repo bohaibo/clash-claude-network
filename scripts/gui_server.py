@@ -38,6 +38,7 @@ from app_release import VERSION, ReleaseChecker
 from package_app import build_package
 from operation_lock import operation_lock, pending_settings, pending_tun, operation_in_use
 from atomic_files import replace_file
+from gui_job_console import append_event
 
 PROJECT = Path(__file__).resolve().parent.parent
 LOCAL = PROJECT / '.local'
@@ -107,14 +108,6 @@ def atomic_json(path, value):
     replace_file(temporary, path)
 
 
-def append_event(path, event):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps({'time': now_iso(), **event}, ensure_ascii=False)
-    with path.open('a', encoding='utf-8') as stream:
-        stream.write(line + '\n')
-
-
 def read_events(path, limit=400):
     path = Path(path)
     if not path.is_file():
@@ -152,6 +145,14 @@ def tail_text(path, limit=24000, lines=140):
     values = data.splitlines()[-lines:]
     text = '\n'.join(values)
     return text[-limit:]
+
+
+def job_console(folder, limit=30000, lines=200):
+    output = '\n'.join(filter(None, (
+        tail_text(folder / 'console.log', limit, lines),
+        tail_text(folder / 'elevated.log', limit, lines),
+    )))
+    return '\n'.join(output.splitlines()[-lines:])[-limit:]
 
 
 def is_admin():
@@ -881,7 +882,10 @@ class App:
             match = re.fullmatch(r'gui/jobs/([a-f0-9]{32})/console\.log', str(name))
             if not match:
                 raise ApiError(404, '日志名称无效。')
-            path = self.jobs_dir / match.group(1) / 'console.log'
+            folder = self.jobs_dir / match.group(1)
+            if not any((folder / filename).is_file() for filename in ('console.log', 'elevated.log')):
+                raise ApiError(404, '日志不存在。')
+            return {'name': name, 'text': job_console(folder, limit=200000, lines=20000)}
         if not path.is_file():
             raise ApiError(404, '日志不存在。')
         return {'name': name, 'text': tail_text(path, limit=200000, lines=20000)}
@@ -1232,7 +1236,8 @@ class App:
         events = folder / 'events.jsonl'
         process = None
         exit_code = None
-        env = dict(os.environ, PYTHONUTF8='1', PYTHONIOENCODING='utf-8', PYTHONNOUSERSITE='1', CCN_EVENTS_FILE=str(events))
+        env = dict(os.environ, PYTHONUTF8='1', PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1',
+                   PYTHONNOUSERSITE='1', CCN_EVENTS_FILE=str(events))
         if self.node_path():
             env['CCN_NODE'] = self.node_path()
         try:
@@ -1452,7 +1457,7 @@ class App:
             'elapsed_source': 'running' if running else status.get('finished_source', 'completion-record' if finished else 'unknown'),
             'stale': stale,
             'events': events,
-            'log': tail_text(folder / 'console.log', limit=30000, lines=200),
+            'log': job_console(folder),
         }
 
     def active_job_view(self):

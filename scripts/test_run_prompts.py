@@ -1,7 +1,9 @@
 """Exercise the real entry in isolated .local fixtures; never touch live settings."""
-import json,subprocess,tempfile,unittest,sys
+import base64,json,subprocess,tempfile,time,unittest,sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import client
+from gui_job_console import capture
 
 
 class RunPrompts(unittest.TestCase):
@@ -154,6 +156,65 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   result,text=self.run_entry('snapshot')
   self.assertEqual(result.returncode,0,text);self.assertIn('已取消管理员授权',text)
   self.assertNotIn('操作未完成',text)
+ def test_elevated_console_capture_preserves_output_streams_and_exit_code(self):
+  script=self.scripts/'output fixture.ps1'
+  script.write_text(
+   "param([string]$Node,[string]$Release)\n"
+   "[Console]::OutputEncoding=[Text.Encoding]::UTF8\n"
+   "Write-Host ('实际输出：'+$Node)\n"
+   "$deadline=[DateTime]::UtcNow.AddSeconds(8)\n"
+   "while(!(Test-Path -LiteralPath $Release)){\n"
+   " if([DateTime]::UtcNow -gt $deadline){exit 9}\n"
+   " Start-Sleep -Milliseconds 30\n"
+   "}\n"
+   "Write-Error '错误流输出' -ErrorAction Continue\n"
+   "exit 7\n",encoding='utf-8-sig')
+  events=self.local/'events.jsonl'
+  release=self.local/'output.release'
+  log=self.local/'elevated.log'
+  payload={'events':str(events),'arguments':['-Node','测试 节点','-Release',str(release)]}
+  with ThreadPoolExecutor(max_workers=1) as executor:
+   job=executor.submit(capture,payload,script)
+   try:
+    deadline=time.monotonic()+5
+    while time.monotonic()<deadline and not job.done():
+     if log.exists() and '实际输出：测试 节点' in log.read_text(encoding='utf-8',errors='replace'):
+      break
+     time.sleep(.03)
+    else:self.fail('Expected console output before task completion')
+   finally:release.touch()
+   self.assertEqual(job.result(timeout=5),7)
+  output=log.read_text(encoding='utf-8')
+  self.assertIn('实际输出：测试 节点',output)
+  self.assertIn('错误流输出',output)
+ def test_gui_elevation_routes_to_console_capture(self):
+  path=self.scripts/'run.ps1';source=path.read_text(encoding='utf-8-sig')
+  original=(client.PROJECT/'scripts/run.ps1').read_text(encoding='utf-8-sig')
+  start=original.index('$identity=');end=original.index('$activeJob=',start)
+  block=original[start:end]
+  source=source.replace('$activeJob=','if($true){\n'+block[block.index('  $arguments='):]+'$activeJob=',1)
+  source=source.replace("function Start-Process { throw 'Unexpected process start' }", """
+function Start-Process {
+ param($FilePath,$Verb,$ArgumentList,$WindowStyle,[switch]$PassThru)
+ @{program=$FilePath;verb=$Verb;arguments=$ArgumentList} | ConvertTo-Json -Compress |
+  Set-Content -LiteralPath (Join-Path $PSScriptRoot '../launch.json') -Encoding UTF8
+ $process=[pscustomobject]@{Handle=1;ExitCode=0}
+ $process | Add-Member ScriptMethod WaitForExit {}
+ return $process
+}
+""")
+  path.write_text(source,encoding='utf-8-sig')
+  events=self.local/'events.jsonl'
+  result,text=self.run_entry('apply',(),'-Acknowledged','-Node','测试 节点','-EventsFile',str(events))
+  self.assertEqual(result.returncode,0,text)
+  launch=json.loads((self.project/'launch.json').read_text(encoding='utf-8-sig'))
+  self.assertEqual(launch['verb'],'RunAs')
+  self.assertEqual(Path(launch['program']),Path(sys.executable))
+  self.assertTrue(launch['arguments'][0].endswith('gui_job_console.py"'))
+  payload=json.loads(base64.b64decode(launch['arguments'][1]))
+  self.assertEqual(Path(payload['events']),events)
+  self.assertIn('测试 节点',payload['arguments'])
+  self.assertIn('-Acknowledged',payload['arguments'])
  def test_firewall_rollback_outcome_is_explicit(self):
   snapshot=self.local/'snapshots'/'fixture';snapshot.mkdir(parents=True)
   (snapshot/'system.json').write_text('{}')

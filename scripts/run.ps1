@@ -45,6 +45,8 @@ if($EventsFile){
  if(!$eventsPath.StartsWith($eventPrefix,[StringComparison]::OrdinalIgnoreCase)){throw '事件记录必须保存在本项目 .local 内。'}
  $eventDir=Split-Path -Parent $eventsPath
  if($eventDir -and !(Test-Path -LiteralPath $eventDir)){New-Item -Path $eventDir -ItemType Directory -Force | Out-Null}
+ $env:CCN_EVENTS_FILE=$eventsPath
+ $env:PYTHONUNBUFFERED='1'
 }
 $script:eventLock=New-Object object
 function Write-GuiEvent([string]$Type,[System.Collections.IDictionary]$Data){
@@ -265,12 +267,26 @@ if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principa
   if($RecoveryId){$arguments+=@('-RecoveryId',$RecoveryId)}
   if($Acknowledged){$arguments+='-Acknowledged'};if($NoPause){$arguments+='-NoPause'}
   if($Python){$arguments+=@('-Python',('"'+$Python+'"'))}
-  if($eventsPath){$arguments+=@('-EventsFile',('"'+$eventsPath+'"'))}
+  $elevationProgram='powershell.exe'
+  if($eventsPath){
+   # UAC opens a separate process, so its output must be captured on that side.
+   $taskArguments=@('-Action',$Action,'-Region',$Region,'-Python',$python,'-EventsFile',$eventsPath)
+   foreach($parameter in @('Node','Subscription','ChainSpecPath','Snapshot','RecoveryId')){
+    $value=Get-Variable -Name $parameter -ValueOnly
+    if($value){$taskArguments+=@(('-'+$parameter),$value)}
+   }
+   if($Acknowledged){$taskArguments+='-Acknowledged'}
+   if($NoPause){$taskArguments+='-NoPause'}
+   $payload=[ordered]@{events=$eventsPath;arguments=$taskArguments} | ConvertTo-Json -Compress
+   $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+   $elevationProgram=$python
+   $arguments=@(('"'+(Join-Path $PSScriptRoot 'gui_job_console.py')+'"'),$encoded)
+  }
   Write-GuiEvent 'elevation' ([ordered]@{message='等待 Windows 管理员授权'})
   Write-Host '即将请求管理员权限；请在 Windows 授权窗口中确认。取消授权不会执行所选操作。' -ForegroundColor Yellow
   # Start-Process -Wait also waits for Clash descendants, which stay open.
   # Wait only for the elevated operation process itself.
-  try{$process=Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -PassThru;$null=$process.Handle;$process.WaitForExit()}
+  try{$process=Start-Process -FilePath $elevationProgram -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -PassThru;$null=$process.Handle;$process.WaitForExit()}
   catch{
    $native=$_.Exception
    while($native.InnerException){$native=$native.InnerException}
