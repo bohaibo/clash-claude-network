@@ -1,4 +1,4 @@
-﻿param([ValidateSet('apply','supplement','restore','snapshot','list-snapshots','reconfigure','audit')][string]$Action,[string]$Node,[string]$Subscription,[string]$ChainSpecPath,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[string]$EventsFile,[string]$Python)
+﻿param([ValidateSet('apply','supplement','restore','snapshot','list-snapshots','reconfigure','audit','drill-recover')][string]$Action,[string]$Node,[string]$Subscription,[string]$ChainSpecPath,[string]$Region='SG',[string]$Snapshot,[switch]$Acknowledged,[switch]$NoPause,[string]$EventsFile,[string]$Python,[ValidatePattern('^[a-f0-9]{32}$')][string]$RecoveryId)
 $ErrorActionPreference='Stop'
 $env:PYTHONNOUSERSITE='1'
 . (Join-Path $PSScriptRoot 'firewall_rules.ps1')
@@ -13,6 +13,15 @@ $local=Join-Path $project '.local';New-Item -Path $local -ItemType Directory -Fo
 $env:CCN_OPERATION_ID=[Guid]::NewGuid().ToString('N')
 $env:CCN_OPERATION_ACTION=$Action
 $script:stepClock=$null
+function Save-ConfigurationStamp($Record) {
+ $Record.network_tested=$false
+ $Record.configuration_id=[Guid]::NewGuid().ToString('N')
+ $Record.configuration_time=(Get-Date).ToString('o')
+ $appliedRecord=Join-Path $local 'configuration-applied.json'
+ [ordered]@{configuration_id=$Record.configuration_id;configuration_time=$Record.configuration_time} |
+  ConvertTo-Json | Set-Content -LiteralPath ($appliedRecord+'.new') -Encoding UTF8
+ Move-Item -LiteralPath ($appliedRecord+'.new') -Destination $appliedRecord -Force
+}
 function Complete-StepTiming([string]$Status){
  if(!$script:stepClock){return}
  $script:stepClock.Stop()
@@ -253,6 +262,7 @@ if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principa
   if($Node){$arguments+=@('-Node',('"'+$Node+'"'))};if($Subscription){$arguments+=@('-Subscription',('"'+$Subscription+'"'))}
   if($ChainSpecPath){$arguments+=@('-ChainSpecPath',('"'+$ChainSpecPath+'"'))}
   if($Snapshot){$arguments+=@('-Snapshot',('"'+$Snapshot+'"'))}
+  if($RecoveryId){$arguments+=@('-RecoveryId',$RecoveryId)}
   if($Acknowledged){$arguments+='-Acknowledged'};if($NoPause){$arguments+='-NoPause'}
   if($Python){$arguments+=@('-Python',('"'+$Python+'"'))}
   if($eventsPath){$arguments+=@('-EventsFile',('"'+$eventsPath+'"'))}
@@ -296,6 +306,14 @@ $activeJob=Join-Path $local 'reconfigure-active.json'
 if((Test-Path -LiteralPath $activeJob) -and $Action -ne 'restore'){
  $owner=(Get-Content -LiteralPath $activeJob -Raw -Encoding UTF8 | ConvertFrom-Json).id
  if(!$env:CCN_RECONFIGURE_JOB -or $env:CCN_RECONFIGURE_JOB -cne $owner){throw '安全重新配置或网络恢复仍在执行，请等待本机看护完成，不要同时开始其他操作。'}
+}
+if($Action -eq 'drill-recover'){
+ if(!$Acknowledged -or !$RecoveryId){throw '缺少演练恢复确认。'}
+ Write-GuiEvent 'start' ([ordered]@{action=$Action})
+ & $python (Join-Path $PSScriptRoot 'drill_recovery.py') --retry $RecoveryId
+ if($LASTEXITCODE -ne 0){throw '演练恢复未完成，请查看本次任务日志和恢复记录。'}
+ Write-GuiEvent 'done' ([ordered]@{message='已恢复本次演练。'})
+ return
 }
 # The same byte-range lock is used by the Python scheduled updater.
 $operationStream=[IO.File]::Open((Join-Path $local 'operation.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite)
@@ -382,6 +400,7 @@ if($Action -eq 'supplement'){
   & $python (Join-Path $PSScriptRoot 'client.py') seal
   if($LASTEXITCODE -ne 0){throw '补充恢复记录封存失败，未补充设置。'}
   & (Join-Path $PSScriptRoot 'system.ps1') -Action supplement -Python $python -TimeZoneId $supplementRegion.timezone_id -RegionCode $supplementRegion.region -CultureName $supplementRegion.culture
+  Save-ConfigurationStamp $result
   $result.success=$true
   $result.snapshot=$snapshotPath
   Write-Done ('已配置。恢复时请在「快照与恢复」选择快照：'+(Split-Path -Leaf $snapshotPath))
@@ -562,9 +581,7 @@ try {
    & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from client import api,root_path,load,LOCAL,GROUP;from config_health import assert_live;p=load(LOCAL/''plan.json'');r=root_path(p[''root'']);assert_live(api(r,''GET'',''/configs''),api(r,''GET'',''/rules''));g=api(r,''GET'',''/proxies'')[''proxies''][GROUP];assert g[''all'']==[p[''node'']] and g[''now'']==p[''node''];__import__(''managed_chain'').assert_live(p,api(r,''GET'',''/proxies'')) if p.get(''chain'') else None' $PSScriptRoot
    if($LASTEXITCODE -ne 0){throw '本机内核配置写入确认未通过。'}
    $result.configuration_verified=$true
-   $result.network_tested=$false
-   $result.configuration_id=[Guid]::NewGuid().ToString('N')
-   $result.configuration_time=(Get-Date).ToString('o')
+   Save-ConfigurationStamp $result
    $result.node=$Node;$result.region=$Region;$result.snapshot=(Split-Path -Leaf $env:CCN_SNAPSHOT)
    Set-Content -LiteralPath (Join-Path $local ($watchToken+'.commit')) -Value 'Configured'
   } finally {$guardMutex.ReleaseMutex();$guardMutex.Dispose()}
@@ -636,6 +653,7 @@ try {
   }
  }
  if($Action -eq 'restore' -and $result.status -eq 'partial'){throw '该快照缺少系统恢复记录，已处理现有客户端记录，但无法完成系统恢复。'}
+ if($Action -eq 'restore'){Save-ConfigurationStamp $result}
  $result.success=$true
  if($Action -eq 'apply'){
   $extensionNote=''
@@ -713,7 +731,9 @@ if(!$result.success){exit 1}
  $startupError=$_
  Complete-StepTiming 'failed'
  Write-GuiEvent 'error' ([ordered]@{message=$startupError.Exception.Message})
- [ordered]@{success=$false;action=$Action;status='failed';error=$startupError.Exception.Message} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
+ if($Action -ne 'drill-recover'){
+  [ordered]@{success=$false;action=$Action;status='failed';error=$startupError.Exception.Message} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
+ }
  $_ | Format-List * -Force | Out-String | Set-Content -LiteralPath (Join-Path $local 'last-error.log') -Encoding UTF8
  Write-Host ('操作未完成：'+$_.Exception.Message) -ForegroundColor Red
  Write-Host '详情见 .local/last-error.log。请保留 .local 中的快照和恢复记录；不要删除记录或用当前状态覆盖首次基线。'

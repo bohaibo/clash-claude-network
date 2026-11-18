@@ -12,13 +12,23 @@ def save_report(report,stage):
         raise ValueError('Unknown verification stage')
     run_id=os.environ.get('CCN_VERIFY_RUN') or uuid.uuid4().hex
     if not re.fullmatch(r'[a-f0-9]{32}',run_id):raise ValueError('Invalid verification run ID')
-    from config_health import source_digest
-    report=dict(report,evidence_kind=report.get('evidence_kind','network-test'),source_digest=source_digest(),run_id=run_id,stage=stage,time=datetime.datetime.now().astimezone().isoformat())
+    from config_health import source_digest,configuration_revision
+    revision = configuration_revision(LOCAL)
+    expected_revision = report.get('configuration_revision', revision)
+    if revision != expected_revision:
+        report = dict(report, success=False, failed_check='configuration_changed',
+                      error='验收期间配置或规则已变化，请重新验收。')
+        revision = None
+    report=dict(report,configuration_revision=revision,evidence_kind=report.get('evidence_kind','network-test'),source_digest=source_digest(),run_id=run_id,stage=stage,time=datetime.datetime.now().astimezone().isoformat())
     folder=LOCAL/'verification-runs'/run_id
     write(folder/(stage+'.json'),report)
     # Read this run's stage files, never combine evidence from an earlier run.
     stages={path.stem:json.loads(path.read_text(encoding='utf-8')) for path in folder.glob('*.json')}
     base=stages.get('post-recovery',stages.get('connectivity',report))
     summary=dict(base,time=report['time'],coverage=coverage_for(stages),stages=stages,success=all(value.get('success') is True for value in stages.values()))
+    revisions={value.get('configuration_revision') for value in stages.values()}
+    if len(revisions)!=1:
+        summary['configuration_revision']=None
+        summary['success']=False
     write(LOCAL/'verification.json',summary)
     return report

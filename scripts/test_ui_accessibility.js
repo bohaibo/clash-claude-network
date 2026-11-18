@@ -73,7 +73,7 @@ async function main() {
   state.verification.coverage='full-network';
   app.updateChrome();
   assert(shell.document.getElementById('side-status').textContent.includes('验收通过'));
-  for(const [coverage,label] of [['partial','部分阶段检查通过'],['connectivity','连通性检查通过'],['legacy','范围待核对'],['full-network','完整网络验收通过']]){
+  for(const [coverage,label] of [['partial','部分阶段通过'],['connectivity','连通性检查通过'],['legacy','范围待核对'],['full-network','完整网络验收通过']]){
     state.verification.coverage=coverage;app.updateChrome();
     assert(shell.document.getElementById('side-status').textContent.includes(label));
     assert(shell.document.getElementById('top-chips').textContent.includes(label));
@@ -86,10 +86,17 @@ async function main() {
   }
   state.operation={};
   const originalRun = state.last_run;
+  const originalConfigurationTime = state.configuration_time;
   state.last_run = {success:true, action:'snapshot'};
+  state.configuration_time = originalRun.configuration_time;
+  state.verification.configuration_matches_current = true;
   app.updateChrome();
-  assert(!shell.document.getElementById('top-chips').querySelector('.badge-ok'), 'a later snapshot must not let old acceptance become current evidence');
-  assert(shell.document.getElementById('side-status').textContent.includes('仅有历史验收记录'));
+  assert(shell.document.getElementById('top-chips').querySelector('.badge-ok'), 'snapshot does not change the tested configuration');
+  state.verification.configuration_matches_current = false;
+  app.updateChrome();
+  assert(!shell.document.getElementById('top-chips').querySelector('.badge-ok'), 'changed rules cannot reuse current acceptance');
+  state.configuration_time = originalConfigurationTime;
+  delete state.verification.configuration_matches_current;
   state.last_run = originalRun;
   state.operation.pending_rule_update = true;
   app.updateChrome();
@@ -154,6 +161,13 @@ async function main() {
   assert(recoveryGrid.querySelector('.status-dot').className.includes('bad'));
   picker.renderChoices(ctx);
   let list = overview.document.root.querySelector('.node-list');
+  const toolbar = overview.document.root.querySelector('.choice-toolbar');
+  const search = toolbar.querySelector('input');
+  search.handlers.input({target:{value:'Node B'}});
+  assert.equal(list.children.length, 1);
+  assert(toolbar.textContent.includes('1 / 3 个节点'));
+  search.handlers.input({target:{value:''}});
+  assert(toolbar.textContent.includes('3 / 3 个节点'));
   assert.equal(list.getAttribute('role'), 'radiogroup');
   assert.equal(list.getAttribute('aria-label'), '选择精确节点');
   list.scrollTop = 44;
@@ -263,6 +277,40 @@ async function main() {
   }
   const recoveryLog=logPage.context.probe.render({state:{operation:{pending_tun:[{id:'b'.repeat(32),status:'failed'}]}}});
   assert(recoveryLog.textContent.includes('已报告恢复失败'));
+  assert(byText(recoveryLog,'重试本次恢复'));
+  const pendingDrill=logPage.context.probe.render({state:{operation:{pending_tun:[{id:'b'.repeat(32),status:'pending'}]}}});
+  assert(!byText(pendingDrill,'重试本次恢复'));
+  assert(logHost.scrolledIntoView);
+
+  const chain = environment('gui/js/pages/overview.js');
+  chain.context.host = chain.document.root;
+  chain.context.fixture = {subscriptions:[
+    {uid:'front',name:'Front',nodes:['First HK','First JP']},
+    {uid:'exit',name:'Exit',nodes:['Second SG','Second US']}]};
+  chain.expose("choicesHost=host;nodesState.data=fixture;renderImpact=()=>{};Object.assign(form,{mode:'chain',frontSubscription:'front',frontNode:'First HK',subscription:'exit',node:'Second SG'});globalThis.draw=renderChoices;");
+  chain.context.draw({state:{capabilities:{managed_chain:true}},busy:false});
+  const firstHopSearch=chain.document.root.querySelector('[aria-label="搜索前置（第一跳）节点"]');
+  const secondHopSearch=chain.document.root.querySelector('[aria-label="搜索后置 / 最终出口（第二跳）节点"]');
+  firstHopSearch.handlers.input({target:{value:'JP'}});
+  secondHopSearch.handlers.input({target:{value:'SG'}});
+  const entrySelect=chain.document.root.querySelector('[aria-label="前置（第一跳）节点"]');
+  const exitSelect=chain.document.root.querySelector('[aria-label="后置 / 最终出口（第二跳）节点"]');
+  assert.equal(entrySelect.value,'First HK');
+  assert(entrySelect.textContent.includes('First JP'));
+  assert(!exitSelect.textContent.includes('Second US'));
+  assert.equal(exitSelect.value,'Second SG');
+
+  const networkPage=environment('gui/js/pages/network.js');
+  networkPage.expose('globalThis.card=verificationCard;');
+  for(const [coverage,label,green] of [['partial','部分阶段通过',false],['legacy','旧版记录，范围待核对',false],
+      ['connectivity','连通性检查通过',true],['full-network','完整网络验收通过',true]]) {
+    const sample={last_run:{configuration_time:'2026-01-02T00:00:00Z'},verification:{
+      available:true,success:true,coverage,time:'2026-01-01T00:00:00Z',source_matches_current:true}};
+    const rendered=networkPage.context.card({state:sample});
+    assert(rendered.textContent.includes(label));
+    assert(rendered.textContent.includes('早于本次配置'));
+    assert.equal(Boolean(rendered.querySelector('.badge-ok')),green);
+  }
   assert(recoveryLog.textContent.includes('.local/tun-drills/'+'b'.repeat(32)));
   console.log('Offline UI checks passed: API evidence, historical results, global recovery, blocked actions, node focus/radio keys and associated labels');
 }

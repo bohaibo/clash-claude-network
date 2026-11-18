@@ -25,6 +25,7 @@ const ACTION_LABELS = {
   snapshot: '保存快照',
   reconfigure: '恢复最早状态并重新配置',
   update: '更新分流规则',
+  'drill-recover': '恢复故障演练',
   'update-recover': '恢复上次规则更新',
   verify: '检查连通性',
   audit: '完整防火墙复核与故障演练',
@@ -136,13 +137,13 @@ function updateChrome() {
   const verification = data.verification || {};
   const hasVerification = Boolean(verification.available);
   const awaitingVerification = data.last_run?.network_tested === false &&
-    (!hasVerification || (Date.parse(verification.time) || 0) < (Date.parse(data.last_run.configuration_time) || Infinity));
+    (!hasVerification || (Date.parse(verification.time) || 0) < (ui.configurationTime(data) || Infinity));
   const verified = hasVerification && verification.success && !verification.dns_failed;
   const verifiedAt = verification.time ? new Date(verification.time).getTime() : 0;
-  const configurationAt = Date.parse(data.last_run?.configuration_time);
+  const configurationAt = ui.configurationTime(data);
   const verificationAge = verifiedAt ? (Date.now() - verifiedAt) / 3600000 : Infinity;
-  const verifiedFresh = verified && Number.isFinite(configurationAt) && verifiedAt >= configurationAt &&
-    !awaitingVerification && verification.source_matches_current !== false && verificationAge >= 0 && verificationAge <= 24;
+  const verifiedFresh = verified && (Number.isFinite(configurationAt) ? verifiedAt >= configurationAt : verification.configuration_matches_current === true) &&
+    !awaitingVerification && ui.verificationMatches(data) && verificationAge >= 0 && verificationAge <= 24;
   const lastRun = data.last_run || {};
   const lastRunFailed = lastRun.success === false && Boolean(lastRun.action);
   const recovery = ui.recoveryLabel(data.operation);
@@ -313,8 +314,10 @@ function navigate(page, options = {}) {
   const hash = '#/' + page;
   if (location.hash !== hash) history.replaceState(null, '', hash);
   renderPage();
-  document.getElementById('content')?.focus({ preventScroll: true });
-  window.scrollTo({ top: 0, behavior: 'instant' });
+  if (!options.log) {
+    document.getElementById('content')?.focus({ preventScroll: true });
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }
 }
 
 function refresh(force = false) {
@@ -359,6 +362,8 @@ function refreshPage() {
     }
     replacement.replaceWith(node);
   }
+  const log = document.getElementById('log-inline');
+  if (log?.dataset?.activeLog) markActiveLog(log);
   if (active?.isConnected) active.focus({ preventScroll: true });
   window.scrollTo(0, scroll);
 }
@@ -409,15 +414,15 @@ async function loadNodes(force = false) {
 }
 
 async function startJob(payload) {
-  if (app.data?.operation?.pending_tun?.length) {
-    ui.toast('TUN 恢复尚未确认，请到日志与验证查看恢复记录。', 'warn');
+  if (app.data?.operation?.pending_tun?.length && payload.action !== 'drill-recover') {
+    ui.toast('故障演练恢复尚未确认，请到日志与验证查看恢复记录。', 'warn');
     return;
   }
-  if (app.data?.operation?.settings_pending?.length && !['settings-recover', 'update-recover'].includes(payload.action)) {
+  if (app.data?.operation?.settings_pending?.length && !['settings-recover', 'update-recover', 'drill-recover'].includes(payload.action)) {
     ui.toast('请先到快照与恢复页面恢复原设置。', 'warn');
     return;
   }
-  if (app.data?.operation?.pending_rule_update && payload.action !== 'update-recover') {
+  if (app.data?.operation?.pending_rule_update && !['update-recover', 'drill-recover'].includes(payload.action)) {
     ui.toast('请先到规则更新页恢复上次更新。', 'warn');
     return;
   }
@@ -629,6 +634,12 @@ function showLog(name) {
   }
 }
 
+function markActiveLog(host) {
+  document.getElementById('content')?.querySelectorAll('.log-row').forEach(row => {
+    row.setAttribute('aria-pressed', String(row.getAttribute('data-log-name') === host.dataset.activeLog));
+  });
+}
+
 async function openLogInline(name) {
   const requestRevision = ++logRequestRevision;
   const host = document.getElementById('log-inline');
@@ -636,7 +647,11 @@ async function openLogInline(name) {
     app.pendingLog = name;
     return;
   }
-  host.replaceChildren(h('div', { class: 'loading-inline' }, h('span', { class: 'spinner' }), '正在读取日志…'));
+  host.dataset.activeLog = name;
+  markActiveLog(host);
+  host.replaceChildren(h('div', { class: 'loading-inline', role: 'status' }, h('span', { class: 'spinner' }), '正在读取日志…'));
+  host.focus({preventScroll: true});
+  host.scrollIntoView({block: 'nearest'});
   try {
     const value = await api.getLog(name);
     if (requestRevision !== logRequestRevision || !host.isConnected) return;

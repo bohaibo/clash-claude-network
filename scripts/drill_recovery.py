@@ -13,6 +13,7 @@ import uuid
 
 from checks import require
 from client import LOCAL, root_path, write
+from operation_lock import drill_worker_lock
 
 KINDS = ('node-outage', 'core-exit')
 
@@ -21,12 +22,12 @@ class DrillRecoveryError(RuntimeError):
     pass
 
 
-def spawn_worker(folder):
+def spawn_worker(folder, script=__file__):
     # The short launcher exits before the drill is armed. The detached worker
     # can therefore outlive termination of the operation's process tree.
     with (folder / 'watchdog.log').open('ab') as output:
         subprocess.Popen(
-            [sys.executable, __file__, '--watch', folder.name],
+            [sys.executable, script, '--watch', folder.name],
             stdin=subprocess.DEVNULL, stdout=output, stderr=output,
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
@@ -150,16 +151,69 @@ def watch(folder):
         kernel.CloseHandle(parent)
 
 
+@contextmanager
+def supervised_worker(folder):
+    with drill_worker_lock(folder):
+        write(folder/'worker.json', {'pid': os.getpid()})
+        yield
+
+
+def retry_recovery(folder):
+    from operation_lock import pending_tun
+
+    failed = next((row for row in pending_tun(LOCAL)
+                   if row['id'] == folder.name and row.get('retryable', row['status'] == 'failed')), None)
+    expected = LOCAL.resolve() / 'tun-drills' / folder.name
+    require(failed and folder.resolve() == expected, 'No failed recovery is available')
+    record = json.loads((folder / 'guard.json').read_text(encoding='utf-8'))
+    root = root_path(record['root'])
+    plan = json.loads((LOCAL / 'plan.json').read_text(encoding='utf-8'))
+    require(root == root_path(plan['root']), 'The current client no longer matches this recovery')
+    try:
+        if failed.get('kind') in KINDS:
+            backup = (folder / 'runtime.before').read_bytes()
+            require(hashlib.sha256(backup).hexdigest() == record['sha256'],
+                    'Invalid outage recovery backup')
+            original = backup.decode('utf-8')
+            require((root / 'clash-verge.yaml').read_text(encoding='utf-8') == original,
+                    'Client configuration changed after the drill')
+            restore_runtime(root, failed['kind'], original)
+        else:
+            require('kind' not in record and record.get('timeout') == 60,
+                    'Invalid TUN recovery record')
+            from config_health import active_configuration
+            require(active_configuration(root) == record.get('configuration'),
+                    'Active subscription or runtime configuration changed after the drill')
+            from verify_tun import restore_tun
+            restore_tun(root)
+    except Exception as exc:
+        write(folder / 'recovery.json', {'success': False, 'manual': True, 'error': type(exc).__name__})
+        raise
+    write(folder / 'recovery.json', {'success': True, 'manual': True})
+    (folder / 'done').touch()
+    for name in ('runtime.before', 'runtime.drill'):
+        try:
+            (folder / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--spawn')
     mode.add_argument('--watch')
+    mode.add_argument('--retry')
     args = parser.parse_args()
-    token = args.spawn or args.watch
+    token = args.spawn or args.watch or args.retry
     require(re.fullmatch(r'[a-f0-9]{32}', token), 'Invalid outage watchdog ID')
     folder = LOCAL / 'tun-drills' / token
     if args.spawn:
         spawn_worker(folder)
+    elif args.retry:
+        from operation_lock import operation_lock
+        with operation_lock(LOCAL, drill_recovery=True):
+            retry_recovery(folder)
     else:
-        watch(folder)
+        with supervised_worker(folder):
+            watch(folder)

@@ -214,8 +214,37 @@ export function statusTone(value) {
 }
 
 export function verificationLabel(verification = {}) {
-  const scope = { 'full-network': '完整网络验收', connectivity: '连通性检查', partial: '部分阶段检查' }[verification.coverage] || '旧版检查（范围待核对）';
-  return scope + (verification.success ? '通过' : '未通过');
+  const scope = { 'full-network': '完整网络验收', connectivity: '连通性检查', partial: '部分阶段检查' }[verification.coverage];
+  if (!scope) return '旧版记录，范围待核对';
+  return verification.success && !verification.dns_failed && verification.coverage === 'partial'
+    ? '部分阶段通过'
+    : scope + (verification.success && !verification.dns_failed ? '通过' : '未通过');
+}
+
+export function verificationTone(verification = {}) {
+  if (!verification.available) return 'neutral';
+  if (!verification.success || verification.dns_failed) return 'bad';
+  return ['full-network', 'connectivity'].includes(verification.coverage) ? 'ok' : 'warn';
+}
+
+export function configurationTime(state) {
+  return Date.parse(state.configuration_time ?? state.last_run?.configuration_time);
+}
+
+export function verificationMatches(state) {
+  const verification = state.verification || {};
+  return verification.configuration_matches_current === true ||
+    (!Object.hasOwn(verification, 'configuration_matches_current') && verification.source_matches_current === true);
+}
+
+export function verificationRelation(state) {
+  if (state.verification?.configuration_matches_current === false) return '与当前配置不匹配';
+  const configuredAt = configurationTime(state);
+  const verifiedAt = Date.parse(state.verification?.time);
+  if (Number.isFinite(configuredAt) && Number.isFinite(verifiedAt) && verifiedAt < configuredAt) return '早于本次配置';
+  return verificationMatches(state) && Number.isFinite(verifiedAt) &&
+    (Number.isFinite(configuredAt) || state.verification?.configuration_matches_current === true)
+    ? '对应当前配置' : '与当前配置的关联待核对';
 }
 
 export function recoveryLabel(operation = {}) {

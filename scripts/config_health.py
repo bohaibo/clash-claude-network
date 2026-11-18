@@ -1,7 +1,9 @@
 """Read-only, credential-free configuration drift checks. No network I/O."""
 import hashlib
+import json
 from pathlib import Path
 import region_profile
+import yaml
 
 PROJECT = Path(__file__).resolve().parent.parent
 GROUP = 'Claude-Overseas-Pinned'
@@ -12,6 +14,30 @@ def source_digest(project=PROJECT):
     for name in ('assets/secure-main.js', 'assets/claude-policy.json', 'scripts/client.py', 'scripts/safe_yaml.py', 'scripts/managed_chain.py', 'scripts/chain_profile.py'):
         digest.update((project / name).read_bytes())
     return digest.hexdigest()
+
+
+def active_configuration(root):
+    from safe_yaml import loads
+
+    profiles = (root / 'profiles.yaml').read_bytes()
+    uid = loads(profiles.decode('utf-8-sig'))['current']
+    if not isinstance(uid, str) or not uid:
+        raise ValueError('Active subscription could not be identified')
+    runtime = (root / 'clash-verge.yaml').read_bytes()
+    if profiles != (root / 'profiles.yaml').read_bytes():
+        raise ValueError('Active subscription changed while reading configuration')
+    return {'subscription': uid, 'runtime_sha256': hashlib.sha256(runtime).hexdigest()}
+
+
+def configuration_revision(local):
+    try:
+        plan = json.loads((local/'plan.json').read_text(encoding='utf-8-sig'))
+        identity = active_configuration(Path(plan['root']))
+        applied = local/'configuration-applied.json'
+        identity['apply'] = applied.read_text(encoding='utf-8-sig') if applied.is_file() else ''
+        return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):
+        return None
 
 
 def inspect(config, current, plan):

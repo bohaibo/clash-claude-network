@@ -42,6 +42,36 @@ class GuiServer(unittest.TestCase):
         self.app.stop()
         self.thread.join(timeout=8)
 
+    def test_drill_retry_uses_only_a_confirmed_failed_record(self):
+        identifier = 'c' * 32
+        payload = {'action': 'drill-recover', 'recovery': identifier, 'confirm': 'RECOVER-DRILL'}
+        with patch.object(gui_server, 'pending_tun', return_value=[{'id': identifier, 'status': 'pending'}]):
+            with self.assertRaises(gui_server.ApiError):
+                self.app._validate_job(payload)
+        with patch.object(gui_server, 'pending_tun', return_value=[{'id': identifier, 'status': 'failed'}]):
+            action, params = self.app._validate_job(payload)
+            args, _ = self.app._job_command(action, params, self.local)
+        self.assertEqual(args[args.index('-RecoveryId') + 1], identifier)
+        self.assertIn('-Acknowledged', args)
+
+    def test_verification_revision_survives_snapshot_but_detects_rule_change(self):
+        from config_health import configuration_revision
+        from verification_reports import save_report
+        root = self.local / 'client'
+        root.mkdir()
+        client.write(root / 'profiles.yaml', {'current': 'one'})
+        client.write(root / 'clash-verge.yaml', {'rules': ['first']})
+        client.write(self.local / 'plan.json', {'root': str(root)})
+        client.write(self.local / 'configuration-applied.json', {'configuration_time': '2026-01-01T00:00:00Z'})
+        with patch('verification_reports.LOCAL', self.local):
+            save_report({'success': True}, 'connectivity')
+        before = configuration_revision(self.local)
+        client.write(self.local / 'last-run.json', {'action': 'snapshot', 'success': True})
+        self.assertEqual(configuration_revision(self.local), before)
+        self.assertTrue(self.app.verification_summary()['configuration_matches_current'])
+        client.write(root / 'clash-verge.yaml', {'rules': ['second']})
+        self.assertFalse(self.app.verification_summary()['configuration_matches_current'])
+
     def test_second_instance_reuses_the_bound_server(self):
         another = gui_server.App(local=self.local, gui_dir=self.gui, open_browser=False, idle_exit=False)
         with patch.object(gui_window, 'launch') as launch:

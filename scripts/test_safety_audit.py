@@ -100,11 +100,11 @@ class SafetyAudit(unittest.TestCase):
    self.assertFalse(audit.run_audit()['success'])
   network.assert_not_called();drill.assert_not_called();core.assert_not_called()
  def test_failed_tun_drill_still_rechecks_ipv6_bindings(self):
-  with patch.object(audit,'verify_firewall',return_value={'success':True}),patch.object(audit,'verify'),patch.object(audit,'verify_tun',return_value={'success':False}),patch.object(audit,'verify_core_exit') as core,patch.object(audit,'recheck_ipv6') as recovery:
+  with patch.object(audit,'verify_firewall',return_value={'success':True}),patch.object(audit,'verify',return_value={'success':True}),patch.object(audit,'verify_tun',return_value={'success':False}),patch.object(audit,'verify_core_exit') as core,patch.object(audit,'recheck_ipv6') as recovery:
    self.assertFalse(audit.run_audit()['success'])
   recovery.assert_called_once();core.assert_not_called()
  def test_ipv6_recovery_failure_marks_current_verification_failed(self):
-  with patch.object(audit,'verify_firewall',return_value={'success':True}),patch.object(audit,'verify'),patch.object(audit,'verify_tun',return_value={'success':True}),patch.object(audit,'verify_core_exit',return_value={'success':True}),patch.object(audit,'recheck_ipv6',side_effect=OSError('fixture')):
+  with patch.object(audit,'verify_firewall',return_value={'success':True}),patch.object(audit,'verify',return_value={'success':True}),patch.object(audit,'verify_tun',return_value={'success':True}),patch.object(audit,'verify_core_exit',return_value={'success':True}),patch.object(audit,'recheck_ipv6',side_effect=OSError('fixture')):
    self.assertFalse(audit.run_audit()['success'])
   report=client.load(self.local/'verification.json')
   self.assertFalse(report['success']);self.assertEqual(report['failed_check'],'ipv6_bindings')
@@ -180,6 +180,54 @@ class OutageGuard(unittest.TestCase):
    drill_recovery.run_guard(self.folder,self.record,lambda:True)
   self.assertEqual(pending_tun(self.local),[{'id':self.folder.name,'kind':'core-exit','status':'failed'}])
   self.assertTrue((self.folder/'runtime.before').is_file())
+ def test_manual_retry_validates_original_and_clears_failed_marker(self):
+  for name in ('ready','armed'):(self.folder/name).touch()
+  client.write(self.local/'plan.json',{'root':str(self.local)})
+  client.write(self.folder/'recovery.json',{'success':False})
+  runtime=self.local/'clash-verge.yaml'
+  runtime.write_text('edited')
+  with patch.object(drill_recovery,'LOCAL',self.local):
+   with self.assertRaisesRegex(AssertionError,'changed after the drill'):
+    drill_recovery.retry_recovery(self.folder)
+   self.restore.assert_not_called()
+   self.assertTrue(pending_tun(self.local))
+   runtime.write_text('original')
+   drill_recovery.retry_recovery(self.folder)
+  self.restore.assert_called_once_with(self.local,'core-exit','original')
+  self.assertEqual(pending_tun(self.local),[])
+ def test_interrupted_worker_unlocks_retry_without_failure_record(self):
+  for name in ('ready','armed'):(self.folder/name).touch()
+  client.write(self.local/'plan.json',{'root':str(self.local)})
+  (self.local/'clash-verge.yaml').write_text('original')
+  with patch.object(drill_recovery,'LOCAL',self.local):
+   with drill_recovery.supervised_worker(self.folder):
+    self.assertEqual(pending_tun(self.local)[0]['status'],'pending')
+    with self.assertRaises(AssertionError):drill_recovery.retry_recovery(self.folder)
+   self.assertEqual(pending_tun(self.local)[0]['status'],'interrupted')
+   drill_recovery.retry_recovery(self.folder)
+  self.restore.assert_called_once()
+ def test_tun_retry_matches_subscription_and_runtime(self):
+  from config_health import active_configuration
+  (self.folder/'ready').touch()
+  client.write(self.local/'plan.json',{'root':str(self.local)})
+  client.write(self.local/'profiles.yaml',{'current':'original'})
+  runtime=self.local/'clash-verge.yaml'
+  runtime.write_text('tun: {enable: true}')
+  client.write(self.folder/'guard.json',{'root':str(self.local),'timeout':60,
+                                       'configuration':active_configuration(self.local)})
+  client.write(self.folder/'recovery.json',{'success':False})
+  with patch.object(drill_recovery,'LOCAL',self.local),patch.object(tun,'restore_tun') as restore:
+   client.write(self.local/'profiles.yaml',{'current':'other'})
+   with self.assertRaisesRegex(AssertionError,'changed after the drill'):
+    drill_recovery.retry_recovery(self.folder)
+   client.write(self.local/'profiles.yaml',{'current':'original'})
+   runtime.write_text('tun: {enable: false}')
+   with self.assertRaisesRegex(AssertionError,'changed after the drill'):
+    drill_recovery.retry_recovery(self.folder)
+   restore.assert_not_called()
+   runtime.write_text('tun: {enable: true}')
+   drill_recovery.retry_recovery(self.folder)
+   restore.assert_called_once_with(self.local)
  def test_worker_does_not_touch_runtime_before_arming(self):
   drill_recovery.run_guard(self.folder,self.record,lambda:False)
   self.apply.assert_not_called()

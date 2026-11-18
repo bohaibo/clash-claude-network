@@ -51,6 +51,7 @@ SNAPSHOT_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$')
 REGION_RE = re.compile(r'^[A-Z]{2}$')
 TIME_RE = re.compile(r'^(?:[01]\d|2[0-3]):[0-5]\d$')
 CONFIRM = {
+    'drill-recover': 'RECOVER-DRILL',
     'apply': 'APPLY',
     'supplement': 'SUPPLEMENT',
     'snapshot': 'SNAPSHOT',
@@ -60,8 +61,8 @@ CONFIRM = {
     'verify': 'VERIFY',
     'audit': 'AUDIT',
 }
-ADMIN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure', 'audit'}
-RUN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure', 'audit'}
+ADMIN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure', 'audit', 'drill-recover'}
+RUN_ACTIONS = ADMIN_ACTIONS
 LOCAL_ACTIONS = {'settings-recover': None}
 PUBLIC_FILES = {'favicon.svg'}
 MIME = {
@@ -583,11 +584,14 @@ class App:
             checks.append({'title': title, 'status': status or 'unknown'})
         udp = report.get('udp_egress') if isinstance(report.get('udp_egress'), dict) else {}
         checks.append({'title': 'UDP 出口与节点路由', 'status': 'passed' if udp.get('verified') else 'failed' if udp else 'unknown'})
-        from config_health import source_digest
+        from config_health import source_digest, configuration_revision
+        tested_revision = report.get('configuration_revision')
+        current_revision = configuration_revision(self.local) if tested_revision else None
         from verification_reports import coverage_for
         return {
             'available': True,
             'source_matches_current': report.get('source_digest') == source_digest(),
+            'configuration_matches_current': tested_revision == current_revision if current_revision else None,
             'coverage': coverage_for(stages) if stages else 'legacy',
             'evidence_kind': 'historical-network-test',
             'current_verified': False,
@@ -776,7 +780,10 @@ class App:
         last_run = read_json(self.local / 'last-run.json', {})
         if not isinstance(last_run, dict):
             last_run = {}
+        applied = read_json(self.local / 'configuration-applied.json', {})
+        applied_at = applied.get('configuration_time') if isinstance(applied, dict) else ''
         return {
+            'configuration_time': str(applied_at or last_run.get('configuration_time') or '')[:80] if configured else '',
             'preview': self.background_value('preview', self.configuration_preview,
                 {'current': {}, 'regions': region_profile.PROFILES, 'read_at': ''}),
             'capabilities': {'managed_chain': True},
@@ -1051,6 +1058,13 @@ class App:
             raise ApiError(400, '不支持的本地操作。')
         if action not in RUN_ACTIONS | {'update', 'update-recover', 'verify'}:
             raise ApiError(400, '不支持的操作。')
+        if action == 'drill-recover':
+            identifier = payload.get('recovery')
+            if not isinstance(identifier, str) or not JOB_ID_RE.fullmatch(identifier) or payload.get('confirm') != CONFIRM[action]:
+                raise ApiError(400, '演练恢复确认无效。')
+            if not any(row['id'] == identifier and row.get('retryable', row['status'] == 'failed') for row in pending_tun(self.local)):
+                raise ApiError(409, '该演练尚未报告恢复失败，或已恢复。')
+            return action, {'recovery': identifier}
         if action == 'update-recover':
             if payload.get('confirm') != CONFIRM[action]:
                 raise ApiError(400, '恢复确认信息不匹配；未执行操作。')
@@ -1108,9 +1122,9 @@ class App:
         with self._lock:
             if self.active_job or self._recovered_job() or self._settings_busy or self.stopping or self._shutdown_requested:
                 raise ApiError(409, '另一个操作正在进行，请等待完成。')
-            if payload.get('action') not in ('settings-recover', 'update-recover') and self.settings_transactions():
+            if payload.get('action') not in ('settings-recover', 'update-recover', 'drill-recover') and self.settings_transactions():
                 raise ApiError(409, '请先在快照与恢复页面恢复未完成的设置保存。')
-            if (self.local / 'rule-update-pending.json').exists() and payload.get('action') not in ('update', 'update-recover'):
+            if (self.local / 'rule-update-pending.json').exists() and payload.get('action') not in ('update', 'update-recover', 'drill-recover'):
                 raise ApiError(409, '请先在规则更新页面恢复上次更新。')
             action, params = self._validate_job(payload)
             job_id = secrets.token_hex(16)
@@ -1162,7 +1176,9 @@ class App:
                     command += ['-ChainSpecPath',str(folder/'chain-selection.json')]
             elif action == 'restore':
                 command += ['-Snapshot', params['snapshot']]
-            if action in ('apply', 'supplement', 'restore', 'reconfigure', 'audit'):
+            elif action == 'drill-recover':
+                command += ['-RecoveryId', params['recovery']]
+            if action in ('apply', 'supplement', 'restore', 'reconfigure', 'audit', 'drill-recover'):
                 command.append('-Acknowledged')
             return command, events
         if action == 'update':
@@ -1613,9 +1629,17 @@ class App:
             raise ApiError(404, '安装包不存在，请重新导出。')
         return target, result['filename']
 
-    def reveal_local(self):
+    def reveal_local(self, recovery=None):
+        target = self.local.resolve()
+        if recovery is not None:
+            if not isinstance(recovery, str) or not JOB_ID_RE.fullmatch(recovery):
+                raise ApiError(400, '恢复记录编号无效。')
+            parent = (target / 'tun-drills').resolve()
+            target = (parent / recovery).resolve()
+            if parent != self.local.resolve() / 'tun-drills' or target.parent != parent or target.name != recovery or not target.is_dir():
+                raise ApiError(404, '找不到该恢复记录。')
         try:
-            subprocess.Popen(['explorer.exe', str(self.local.resolve())], creationflags=_no_window())
+            subprocess.Popen(['explorer.exe', str(target)], creationflags=_no_window())
             return {'opened': True, 'path': str(self.local.relative_to(self.project)) if self.local.is_relative_to(self.project) else '.local'}
         except OSError as exc:
             raise ApiError(500, '无法打开资源管理器。') from exc
@@ -2009,7 +2033,7 @@ def make_handler(app):
                 elif parsed.path == '/api/snapshot-delete':
                     self._json(app.delete_snapshot(payload))
                 elif parsed.path == '/api/reveal':
-                    self._json(app.reveal_local())
+                    self._json(app.reveal_local(payload.get('recovery')))
                 elif parsed.path == '/api/shutdown':
                     with app._lock:
                         active = app.active_job is not None or app._recovered_job() is not None or app._settings_busy

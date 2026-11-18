@@ -27,17 +27,20 @@ def run_audit():
  result={'success':False,'run_id':os.environ['CCN_VERIFY_RUN']}
  try:
   check_pending_tun(LOCAL)
+  from config_health import configuration_revision
+  initial_revision=configuration_revision(LOCAL)
   require(verify_firewall('firewall-before')['success'],'Full firewall preflight not verified; drills stopped')
   try:
-   verify(outage=True)
+   require(verify(outage=True)['success'],'Node outage verification did not pass')
    require(verify_tun()['success'],'TUN-off protection or recovery failed')
    require(verify_core_exit()['success'],'Core-exit protection or recovery failed')
   finally:
    try:recheck_ipv6()
    except Exception:
     save_report({'success':False,'failed_check':'ipv6_bindings'},'post-recovery');raise
-  verify(stage='post-recovery')
+  require(verify(stage='post-recovery')['success'],'Post-recovery verification did not pass')
   require(verify_firewall('firewall-after')['success'],'Final firewall audit not verified')
+  require(configuration_revision(LOCAL)==initial_revision,'Configuration changed during the audit')
   result['success']=True
  except Exception as exc:result['error']=type(exc).__name__
  write(LOCAL/'safety-audit-result.json',result)

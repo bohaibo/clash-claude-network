@@ -35,8 +35,10 @@ const form = {
   chainName: '',
   node: '',
   subscription: '',
-  region: 'SG',
+  region: '',
   search: '',
+  frontSearch: '',
+  exitSearch: '',
   acknowledged: false,
   initialized: false,
   regionAuto: null,
@@ -44,9 +46,9 @@ const form = {
 };
 const modeDrafts = { single: null, chain: null };
 const draftFields = ['node','subscription','region','regionAuto','regionManual','search',
-  'frontSubscription','frontNode','chainName'];
+  'frontSubscription','frontNode','chainName','frontSearch','exitSearch'];
 
-let nodesState = { loading: false, error: '', data: null };
+let nodesState = { loading: false, error: '', data: null, selectionNotice: '' };
 let subscriptionUid = '';
 let rootNode = null;
 let choicesHost = null;
@@ -59,11 +61,13 @@ export function render(ctx) {
   const state = ctx.state;
   const plan = state.plan || {};
   if (!form.initialized) {
-    form.region = plan.region || 'SG';
+    form.region = plan.node && plan.region || '';
+    form.regionManual = Boolean(form.region);
     form.subscription = plan.subscription || '';
     form.node = plan.node || '';
     if (plan.chain) {
       form.mode='chain';loadChainSelection(ctx,plan.chain);
+      if (plan.region) { form.region=plan.region;form.regionManual=true; }
     }
     form.initialized = true;
   }
@@ -97,12 +101,12 @@ function statusGrid(ctx) {
   const state = ctx.state;
   const verification = state.verification || {};
   const awaitingVerification = state.last_run?.network_tested === false &&
-    (!verification.available || (Date.parse(verification.time) || 0) < (Date.parse(state.last_run.configuration_time) || Infinity));
+    (!verification.available || (Date.parse(verification.time) || 0) < (ui.configurationTime(state) || Infinity));
   const verificationAge = (Date.now() - Date.parse(verification.time)) / 3600000;
-  const configurationAt = Date.parse(state.last_run?.configuration_time);
+  const configurationAt = ui.configurationTime(state);
   const verifiedFresh = verification.available && verification.success && !awaitingVerification &&
-    Number.isFinite(configurationAt) && Date.parse(verification.time) >= configurationAt &&
-    verification.source_matches_current !== false && verificationAge >= 0 && verificationAge <= 24;
+    (Number.isFinite(configurationAt) ? Date.parse(verification.time) >= configurationAt : verification.configuration_matches_current === true) &&
+    ui.verificationMatches(state) && verificationAge >= 0 && verificationAge <= 24;
   const update = state.update || {};
   const recovery = ui.recoveryLabel(state.operation);
   const scopedPass = ['full-network', 'connectivity'].includes(verification.coverage);
@@ -123,9 +127,9 @@ function statusGrid(ctx) {
     },
     {
       label: '上次验收',
-      value: verification.available ? '历史' + ui.verificationLabel(verification) : '待检查',
-      tone: verification.available ? (verification.success ? scopedPass ? 'ok' : 'warn' : 'bad') : 'neutral',
-      detail: verification.available ? ui.relativeTime(verification.time) : '在网络环境按需点击检查',
+      value: verification.available ? ui.verificationLabel(verification) : '待检查',
+      tone: ui.verificationTone(verification),
+      detail: verification.available ? ui.relativeTime(verification.time) + ' · ' + ui.verificationRelation(state) : '在网络环境按需点击检查',
       action: () => ctx.navigate('logs'),
     },
   ];
@@ -272,11 +276,24 @@ async function loadChoices(ctx) {
     const data = await ctx.loadNodes(true);
     nodesState.data = data;
     nodesState.error = '';
+    const previousSubscription=form.subscription;
+    const rows = (data.subscriptions || []).filter(row => !row.chain);
+    for (const draft of Object.values(modeDrafts)) {
+      if (draft) reconcileSubscriptions(draft, rows);
+    }
+    nodesState.selectionNotice = reconcileSubscriptions(form, rows) ? '原订阅已不可用，请重新选择订阅和节点。' : '';
+    const hasNode = (uid, node) => rows.some(row => row.uid === uid && row.nodes.includes(node));
+    if ((form.node && !hasNode(form.subscription, form.node)) ||
+        (form.mode === 'chain' && form.frontNode && !hasNode(form.frontSubscription, form.frontNode))) {
+      form.acknowledged = false;
+    }
     if (form.mode==='single') {
-      const singles=(data.subscriptions || []).filter(row=>!row.chain);
-      const planned=singles.find(row=>row.uid===data.plan_subscription);
-      if (!form.subscription) form.subscription=planned?.uid || singles.find(row=>row.uid===data.active_uid)?.uid || singles[0]?.uid || '';
-      if (!form.node && planned?.uid===form.subscription && planned.nodes.includes(data.plan_node)) form.node=data.plan_node;
+      const planned=rows.find(row=>row.uid===data.plan_subscription);
+      if (!form.subscription) form.subscription=planned?.uid || rows.find(row=>row.uid===data.active_uid)?.uid || rows[0]?.uid || '';
+      if (!previousSubscription && !form.node && planned && planned.uid===form.subscription && planned.nodes.includes(data.plan_node)) {
+        form.node=data.plan_node;
+        if (data.plan_region) { form.region=data.plan_region;form.regionManual=true; }
+      }
     }
     renderChoices(ctx);
   } catch (error) {
@@ -286,6 +303,28 @@ async function loadChoices(ctx) {
   } finally {
     nodesState.loading = false;
   }
+}
+
+function reconcileSubscriptions(draft, rows) {
+  let changed = false;
+  for (const [subscription, node] of [['subscription','node'], ['frontSubscription','frontNode']]) {
+    if (draft[subscription] && !rows.some(row => row.uid === draft[subscription])) {
+      draft[subscription]='';
+      draft[node]='';
+      draft.acknowledged=false;
+      changed=true;
+    }
+  }
+  if (!draft.subscription) {
+    draft.node='';
+    draft.regionAuto=null;
+    if (!draft.regionManual) draft.region='';
+  }
+  return changed;
+}
+
+function regionOptions() {
+  return [{value:'',label:'请选择出口地区'}, ...REGIONS.map(([value,label])=>({value,label}))];
 }
 
 function currentSubscription(ctx) {
@@ -308,7 +347,7 @@ function switchMode(ctx, value) {
   else if (value==='chain' && nodesState.data?.chain_defaults) loadChainSelection(ctx,nodesState.data.chain_defaults);
   else {
     form.node='';form.subscription='';form.frontSubscription='';form.frontNode='';form.chainName='';
-    form.region='SG';form.regionAuto=null;form.regionManual=false;form.search='';
+    form.region='';form.regionAuto=null;form.regionManual=false;form.search='';form.frontSearch='';form.exitSearch='';
   }
   renderChoices(ctx);
 }
@@ -317,6 +356,7 @@ function renderChoices(ctx) {
   if (!choicesHost) return;
   const data = nodesState.data;
   const subscriptions = (data?.subscriptions || []).filter(row=>!row.chain);
+  if (reconcileSubscriptions(form, subscriptions)) nodesState.selectionNotice='原订阅已不可用，请重新选择订阅和节点。';
   const mode = ui.field('配置方式', ui.select([
     {value:'single',label:'单一节点配置'},
     {value:'chain',label:'链式代理配置'},
@@ -330,7 +370,7 @@ function renderChoices(ctx) {
   }
   if (form.node && !form.regionAuto && !form.regionManual) applyRegionHint(ctx, form.node);
   if (!subscriptions.length) {
-    choicesHost.replaceChildren(ui.note('当前 Clash Verge 中没有可读取的远程订阅。请先在 Clash 更新订阅；本项目不会创建或猜测节点。', 'warn'));
+    choicesHost.replaceChildren(ui.note('当前没有可读取的远程订阅。请在 Clash Verge 导入或更新订阅，然后重新读取。', 'warn'), reloadButton(ctx));
     return;
   }
   const current = currentSubscription(ctx);
@@ -341,14 +381,13 @@ function renderChoices(ctx) {
   const nodeNames = current.nodes || [];
   const selectedInside = form.node && nodeNames.includes(form.node);
   const planNodeMissing = data?.plan_node && !(data.subscriptions || []).some((row) => row.nodes.includes(data.plan_node));
-  const filter = form.search.trim().toLowerCase();
-  const filtered = filter ? nodeNames.filter((name) => name.toLowerCase().includes(filter)) : nodeNames;
-
+  const count = ui.el('span', {class: 'muted', 'aria-live': 'polite'});
   const subSelect = ui.select(
     subscriptions.map((row) => ({ value: row.uid, label: row.name + '（' + row.nodes.length + ' 个节点）' })),
     form.subscription,
     (value) => {
       form.subscription = value;
+      nodesState.selectionNotice = '';
       if (!(currentSubscription(ctx)?.nodes || []).includes(form.node)) form.node = '';
       form.acknowledged = false;
       applyRegionHint(ctx, form.node);
@@ -361,7 +400,7 @@ function renderChoices(ctx) {
     type: 'search',
     placeholder: '搜索节点名称…',
     'aria-label': '搜索节点',
-    oninput: (event) => { form.search = event.target.value; renderNodeList(ctx, filtered); },
+    oninput: (event) => { form.search = event.target.value; renderNodeList(ctx, count); },
   });
 
   listHost = document.createElement('div');
@@ -370,10 +409,10 @@ function renderChoices(ctx) {
   listHost.setAttribute('aria-label', '选择精确节点');
   const columns = ui.el('div', { class: 'choice-grid' },
     ui.field('订阅', subSelect),
-    ui.field('出口地区', ui.select(REGIONS.map(([value, label]) => ({ value, label })), form.region, (value) => {
+    ui.field('出口地区', ui.select(regionOptions(), form.region, (value) => {
       form.region = value;
       form.regionAuto = null;
-      form.regionManual = true;
+      form.regionManual = Boolean(value);
       form.acknowledged = false;
       renderChoices(ctx);
     }), '从节点名自动填入地区提示；实际出口可通过独立的连通性检查核对，可随时手动修改。'),
@@ -382,8 +421,8 @@ function renderChoices(ctx) {
   const selected = ui.el('div', { class: 'selected-node' },
     ui.el('span', { class: 'muted small', text: '已选节点' }),
     ui.el('strong', { text: form.node || '尚未选择节点' }),
-    form.node ? ui.pill('出口 ' + form.region, 'neutral') : null,
-    form.regionAuto ? ui.pill('自动识别 ' + form.regionAuto.code, 'ok') : null);
+    form.node ? ui.pill(form.region ? '出口 ' + form.region : '出口地区待选', 'neutral') : null,
+    form.regionAuto ? ui.pill('自动识别 ' + form.regionAuto.code, 'ok') : form.regionManual ? ui.pill('手动选择', 'neutral') : null);
 
   const ack = ui.checkbox(form.acknowledged, '我已确认所选节点，并了解配置会修改网络与系统设置。', (value) => {
     form.acknowledged = value;
@@ -398,7 +437,7 @@ function renderChoices(ctx) {
   });
   start.id = 'start-apply';
 
-  const toolbar = ui.el('div', { class: 'choice-toolbar' }, search, ui.el('span', { class: 'muted', text: filtered.length + ' / ' + nodeNames.length + ' 个节点' }));
+  const toolbar = ui.el('div', { class: 'choice-toolbar' }, search, count, reloadButton(ctx));
   const hint = planNodeMissing
     ? ui.note('上次使用的节点已不在当前订阅中。请重新选择；本项目不会自动替换节点。', 'warn')
     : null;
@@ -411,6 +450,7 @@ function renderChoices(ctx) {
   choicesHost.replaceChildren(...[
     mode,
     columns,
+    nodesState.selectionNotice ? ui.note(nodesState.selectionNotice, 'warn') : null,
     hint,
     toolbar,
     listHost,
@@ -422,17 +462,27 @@ function renderChoices(ctx) {
       ui.helpTip('配置需要管理员权限，期间可能短暂中断网络。详细改动可展开下方对照表查看，执行前会再次确认。', '配置影响'),
       start),
   ].filter(Boolean));
-  renderNodeList(ctx, filtered);
+  renderNodeList(ctx, count);
   renderImpact(ctx);
   updateStartButton(ctx);
 }
 
-function renderNodeList(ctx, filtered) {
+function reloadButton(ctx) {
+  return ui.button('重新读取订阅', {variant: 'secondary', size: 'small', icon: 'refresh', onClick: () => loadChoices(ctx)});
+}
+
+function matchNodes(nodes, search) {
+  const query = search.trim().toLowerCase();
+  return query ? nodes.filter(name => name.toLowerCase().includes(query)) : nodes;
+}
+
+function renderNodeList(ctx, count) {
   if (!listHost) return;
   const current = currentSubscription(ctx);
   const all = current?.nodes || [];
-  const query = form.search.trim().toLowerCase();
-  const names = query ? all.filter((name) => name.toLowerCase().includes(query)) : all;
+  const query = form.search.trim();
+  const names = matchNodes(all, query);
+  count.textContent = names.length + ' / ' + all.length + ' 个节点';
   if (!names.length) {
     listHost.replaceChildren(ui.el('p', { class: 'muted pad', text: query ? '没有匹配的节点。' : '这个订阅没有可直接选择的节点。' }));
     return;
@@ -462,10 +512,10 @@ function renderNodeList(ctx, filtered) {
 }
 
 function selectNode(ctx, name) {
+  nodesState.selectionNotice = '';
   const scroll = listHost.scrollTop;
   form.node = name;
   form.acknowledged = false;
-  form.regionManual = false;
   applyRegionHint(ctx, name);
   renderChoices(ctx);
   listHost.scrollTop = scroll;
@@ -475,17 +525,10 @@ function selectNode(ctx, name) {
 }
 
 function applyRegionHint(ctx, name) {
-  if (!name) {
-    form.regionAuto = null;
-    return;
-  }
-  const hint = nodesState.data?.regions?.[form.subscription]?.[name] || null;
-  if (hint?.code) {
-    form.region = hint.code;
-    form.regionAuto = hint;
-  } else {
-    form.regionAuto = null;
-  }
+  if (form.regionManual) return;
+  const hint = name ? nodesState.data?.regions?.[form.subscription]?.[name] : null;
+  form.regionAuto = hint?.code ? hint : null;
+  form.region = form.regionAuto?.code || '';
 }
 
 function updateStartButton(ctx) {
@@ -493,7 +536,7 @@ function updateStartButton(ctx) {
   if (!button) return;
   const current = currentSubscription(ctx);
   const inside = Boolean(current && (current.nodes || []).includes(form.node));
-  button.disabled = !form.node || !inside || (form.mode==='chain' && !chainReady()) || !form.acknowledged || operationsBlocked(ctx);
+  button.disabled = !form.node || !form.region || !inside || (form.mode==='chain' && !chainReady()) || !form.acknowledged || operationsBlocked(ctx);
   button.title = form.node && !inside ? '所选节点不在当前订阅中，请重新选择。' : '';
 }
 
@@ -506,12 +549,13 @@ async function beginApply(ctx) {
   if (form.mode==='chain' && !ctx.state.capabilities?.managed_chain) {
     ui.toast('请先退出并重新打开软件，加载链式代理功能。','warn');return;
   }
-  if (!form.node) return;
+  if (!form.node || !form.region) return;
   if (!form.acknowledged) {
     ui.toast('请先勾选确认。', 'warn');
     return;
   }
   const subscription = currentSubscription(ctx);
+  if (subscription?.uid !== form.subscription || !subscription.nodes.includes(form.node)) return;
   const chain=form.mode==='chain' ? {name:form.chainName.trim(),exit_subscription:form.subscription,
     exit_node:form.node,front_subscription:form.frontSubscription,front_node:form.frontNode} : null;
   if (chain && !chainReady()) return;
@@ -529,7 +573,7 @@ async function beginApply(ctx) {
   ctx.startJob({
     action: 'apply',
     node: form.node,
-    subscription: subscription?.uid || form.subscription,
+    subscription: form.subscription,
     region: form.region,
     ...(chain ? {chain} : {}),
     confirm: 'APPLY',
@@ -550,15 +594,37 @@ function renderChainChoices(ctx,mode) {
   const picker=(label,side)=>{
     const front=side==='front';const uid=front?form.frontSubscription:form.subscription;
     const node=front?form.frontNode:form.node;
+    const searchKey=front?'frontSearch':'exitSearch';
+    const all=getSub(uid)?.nodes || [];
+    const count=ui.el('span',{class:'muted small','aria-live':'polite'});
+    const control=ui.select([],node,value=>{
+      if(front)form.frontNode=value;else{form.node=value;applyRegionHint(ctx,value);}
+      form.acknowledged=false;renderChoices(ctx);
+    }, {'aria-label':label+'节点'});
+    function updateChoices() {
+      const results=matchNodes(all,form[searchKey]);
+      count.textContent=results.length+' / '+all.length+' 个节点';
+      const names=results.slice(0,800);
+      if(all.includes(node) && !names.includes(node)) names.unshift(node);
+      control.replaceChildren(
+        ui.el('option',{value:'',text:!uid?'先选择订阅':results.length?'请选择精确节点':'没有匹配的节点'}),
+        ...names.map(name=>ui.el('option',{value:name,text:name})));
+      control.value=all.includes(node)?node:'';
+      control.disabled=!names.length;
+      if(results.length>800)count.textContent+=' · 请进一步缩小搜索范围';
+    }
+    const search=ui.input(form[searchKey],{type:'search',placeholder:'搜索节点名称…',
+      'aria-label':'搜索'+label+'节点',disabled:!all.length,
+      oninput:event=>{form[searchKey]=event.target.value;updateChoices();}});
+    updateChoices();
     return ui.el('div',{class:'choice-grid'},
       ui.field(label+'订阅',ui.select(subOptions,uid,value=>{
         if(front){form.frontSubscription=value;form.frontNode='';}else{form.subscription=value;form.node='';}
+        form[searchKey]='';
         form.acknowledged=false;renderChoices(ctx);
       })),
-      ui.field(label+'节点',ui.select([{value:'',label:'请选择精确节点'},...(getSub(uid)?.nodes || []).map(n=>({value:n,label:n}))],node,value=>{
-        if(front)form.frontNode=value;else{form.node=value;form.regionManual=false;applyRegionHint(ctx,value);}
-        form.acknowledged=false;renderChoices(ctx);
-      })));
+      ui.el('div',{class:'field'},search,ui.field(label+'节点',control),count,
+        node && !all.includes(node) ? ui.note('原选节点已不可用，请重新选择。','warn') : null));
   };
   let acknowledgement;
   const name=ui.input(form.chainName,{'aria-label':'链式节点名称',placeholder:'请输入新链式节点名称',oninput:event=>{
@@ -567,7 +633,7 @@ function renderChainChoices(ctx,mode) {
     updateStartButton(ctx);
   }});
   acknowledgement=ui.checkbox(form.acknowledged,'我已核对两跳节点及最终出口，并了解将应用完整网络防护。',value=>{form.acknowledged=value;updateStartButton(ctx);});
-  const start=ui.button(stateText(ctx),{variant:'ink',icon:'play',disabled:!chainReady() || !form.acknowledged || operationsBlocked(ctx),onClick:()=>beginApply(ctx)});
+  const start=ui.button(stateText(ctx),{variant:'ink',icon:'play',disabled:!form.region || !chainReady() || !form.acknowledged || operationsBlocked(ctx),onClick:()=>beginApply(ctx)});
   start.id='start-apply';
   const saved=(nodesState.data?.subscriptions || []).filter(row=>row.chain);
   const selected=saved.find(row=>row.chain.name===form.chainName && row.chain.front_subscription===form.frontSubscription &&
@@ -579,15 +645,18 @@ function renderChainChoices(ctx,mode) {
     renderChoices(ctx);
   }),'已有链式配置可再次选择；新建链式配置会保留已配置的单一节点。');
   choicesHost.replaceChildren(mode,
+    reloadButton(ctx),
     savedPicker,
     ui.note('原订阅和原节点保持不变。链式配置使用与普通配置相同的分流、TUN、DNS、IPv6、防火墙及受管 WebRTC 防护；任一跳故障均不切换到直连。','neutral'),
     ui.note('流量条按两份订阅的剩余额度取较小者，显示该账户的已用量/总量，并采用较早到期日。使用 Clash 缓存数据，缺少数据不显示；不是此链路独占的实时用量。','info'),
     picker('前置（第一跳）','front'),picker('后置 / 最终出口（第二跳）','exit'),
     ui.el('div',{class:'choice-grid'},ui.field('链式节点名称',name),
-      ui.field('最终出口地区',ui.select(REGIONS.map(([value,label])=>({value,label})),form.region,value=>{
-        form.region=value;form.regionManual=true;form.acknowledged=false;renderChoices(ctx);
+      ui.field('最终出口地区',ui.select(regionOptions(),form.region,value=>{
+        form.region=value;form.regionManual=Boolean(value);form.regionAuto=null;form.acknowledged=false;renderChoices(ctx);
       }),'以第二跳所在地区为准；不会使用前置节点的地区。')),
     ui.el('p',{class:'muted',text:'电脑 → '+(form.frontNode || '前置节点')+' → '+(form.node || '最终出口节点')+' → 目标网站'}),
+    form.node && !form.region ? ui.note('未识别最终出口地区，请手动选择。','warn') : null,
+    form.regionManual ? ui.pill('出口地区为手动选择','neutral') : null,
     acknowledgement,start);
   renderImpact(ctx);
 }

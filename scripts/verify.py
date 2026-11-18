@@ -221,7 +221,8 @@ def workload_scope():
 def verify(outage=False,stage=None):
  stage=stage or ('node-outage' if outage else 'connectivity')
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root']);node=plan['node']
- report={'success':False,'account_tested':False,'application_usability_verified':False,
+ from config_health import configuration_revision
+ report={'success':False,'configuration_revision':configuration_revision(LOCAL),'account_tested':False,'application_usability_verified':False,
          'not_tested':['browser_webrtc','browser_fingerprint','claude_http','claude_dns','claude_live_routing']}
  check='runtime'
  try:
@@ -341,4 +342,4 @@ def main(argv=None):
  with operation_lock(LOCAL):
   return verify(args.node_outage,args.stage)
 
-if __name__=='__main__':main()
+if __name__=='__main__':raise SystemExit(0 if main()['success'] else 1)

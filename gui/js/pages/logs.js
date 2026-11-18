@@ -15,17 +15,21 @@ export function render(ctx) {
   const tun = state.operation?.pending_tun || [];
   if (tun.length) root.append(ui.card({title: tun.some(row => row.kind) ? '故障演练待恢复' : 'TUN 演练待恢复'},
     ui.note('独立看护正在等待或尝试恢复。待恢复标记消失前暂停项目操作；若失败或长时间未结束，请检查下方目录中的 recovery.json、watchdog.log 和本次验收记录。不要删除 ready/done 标记绕过保护。', 'bad'),
-    ...tun.map(row => ui.kv([['记录', row.id], ['阶段', ({'node-outage': '节点故障', 'core-exit': '停核'})[row.kind] || 'TUN 关闭'], ['状态', row.status === 'failed' ? '已报告恢复失败' : '恢复尚未确认'], ['本地目录', '.local/tun-drills/' + row.id]])),
-    ui.button('打开 .local 查看记录', {variant: 'secondary', onClick: () => reveal(ctx)})));
+    ...tun.map(row => ui.el('section', {}, ui.kv([['记录', row.id], ['阶段', ({'node-outage': '节点故障', 'core-exit': '停核'})[row.kind] || 'TUN 关闭'], ['状态', row.status === 'failed' ? '已报告恢复失败' : row.status === 'interrupted' ? '看护已停止，恢复尚未确认' : '恢复尚未确认'], ['本地目录', '.local/tun-drills/' + row.id]]),
+      ui.el('div', {class: 'page-actions'},
+        ui.button('打开本次记录', {variant: 'secondary', onClick: () => reveal(ctx, row.id)}),
+        row.status === 'failed' && row.retryable === false && !row.kind ? ui.el('span', {class: 'muted small', text: '该记录缺少原活动配置，无法安全重试。'}) : null,
+        (row.retryable ?? row.status === 'failed') ? ui.button('重试本次恢复', {variant: 'ink', disabled: ctx.busy,
+          onClick: () => retryDrill(ctx, row.id)}) : null)))));
   root.append(lastRunCard(ctx));
   root.append(verificationCard(ctx));
-  root.append(logListCard(ctx));
-  if (state.reconfigure_runs?.length) root.append(reconfigureCard(ctx));
   const inline = document.createElement('div');
   inline.id = 'log-inline';
   inline.dataset.preserveKey = 'open-log';
   inline.className = 'log-inline';
-  root.append(inline);
+  inline.tabIndex = -1;
+  root.append(logListCard(ctx, inline));
+  if (state.reconfigure_runs?.length) root.append(reconfigureCard(ctx));
   return root;
 }
 
@@ -47,12 +51,10 @@ function verificationCard(ctx) {
   }
   const coverage = verification.coverage;
   const complete = coverage === 'full-network';
-  const scope = complete ? '完整网络验收' : coverage === 'connectivity' ? '连通性检查' : coverage === 'partial' ? '部分阶段检查' : '旧版检查（范围待核对）';
-  const outcome = !verification.success ? '未通过' : complete || coverage === 'connectivity' ? '通过' : '已记录阶段通过，验收不完整';
-  return ui.disclosure({ title: '历史' + scope + ' · ' + outcome, key: 'logs-verification', open: !verification.success || !complete },
+  return ui.disclosure({ title: ui.verificationLabel(verification), key: 'logs-verification', open: !verification.success || !complete },
     !complete ? ui.note('此记录不代表完整网络验收。' + (coverage === 'connectivity' ? '仅检查连通性，未进行完整故障演练。' : '请核对已测试与缺失阶段。'), 'warn') : null,
     ui.el('div', { class: 'verification-head' },
-      ui.el('span', { class: 'muted', text: '记录时间 ' + ui.formatTime(verification.time) }),
+      ui.el('span', { class: 'muted', text: '记录时间 ' + ui.formatTime(verification.time) + ' · ' + ui.verificationRelation(ctx.state) }),
       verification.egress?.country ? ui.pill(verification.egress.country + ' · ' + (verification.egress.city || ''), 'neutral') : null),
     ui.el('div', { class: 'check-grid' }, (verification.checks || []).map((check) => ui.el('div', { class: 'check-item' },
       ui.el('span', { class: 'check-mark ' + ui.statusTone(check.status) }, check.status === 'passed' ? icon('check', 14) : check.status === 'failed' ? icon('close', 14) : icon('info', 14)),
@@ -62,11 +64,11 @@ function verificationCard(ctx) {
     ui.el('p', { class: 'muted small', text: '原始 IP 与探测明细只保存在 .local；界面只显示国家/城市摘要。' }));
 }
 
-function logListCard(ctx) {
+function logListCard(ctx, inline) {
   const files = ctx.state.log_files || [];
   const body = files.length
     ? ui.el('div', { class: 'log-list' }, files.map((file) => ui.el('button', {
-        class: 'log-row', type: 'button', onclick: () => ctx.showLog(file.name),
+        class: 'log-row', type: 'button', 'data-log-name': file.name, 'aria-pressed': 'false', onclick: () => ctx.showLog(file.name),
       },
       ui.el('span', { class: 'log-icon' }, icon('list', 16)),
       ui.el('span', { class: 'log-name', text: file.name }),
@@ -74,7 +76,7 @@ function logListCard(ctx) {
       ui.el('span', { class: 'muted', text: ui.relativeTime(file.time) }),
       icon('chevron', 14))))
     : ui.empty('还没有日志文件', '操作产生错误或更新结果时会生成日志。');
-  return ui.card({ title: '本地日志', help: '点击文件名在此读取；不会把日志上传到网络。' }, body);
+  return ui.card({ title: '本地日志', help: '点击文件名在此读取；不会把日志上传到网络。' }, ui.el('div', {class: 'log-layout'}, body, inline));
 }
 
 function reconfigureCard(ctx) {
@@ -98,9 +100,18 @@ function actionName(action) {
   }[action] || action;
 }
 
-async function reveal(ctx) {
+async function retryDrill(ctx, id) {
+  const ok = await ctx.confirm({
+    title: '重试本次演练恢复？',
+    description: '需要 Windows 管理员权限。仅恢复对应演练留下的变更，网络可能短暂中断。',
+    confirmText: '重试恢复',
+  });
+  if (ok) ctx.startJob({action: 'drill-recover', recovery: id, confirm: 'RECOVER-DRILL'});
+}
+
+async function reveal(ctx, recovery) {
   try {
-    await ctx.api.post('/api/reveal');
+    await ctx.api.post('/api/reveal', recovery ? {recovery} : {});
     ui.toast('已打开本地数据目录。', 'ok');
   } catch (error) {
     ui.toast(error.message || '无法打开目录。', 'bad');

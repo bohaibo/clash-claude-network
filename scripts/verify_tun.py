@@ -2,6 +2,8 @@
 import argparse,ctypes,json,os,re,socket,subprocess,sys,time,uuid
 from checks import require
 from client import LOCAL,root_path,write
+from config_health import active_configuration
+from drill_recovery import spawn_worker,supervised_worker,wait_for
 from verification_reports import save_report
 from verify import query
 
@@ -40,14 +42,11 @@ def restore_tun(root,timeout=25):
 
 def start_guard(root):
  token=uuid.uuid4().hex;folder=LOCAL/'tun-drills'/token;folder.mkdir(parents=True)
- write(folder/'guard.json',{'root':str(root),'parent':os.getpid(),'timeout':60})
- with (folder/'watchdog.log').open('ab') as output:
-  worker=subprocess.Popen([sys.executable,str(__file__),'--watch',token],stdout=output,stderr=output,
-   creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
- deadline=time.monotonic()+8
- while not (folder/'ready').exists():
-  require(worker.poll() is None and time.monotonic()<deadline,'TUN recovery watchdog unavailable')
-  time.sleep(.1)
+ write(folder/'guard.json',{'root':str(root),'parent':os.getpid(),'timeout':60,
+                               'configuration':active_configuration(root)})
+ subprocess.run([sys.executable,__file__,'--spawn',token],stdin=subprocess.DEVNULL,
+                capture_output=True,timeout=8,check=True,creationflags=subprocess.CREATE_NO_WINDOW)
+ wait_for(folder,'ready',8)
  return folder
 
 def watch(token):
@@ -65,7 +64,10 @@ def watch(token):
   while not (folder/'done').exists():
    if kernel.WaitForSingleObject(handle,0)!=258 or time.monotonic()>=deadline:
     try:
-     restore_tun(root_path(record['root']));write(folder/'recovery.json',{'success':True});(folder/'done').touch()
+     root=root_path(record['root'])
+     if record.get('configuration') is not None:
+      require(active_configuration(root)==record['configuration'],'Active configuration changed after the drill')
+     restore_tun(root);write(folder/'recovery.json',{'success':True});(folder/'done').touch()
     except Exception as exc:write(folder/'recovery.json',{'success':False,'error':type(exc).__name__})
     return
    time.sleep(.25)
@@ -83,6 +85,9 @@ def verify_tun():
   report['positive_controls']=True
   guard=start_guard(root);touched=True
   try:
+   if (guard/'guard.json').is_file():
+    record=json.loads((guard/'guard.json').read_text(encoding='utf-8'))
+    require(active_configuration(root)==record['configuration'],'Active configuration changed before the drill')
    api(root,'PATCH','/configs',{'tun':{'enable':False}})
    require(api(root,'GET','/configs').get('tun',{}).get('enable') is False,'TUN did not disable')
    disabled=system_state()
@@ -105,6 +110,9 @@ def verify_tun():
   finally:
    if touched:
     try:
+     if (guard/'guard.json').is_file():
+      record=json.loads((guard/'guard.json').read_text(encoding='utf-8'))
+      require(active_configuration(root)==record['configuration'],'Active configuration changed after the drill')
      restore_tun(root);report['tun_restored']=True;(guard/'done').touch()
     except Exception:
      report['success']=False;report['restore_failed']=True;raise
@@ -115,7 +123,17 @@ def verify_tun():
  return report
 
 if __name__=='__main__':
- parser=argparse.ArgumentParser();parser.add_argument('--watch');args=parser.parse_args()
- if args.watch:watch(args.watch)
+ parser=argparse.ArgumentParser()
+ mode=parser.add_mutually_exclusive_group()
+ mode.add_argument('--watch');mode.add_argument('--spawn');args=parser.parse_args()
+ token=args.watch or args.spawn
+ if token:
+  require(bool(re.fullmatch('[a-f0-9]{32}',token)),'Invalid guard token')
+  folder=LOCAL/'tun-drills'/token
+  if args.spawn:spawn_worker(folder,__file__)
+  else:
+   with supervised_worker(folder):watch(token)
  else:
-  result=verify_tun();print(json.dumps(result,ensure_ascii=False));raise SystemExit(0 if result['success'] else 1)
+  from operation_lock import operation_lock
+  with operation_lock(LOCAL):result=verify_tun()
+  print(json.dumps(result,ensure_ascii=False));raise SystemExit(0 if result['success'] else 1)

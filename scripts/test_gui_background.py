@@ -60,7 +60,7 @@ class BackgroundState(unittest.TestCase):
             guard=local/'tun-drills'/('b'*32);guard.mkdir(parents=True);(guard/'ready').touch()
             self.assertEqual(app.app_state()['operation']['pending_tun'],[{'id':'b'*32,'status':'pending'}])
             client.write(guard/'recovery.json',{'success':False,'root':'private fixture must not reach API'})
-            self.assertEqual(app.app_state()['operation']['pending_tun'],[{'id':'b'*32,'status':'failed'}])
+            self.assertEqual(app.app_state()['operation']['pending_tun'],[{'id':'b'*32,'status':'failed','retryable':False}])
             from operation_lock import check_pending_tun
             with self.assertRaises(RuntimeError):check_pending_tun(local)
             (guard/'done').touch()

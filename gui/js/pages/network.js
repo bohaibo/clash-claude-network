@@ -61,7 +61,7 @@ function configCard(ctx) {
   const plan = state.plan || {};
   const service = state.service || {};
   const awaitingVerification = state.last_run?.network_tested === false &&
-    (!state.verification?.available || (Date.parse(state.verification.time) || 0) < (Date.parse(state.last_run.configuration_time) || Infinity));
+    (!state.verification?.available || (Date.parse(state.verification.time) || 0) < (ui.configurationTime(state) || Infinity));
   return ui.card({
     title: '当前固定配置',
     subtitle: state.configured ? '项目分流配置正在运行。' : '当前未运行项目分流配置。',
@@ -70,7 +70,7 @@ function configCard(ctx) {
         : ui.badge('已配置', 'ok'),
   },
   ui.kv([
-    ['网络验收', awaitingVerification ? '网络未验收' : state.verification?.dns_failed ? 'DNS 验收失败' : state.verification?.available && state.verification.success ? '历史验收通过' : '尚未验收'],
+    ['网络验收', awaitingVerification ? '网络未验收' : state.verification?.dns_failed ? 'DNS 验收失败' : state.verification?.available ? ui.verificationLabel(state.verification) + ' · ' + ui.verificationRelation(state) : '尚未验收'],
     ['固定节点', plan.node || '—'],
     ['订阅', plan.subscription || '—'],
     ['出口地区', plan.region || 'SG'],
@@ -101,10 +101,11 @@ function verificationCard(ctx) {
     body.push(ui.el('p', { class: 'muted', text: '还没有验收结果' }));
   } else {
     if (verification.dns_failed) body.push(ui.note('上次 DNS 验收未通过，请重新检查连通性；仍失败时恢复关联快照并重新配置。', 'bad'));
+    if (verification.configuration_matches_current === false) body.push(ui.note('网络配置或规则已变化。需要时请重新检查。', 'warn'));
     if (!verification.source_matches_current) body.push(ui.note('该历史报告未对应当前软件版本；需要时请重新检查或演练。', 'warn'));
     body.push(ui.el('div', { class: 'verification-head' },
-      ui.badge(verification.success ? (verification.coverage === 'partial' ? '已记录阶段通过，验收不完整' : '历史验收通过') : '验收未通过', verification.success ? 'ok' : 'bad'),
-      ui.el('span', { class: 'muted', text: '记录时间 ' + ui.formatTime(verification.time) + ' · ' + ({'full-network':'完整网络验收','connectivity':'仅连通性检查','partial':'部分阶段'}[verification.coverage] || '旧版记录，范围待核对') }),
+      ui.badge(ui.verificationLabel(verification), ui.verificationTone(verification)),
+      ui.el('span', { class: 'muted', text: '记录时间 ' + ui.formatTime(verification.time) + ' · ' + ui.verificationRelation(ctx.state) }),
       verification.egress?.country ? ui.pill(verification.egress.country + ' · ' + (verification.egress.city || ''), 'neutral') : null));
     body.push(ui.el('div', { class: 'check-grid' }, (verification.checks || []).map((check) => ui.el('div', { class: 'check-item' },
       ui.el('span', { class: 'check-mark ' + ui.statusTone(check.status) }, check.status === 'passed' ? icon('check', 14) : check.status === 'failed' ? icon('close', 14) : icon('info', 14)),
@@ -187,7 +188,7 @@ async function audit(ctx) {
   const ok = await ctx.confirm({
     title: '完整复核防火墙并演练故障？',
     description: '将请求管理员权限，检查完整生效策略，分别模拟节点故障、关闭 TUN、内核退出，并验证恢复。公网和正在使用的连接会短暂中断，可能需要数分钟。',
-    items: [{title: '独立恢复看护', text: 'TUN 演练前启用本机恢复看护；失败会记录恢复状态。'},
+    items: [{title: '独立恢复看护', text: '每个故障阶段由本机看护负责恢复；恢复失败可在「日志与验证」重试。'},
       {title: '检查未完成', text: '补齐管理员权限或修复失败项目后重新检查。'}],
     confirmText: '开始完整复核',
   });
