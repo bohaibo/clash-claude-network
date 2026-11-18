@@ -2,7 +2,7 @@
 import contextlib,io,json,os,socket,struct,subprocess,sys,tempfile,threading,time,unittest
 from pathlib import Path
 from unittest.mock import patch
-import client,verify,verify_core_exit as core,verification_reports
+import client,drill_recovery,verify,verify_core_exit as core,verify_tun,verification_reports
 
 class Verification(unittest.TestCase):
  def setUp(self):
@@ -14,6 +14,14 @@ class Verification(unittest.TestCase):
   (self.local/'clash-verge.yaml').write_text(json.dumps({'proxies':[{'name':'Chosen','port':1234}]}))
   self.enterContext(patch.object(verify,'root_path',return_value=self.local))
   self.api=self.enterContext(patch.object(verify,'api',side_effect=self.fake_api))
+  self.enterContext(patch.object(verify_tun,'api',side_effect=lambda *args:verify.api(*args)))
+  @contextlib.contextmanager
+  def guard(root,kind,original,candidate):
+   try:
+    verify.api(root,'PUT','/configs?force=true',{'payload':candidate})
+    yield
+   finally:verify.api(root,'PUT','/configs?force=true',{'payload':original})
+  self.enterContext(patch.object(drill_recovery,'guarded_outage',guard))
   self.enterContext(patch.object(verify,'curl',side_effect=self.fake_curl))
   self.enterContext(patch.object(verify,'query',return_value={'passed':True,'ips':['198.18.0.1']}))
   self.stun=self.enterContext(patch.object(verify,'stun',return_value={'ok':True,'mapped':'8.8.8.8:1234','route':{'verified':True}}))
@@ -313,6 +321,15 @@ class CoreExit(unittest.TestCase):
   def command(text):self.commands.append(text);return '0'
   self.command=self.enterContext(patch.object(core,'command',side_effect=command))
   self.api=self.enterContext(patch.object(core,'api',return_value={}))
+  @contextlib.contextmanager
+  def guard(root,kind,original):
+   try:
+    drill_recovery.apply_fault(root,kind,None)
+    yield
+   finally:
+    try:core.restore_core(root,original,recovery_timeout=0)
+    except Exception as error:raise drill_recovery.DrillRecoveryError('fixture') from error
+  self.enterContext(patch.object(core,'guarded_outage',guard))
   self.connection=self.enterContext(patch.object(core.socket,'create_connection',side_effect=OSError('fixture blocked')))
   self.enterContext(contextlib.redirect_stdout(io.StringIO()))
  def saved(self):return json.loads((self.local/'verification.json').read_text(encoding='utf-8'))['stages']['core-exit']
@@ -331,7 +348,7 @@ class CoreExit(unittest.TestCase):
   self.assertFalse(core.verify_core_exit()['success']);self.assertTrue(self.saved()['restart_failed'])
  def test_recovery_timeout_is_failed_evidence(self):
   self.api.side_effect=RuntimeError('fixture unavailable')
-  self.assertFalse(core.verify_core_exit(recovery_timeout=0)['success']);self.assertTrue(self.saved()['restart_failed'])
+  self.assertFalse(core.verify_core_exit()['success']);self.assertTrue(self.saved()['restart_failed'])
 
 class Stun(unittest.TestCase):
  def probe(self,transform=lambda data,request:data,sender=('192.0.2.1',19302),attribute=None,route_probe=None):

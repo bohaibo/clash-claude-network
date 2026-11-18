@@ -305,7 +305,7 @@ Resolve-PendingFirewall -LocalDir $local -Python $python
 Assert-NoPendingRules -LocalDir $local
 Assert-NoPendingSettings -LocalDir $local
 & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from operation_lock import check_pending_tun;from pathlib import Path;check_pending_tun(Path(sys.argv[2]))' $PSScriptRoot $local
-if($LASTEXITCODE -ne 0){throw 'TUN 演练恢复仍待处理，请先等待本机看护并查看恢复记录。'}
+if($LASTEXITCODE -ne 0){throw '故障演练恢复仍待处理，请先等待本机看护并查看恢复记录。'}
 $env:CCN_SNAPSHOT=$null
 if($Snapshot){
  if([IO.Path]::GetFileName($Snapshot) -ne $Snapshot -or $Snapshot -in @('.','..')){throw '快照只能使用 .local/snapshots 内的目录名。'}

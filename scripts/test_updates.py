@@ -186,6 +186,30 @@ class Updates(unittest.TestCase):
   self.api.side_effect=self.controller
   self.assertTrue(update.recover_pending());self.assertEqual(self.snapshot_files(),before)
   self.assertFalse((self.local/'rule-update-pending.json').exists())
+ def test_committed_update_with_stale_marker_keeps_published_files(self):
+  self.mutate_domains()
+  update.update()
+  before=self.snapshot_files()
+  folder=next((self.local/'rule-updates').iterdir())
+  pending=self.local/'rule-update-pending.json'
+  client.write(pending,{'id':folder.name})
+  self.api.reset_mock()
+  self.assertTrue(update.recover_pending())
+  self.assertEqual(self.snapshot_files(),before)
+  self.assertFalse(pending.exists())
+  self.api.assert_not_called()
+ def test_committed_cleanup_refuses_later_edit(self):
+  self.mutate_domains()
+  update.update()
+  folder=next((self.local/'rule-updates').iterdir())
+  pending=self.local/'rule-update-pending.json'
+  client.write(pending,{'id':folder.name})
+  self.script.write_text('later edit')
+  self.api.reset_mock()
+  with self.assertRaisesRegex(AssertionError,'needs review'):update.recover_pending()
+  self.assertTrue(pending.exists())
+  self.assertEqual(self.script.read_text(),'later edit')
+  self.api.assert_not_called()
  def test_recovery_refuses_later_user_edit(self):
   self.mutate_domains();self.api.side_effect=RuntimeError('fixture')
   with self.assertRaises(AssertionError):update.update()

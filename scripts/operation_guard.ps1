@@ -46,3 +46,5 @@ function Resolve-PendingFirewall([string]$LocalDir,[string]$Python,[string]$Expe
   if($held){$mutex.ReleaseMutex()};$mutex.Dispose()
  }
 }
+
+function New-GuardClock { [Diagnostics.Stopwatch]::StartNew() }

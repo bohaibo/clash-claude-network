@@ -13,9 +13,9 @@ export function render(ctx) {
     ],
   }));
   const tun = state.operation?.pending_tun || [];
-  if (tun.length) root.append(ui.card({title: 'TUN 演练待恢复'},
+  if (tun.length) root.append(ui.card({title: tun.some(row => row.kind) ? '故障演练待恢复' : 'TUN 演练待恢复'},
     ui.note('独立看护正在等待或尝试恢复。待恢复标记消失前暂停项目操作；若失败或长时间未结束，请检查下方目录中的 recovery.json、watchdog.log 和本次验收记录。不要删除 ready/done 标记绕过保护。', 'bad'),
-    ...tun.map(row => ui.kv([['记录', row.id], ['状态', row.status === 'failed' ? '已报告恢复失败' : '恢复尚未确认'], ['本地目录', '.local/tun-drills/' + row.id]])),
+    ...tun.map(row => ui.kv([['记录', row.id], ['阶段', ({'node-outage': '节点故障', 'core-exit': '停核'})[row.kind] || 'TUN 关闭'], ['状态', row.status === 'failed' ? '已报告恢复失败' : '恢复尚未确认'], ['本地目录', '.local/tun-drills/' + row.id]])),
     ui.button('打开 .local 查看记录', {variant: 'secondary', onClick: () => reveal(ctx)})));
   root.append(lastRunCard(ctx));
   root.append(verificationCard(ctx));

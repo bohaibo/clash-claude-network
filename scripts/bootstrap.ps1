@@ -129,7 +129,7 @@ function Download([string]$url,[string]$target){
 }
 
 function Test-Python313 {
- if(!(Test-Path -LiteralPath $python)){return $false}
+ if(!(Test-Path -LiteralPath $python) -or !(Test-Path -LiteralPath $pythonw)){return $false}
  try{$value=& $python -c 'import sys;print(''%d.%d''%sys.version_info[:2])' 2>$null}catch{return $false}
  return ($value -eq '3.13')
 }
@@ -144,13 +144,11 @@ function Ensure-Python {
  $temp=Join-Path $runtime 'python-temp'
  Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
  Expand-Archive -LiteralPath $zip -DestinationPath $temp -Force
+ $candidate=Join-Path $temp 'python.exe'
+ $version=& $candidate -c 'import sys;print(''%d.%d''%sys.version_info[:2])'
+ if($LASTEXITCODE -ne 0 -or $version -ne '3.13' -or !(Test-Path -LiteralPath (Join-Path $temp 'pythonw.exe'))){Fail 'Python 压缩包解压后无法运行。'}
  if(Test-Path -LiteralPath $pythonRoot){Remove-Item -LiteralPath $pythonRoot -Recurse -Force}
  Move-Item -LiteralPath $temp -Destination $pythonRoot
- # Embedded Python needs site-packages enabled; keep everything project-local.
- $pth=Get-ChildItem -LiteralPath $pythonRoot -Filter '*._pth' | Select-Object -First 1
- if($pth){
-  @('python313.zip','.','Lib\site-packages','..\..\scripts','import site') | Set-Content -LiteralPath $pth.FullName -Encoding ASCII
- }
 }
 
 function Ensure-Pth {
@@ -227,9 +225,11 @@ function Ensure-Node {
  $temp=Join-Path $runtime 'node-temp'
  Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
  Expand-Archive -LiteralPath $zip -DestinationPath $temp -Force
- if(Test-Path -LiteralPath $nodeRoot){Remove-Item -LiteralPath $nodeRoot -Recurse -Force}
  $inner=Get-ChildItem -LiteralPath $temp -Directory | Select-Object -First 1
  if(!$inner){Fail 'Node.js 压缩包结构异常。'}
+ $version=& (Join-Path $inner.FullName 'node.exe') --version
+ if($LASTEXITCODE -ne 0 -or $version -notmatch '^v\d+\.'){Fail 'Node.js 压缩包解压后无法运行。'}
+ if(Test-Path -LiteralPath $nodeRoot){Remove-Item -LiteralPath $nodeRoot -Recurse -Force}
  Move-Item -LiteralPath $inner.FullName -Destination $nodeRoot
  Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
  if(!(Test-Node)){Fail '项目内 Node.js 安装后仍不可用。'}
@@ -247,23 +247,46 @@ function Test-Clash {
  return $service
 }
 
-Say '检查项目内运行环境（不会安装到系统目录，不修改 PATH）…' 'Cyan'
-$clash=Test-Clash
-Ensure-Python
-Ensure-Pth
-Ensure-Sitecustomize
-Ensure-Yaml
-Ensure-Node
-$pythonVersion=(& $python -c 'import sys;print(''%d.%d.%d''%sys.version_info[:3])').Trim()
-$nodeVersion=(& $node --version).Trim()
-$state=[ordered]@{
- python=$python;pythonw=$pythonw;node=$node;
- python_version=$pythonVersion;node_version=$nodeVersion;
- clash_service=[string]$clash.Status;checked=(Get-Date).ToString('o');
- scope='project-local .runtime; no system PATH or registry changes'
+function Enter-RuntimeStartupLock([string]$Path){
+ $clock=[Diagnostics.Stopwatch]::StartNew()
+ while($true){
+  try{return [IO.File]::Open($Path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}
+  catch [IO.IOException]{
+   if(($_.Exception.HResult -band 0xffff) -notin @(32,33)){throw}
+   if($clock.Elapsed.TotalMinutes -ge 25){Fail '另一个启动过程仍在准备运行环境，请稍后重试。'}
+   Start-Sleep -Milliseconds 300
+  }
+ }
 }
-$state | ConvertTo-Json | Set-Content -LiteralPath $envFile -Encoding UTF8
-Say ''
-Say ('环境就绪：Python '+$pythonVersion+' · Node '+$nodeVersion+' · Clash '+$clash.Status) 'Green'
-Say ('项目内路径：'+$runtime) 'Gray'
+
+$startupLock=Enter-RuntimeStartupLock (Join-Path $local 'runtime-startup.lock')
+try{
+ Say '检查项目内运行环境（不会安装到系统目录，不修改 PATH）…' 'Cyan'
+ $clash=Test-Clash
+ Ensure-Python
+ Ensure-Pth
+ Ensure-Sitecustomize
+ Ensure-Yaml
+ Ensure-Node
+ $pythonVersion=(& $python -c 'import sys;print(''%d.%d.%d''%sys.version_info[:3])').Trim()
+ $nodeVersion=(& $node --version).Trim()
+ $state=[ordered]@{
+  python=$python;pythonw=$pythonw;node=$node;
+  python_version=$pythonVersion;node_version=$nodeVersion;
+  clash_service=[string]$clash.Status;checked=(Get-Date).ToString('o');
+  scope='project-local .runtime; no system PATH or registry changes'
+ }
+ $envCandidate=$envFile+'.new'
+ try{
+  $state | ConvertTo-Json | Set-Content -LiteralPath $envCandidate -Encoding UTF8
+  if([IO.File]::Exists($envFile)){[IO.File]::Replace($envCandidate,$envFile,$envFile+'.previous')}
+  else{[IO.File]::Move($envCandidate,$envFile)}
+ }finally{
+  if([IO.File]::Exists($envCandidate)){[IO.File]::Delete($envCandidate)}
+  if([IO.File]::Exists($envFile+'.previous')){[IO.File]::Delete($envFile+'.previous')}
+ }
+ Say ''
+ Say ('环境就绪：Python '+$pythonVersion+' · Node '+$nodeVersion+' · Clash '+$clash.Status) 'Green'
+ Say ('项目内路径：'+$runtime) 'Gray'
+}finally{$startupLock.Dispose()}
 exit 0

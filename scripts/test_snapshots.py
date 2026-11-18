@@ -176,6 +176,7 @@ function Start-ScheduledTask { throw 'Unexpected task start' }
   (scripts/'firewall_rules.ps1').write_text('# No live helpers in fixture')
   (scripts/'operation_guard.ps1').write_text((client.PROJECT/'scripts'/'operation_guard.ps1').read_text(encoding='utf-8-sig'),encoding='utf-8-sig')
   (scripts/'baseline.py').write_text("def preflight_restore():\n raise ValueError('fixture integrity failure')\n")
+  (scripts/'operation_lock.py').write_bytes((client.PROJECT/'scripts/operation_lock.py').read_bytes())
   run=subprocess.run(['powershell.exe','-NoProfile','-File',str(scripts/'run.ps1'),'-Python',sys.executable,'-Action','restore',
                       '-Snapshot','fixture','-Acknowledged','-NoPause'],capture_output=True)
   self.assertEqual(run.returncode,1);self.assertFalse(sentinel.exists())

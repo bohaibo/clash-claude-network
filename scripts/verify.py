@@ -287,6 +287,8 @@ def verify(outage=False,stage=None):
   if scope['docker_installed']:report['not_tested'].append('docker_container_egress')
   if scope['wsl_installed']:report['not_tested'].append('wsl_egress')
   if outage:
+   from drill_recovery import guarded_outage
+   from verify_tun import api as outage_api
    check='node_outage'
    current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
    targets=([__import__('managed_chain').FRONT,node] if plan.get('chain') else [node])
@@ -295,17 +297,16 @@ def verify(outage=False,stage=None):
     broken=__import__('yaml').safe_load(current)
     for value in broken['proxies']:
      if value['name']==failed_node:value['port']=1
-    try:
-     api(root,'PUT','/configs?force=true',{'payload':__import__('yaml').safe_dump(broken,allow_unicode=True,sort_keys=False)})
-     for connection in api(root,'GET','/connections').get('connections',[]):
+    candidate=__import__('yaml').safe_dump(broken,allow_unicode=True,sort_keys=False)
+    with guarded_outage(root,'node-outage',current,candidate):
+     for connection in outage_api(root,'GET','/connections').get('connections',[]):
       if node in connection.get('chains',[]) or failed_node in connection.get('chains',[]):
-       try:api(root,'DELETE','/connections/'+connection['id'])
+       try:outage_api(root,'DELETE','/connections/'+connection['id'])
        except Exception:pass
      require(curl('https://ipinfo.io/json')['exit']!=0,'Foreign traffic remained reachable during node outage')
      require(curl('https://www.baidu.com',True)['http']==200,'配置检查未通过，请查看本地记录。')
      key='chain_front_failure_blocks_foreign_preserves_domestic' if failed_node!=node else 'node_failure_blocks_foreign_preserves_domestic'
      report[key]=True
-    finally:api(root,'PUT','/configs?force=true',{'payload':current})
    check='recovery'
    report['recovery_attempts']=[];recovery_ok=False
    for attempt in range(3):

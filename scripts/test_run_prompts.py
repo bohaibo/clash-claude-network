@@ -32,6 +32,7 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   (self.scripts/'run.ps1').write_text(first+'\n'+mocks+rest,encoding='utf-8-sig')
   for name in ('firewall_rules.ps1','operation_guard.ps1'):(self.scripts/name).write_text('# fixture')
   (self.scripts/'test_dns_filter.py').write_text('# isolated self-test fixture')
+  (self.scripts/'operation_lock.py').write_bytes((client.PROJECT/'scripts/operation_lock.py').read_bytes())
   self.discover([{'uid':'first','name':'Same','nodes':['Chosen']}])
  def discover(self,rows):
   data=json.dumps({'subscriptions':rows},ensure_ascii=True)

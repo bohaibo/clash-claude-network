@@ -184,12 +184,31 @@ $yamlReady=$true
 Ensure-Yaml
 Assert ($downloadCount -eq 0 -and $calls.Count -eq 1) 'Working PyYAML unnecessarily required pip'
 
-# Only top-level commands determine startup order; function bodies are excluded.
-$startup=@($ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.PipelineAst]} | ForEach-Object {
+# The startup try block owns the lock and performs dependency preparation.
+$startupBlock=$ast.EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.TryStatementAst]} | Select-Object -Last 1
+$startup=@($startupBlock.Body.Statements | Where-Object {$_ -is [Management.Automation.Language.PipelineAst]} | ForEach-Object {
  foreach($element in $_.PipelineElements){if($element -is [Management.Automation.Language.CommandAst]){$element.GetCommandName()}}
 })
 $pthIndex=[Array]::IndexOf($startup,'Ensure-Pth')
 $siteIndex=[Array]::IndexOf($startup,'Ensure-Sitecustomize')
 $yamlIndex=[Array]::IndexOf($startup,'Ensure-Yaml')
 Assert ($pthIndex -ge 0 -and $siteIndex -gt $pthIndex -and $yamlIndex -gt $siteIndex) 'Python module paths must be configured before dependency repair'
+# Hold the actual startup file open and confirm the second entrant waits.
+$lockFunction=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq 'Enter-RuntimeStartupLock'},$false)
+. ([scriptblock]::Create($lockFunction.Extent.Text))
+$lockPath=Join-Path ([IO.Path]::GetTempPath()) ('ccn-startup-'+[Guid]::NewGuid().ToString('N')+'.lock')
+$first=[IO.File]::Open($lockPath,'OpenOrCreate','ReadWrite','None')
+$second=$null
+$script:waited=$false
+try{
+ function Start-Sleep {param($Milliseconds) $script:waited=$true;$first.Dispose()}
+ $second=Enter-RuntimeStartupLock $lockPath
+ Assert $script:waited 'A concurrent bootstrap did not wait for its predecessor'
+ Assert ($second.CanWrite) 'Startup lock was not acquired after the first owner exited'
+}finally{
+ if($second){$second.Dispose()}
+ $first.Dispose()
+ Remove-Item Function:Start-Sleep
+ Remove-Item -LiteralPath $lockPath -Force
+}
 Write-Output 'Bootstrap offline checks passed: official release selection, source-only Python skip, checksum validation, latest get-pip, source restrictions, interrupted install recovery, NoInstall, startup order'

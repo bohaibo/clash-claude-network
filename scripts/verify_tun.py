@@ -7,8 +7,8 @@ from verify import query
 
 def api(root,method,path,body=None):
  # A stuck pipe must not trap both the drill and its independent recovery worker.
- code='import json,sys;from pathlib import Path;from client import api;print(json.dumps(api(Path(sys.argv[1]),sys.argv[2],sys.argv[3],json.loads(sys.argv[4]))))'
- result=subprocess.run([sys.executable,'-c',code,str(root),method,path,json.dumps(body)],capture_output=True,timeout=10,
+ code='import json,sys;from pathlib import Path;from client import api;print(json.dumps(api(Path(sys.argv[1]),sys.argv[2],sys.argv[3],json.load(sys.stdin))))'
+ result=subprocess.run([sys.executable,'-c',code,str(root),method,path],input=json.dumps(body).encode(),capture_output=True,timeout=10,
   creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
  require(result.returncode==0,'Local controller unavailable')
  return json.loads(result.stdout)

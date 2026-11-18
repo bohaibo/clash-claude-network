@@ -4,16 +4,18 @@ $ErrorActionPreference='Stop'
 $project=Split-Path -Parent $PSScriptRoot
 $local=Join-Path $project '.local'
 $commit=Join-Path $local ($Token+'.commit')
-$deadline=(Get-Date).AddSeconds(180)
+# Elapsed time must survive system clock and time-zone changes during apply.
+$clock=New-GuardClock
+$window=180
 if($WaitForFirewall){
  # Preparation remains bounded at 180 seconds; full drills get a separately bounded firewall window.
  $armed=Join-Path $local ($Token+'.armed')
- while((Get-Date) -lt $deadline -and !(Test-Path -LiteralPath $armed)){
+ while($clock.Elapsed.TotalSeconds -lt $window -and !(Test-Path -LiteralPath $armed)){
   if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2
  }
- if(Test-Path -LiteralPath $armed){$deadline=(Get-Date).AddSeconds($FirewallTimeoutSeconds)}
+ if($clock.Elapsed.TotalSeconds -lt $window -and (Test-Path -LiteralPath $armed)){$clock=New-GuardClock;$window=$FirewallTimeoutSeconds}
 }
-while((Get-Date) -lt $deadline){if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2}
+while($clock.Elapsed.TotalSeconds -lt $window){if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2}
 try{
  Resolve-PendingFirewall -LocalDir $local -Python $Python -ExpectedToken $Token
  # Firewall rollback alone cannot recover a core left stopped by an interrupted

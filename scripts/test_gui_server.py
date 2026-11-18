@@ -42,6 +42,14 @@ class GuiServer(unittest.TestCase):
         self.app.stop()
         self.thread.join(timeout=8)
 
+    def test_second_instance_reuses_the_bound_server(self):
+        another = gui_server.App(local=self.local, gui_dir=self.gui, open_browser=False, idle_exit=False)
+        with patch.object(gui_window, 'launch') as launch:
+            self.assertEqual(another.run(), 0)
+            launch.assert_not_called()
+        self.assertIsNone(another.httpd)
+        self.assertEqual(json.loads(self.app.session_file.read_text())['port'], self.port)
+
     def request(self, method, path, headers=None, body=None):
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=6)
         values = dict(headers or {})
@@ -287,7 +295,8 @@ class GuiServer(unittest.TestCase):
         }) + '\n', encoding='utf-8')
         view = self.app.job_view(job_id)
         self.assertTrue(view['stale'])
-        value = self.app.cancel_job(job_id)
+        with patch.object(self.app, '_process_info', return_value={'alive': False}):
+            value = self.app.cancel_job(job_id)
         self.assertEqual(value['state'], 'interrupted')
         self.assertIn('手动结束', value['error'])
 

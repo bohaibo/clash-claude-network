@@ -34,23 +34,11 @@ $local=Join-Path $project '.local'
 $session=Join-Path $local 'gui\session.json'
 New-Item -Path (Join-Path $local 'gui') -ItemType Directory -Force | Out-Null
 
-# A stale session (e.g. after a crash) must not make this launcher exit before
-# the new server can bind. A live port is left in place: gui_server.py will
-# reuse it and only open another GUI window.
-if(Test-Path -LiteralPath $session){
- try{
-  $oldSession=Get-Content -LiteralPath $session -Raw -Encoding UTF8 | ConvertFrom-Json
-  $probe=New-Object System.Net.Sockets.TcpClient
-  $probe.Connect('127.0.0.1',[int]$oldSession.port)
-  $probe.Close()
- }catch{
-  Remove-Item -LiteralPath $session -Force -ErrorAction SilentlyContinue
- }
-}
-
+# Concurrent launchers keep separate startup diagnostics; the server owns its session.
 $arguments=@(('"'+$guiServer+'"'),'--open')
-$startupOut=Join-Path $local 'gui\startup.stdout.log'
-$startupErr=Join-Path $local 'gui\startup.stderr.log'
+$startupId=[Guid]::NewGuid().ToString('N')
+$startupOut=Join-Path $local ('gui\startup-'+$startupId+'.stdout.log')
+$startupErr=Join-Path $local ('gui\startup-'+$startupId+'.stderr.log')
 try{
  $process=Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $project -WindowStyle Hidden -PassThru -RedirectStandardOutput $startupOut -RedirectStandardError $startupErr
 }catch{
@@ -75,20 +63,22 @@ except Exception:
     pass
 sys.exit(0 if ready else 1)
 '@
-$deadline=[DateTime]::UtcNow.AddSeconds(60)
-while([DateTime]::UtcNow -lt $deadline){
+$clock=[Diagnostics.Stopwatch]::StartNew()
+while($clock.Elapsed.TotalSeconds -lt 65){
  if(Test-Path -LiteralPath $session){
   & $python -c $probeCode
   if($LASTEXITCODE -eq 0){
    Write-Host '界面已在独立浏览器中打开。' -ForegroundColor Green
+   # Successful launch logs are not needed after the child closes its handles.
+   if($process.HasExited){Remove-Item -LiteralPath $startupOut,$startupErr -Force -ErrorAction SilentlyContinue}
    exit 0
   }
  }
  $process.Refresh()
- if($process.HasExited -and $process.ExitCode -ne 0){Show-Failure '界面启动进程异常退出。详情见 .local\gui\startup.stderr.log。'}
+ if($process.HasExited -and $process.ExitCode -ne 0){Show-Failure ('界面启动进程异常退出。详情见 '+$startupErr)}
  Start-Sleep -Milliseconds 400
 }
-Show-Failure '界面或独立浏览器在 60 秒内没有就绪。请查看 .local\gui\server.log 和 startup.stderr.log。'
+Show-Failure ('界面或独立浏览器未及时就绪。请查看 .local\gui\server.log 和 '+$startupErr)
 }catch{
  Show-Failure ('界面启动失败：'+$_.Exception.Message)
 }

@@ -129,6 +129,7 @@ class SafeReconfigure(unittest.TestCase):
   (scripts/'safe_reconfigure.py').write_text(source,encoding='utf-8')
   (scripts/'client.py').write_text("from pathlib import Path\nimport json\nLOCAL=Path(__file__).resolve().parent.parent/'.local'\ndef write(path,data):\n path.write_text(json.dumps(data),encoding='utf-8')\n")
   (scripts/'baseline.py').write_text('def verify(): return {}\n')
+  (scripts/'operation_lock.py').write_bytes((client.PROJECT/'scripts/operation_lock.py').read_bytes())
   job_id='b'*32;folder=local/'reconfigure-runs'/job_id;folder.mkdir(parents=True)
   snapshot=local/'snapshots'/'original';snapshot.mkdir(parents=True)
   parent=scripts/'parent.py'

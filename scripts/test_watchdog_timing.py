@@ -19,8 +19,8 @@ class WatchdogTiming(unittest.TestCase):
             first, rest = source.split('\n', 1)
             mocks = r"""
 $script:tick=0
-function Get-Date {$script:tick+=10;return [datetime]::new(2026,1,1).AddSeconds($script:tick)}
-function Start-Sleep {param($Seconds)}
+function Get-Date {throw 'Watchdog cannot depend on the Windows wall clock'}
+function Start-Sleep {param($Seconds) $script:tick+=10}
 function Test-Path {param($LiteralPath)
  if($LiteralPath.EndsWith('.armed')){return $script:tick -ge ARM_AT}
  if($LiteralPath.EndsWith('.commit')){return $script:tick -ge COMMIT_AT}
@@ -29,6 +29,9 @@ function Test-Path {param($LiteralPath)
 """.replace('ARM_AT', str(arm_at)).replace('COMMIT_AT', str(commit_at))
             (scripts / 'watchdog.ps1').write_text(first + '\n' + mocks + rest, encoding='utf-8-sig')
             (scripts / 'operation_guard.ps1').write_text(
+                "function New-GuardClock {$clock=[pscustomobject]@{Start=$script:tick};"
+                "$clock | Add-Member ScriptProperty Elapsed {[timespan]::FromSeconds($script:tick-$this.Start)};"
+                "$clock}\n"
                 "function Resolve-PendingFirewall {param($LocalDir,$Python,$ExpectedToken) "
                 "$script:tick | Set-Content -LiteralPath (Join-Path $LocalDir 'rollback-tick')}\n"
                 "function Start-Service {throw 'Unexpected service access'}\n", encoding='utf-8-sig')

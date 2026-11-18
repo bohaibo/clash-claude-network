@@ -124,6 +124,7 @@
   "scripts/update.py",
   "scripts/update_task.ps1",
   "scripts/verification_reports.py",
+  "scripts/drill_recovery.py",
   "scripts/verify.py",
   "scripts/verify_core_exit.py",
   "scripts/verify_dns_adapters.py",

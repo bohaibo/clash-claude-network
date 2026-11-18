@@ -75,9 +75,9 @@ if(($script:events -join ',') -cne 'stop,wait,start'){throw 'wrong restart order
  def test_stale_firewall_watchdog_cannot_restart_a_new_operations_core(self):
   project=self.local/'watchdog-fixture';scripts=project/'scripts';scripts.mkdir(parents=True)
   local=project/'.local';local.mkdir()
-  text=(client.PROJECT/'scripts/watchdog.ps1').read_text(encoding='utf-8-sig').replace('AddSeconds(180)','AddSeconds(-1)')
+  text=(client.PROJECT/'scripts/watchdog.ps1').read_text(encoding='utf-8-sig')
   (scripts/'watchdog.ps1').write_text(text,encoding='utf-8-sig')
-  (scripts/'operation_guard.ps1').write_text("function Resolve-PendingFirewall {}\nfunction Start-Service { [CmdletBinding()]param($Name) 'started' | Set-Content -LiteralPath (Join-Path $PSScriptRoot '../service-started') }\n",encoding='utf-8-sig')
+  (scripts/'operation_guard.ps1').write_text("function New-GuardClock { [pscustomobject]@{Elapsed=[timespan]::FromSeconds(999)} }\nfunction Resolve-PendingFirewall {}\nfunction Start-Service { [CmdletBinding()]param($Name) 'started' | Set-Content -LiteralPath (Join-Path $PSScriptRoot '../service-started') }\n",encoding='utf-8-sig')
   token='guard-'+'a'*32;other='guard-'+'b'*32
   for pending,rollback,expected in ((other,True,False),(token,False,False),(token,True,True)):
    with self.subTest(pending=pending,rollback=rollback):
@@ -241,7 +241,8 @@ if((Get-VerificationFailureMessage 'fallback') -cne 'fallback'){throw 'Missing e
   self.assertEqual(report['failed_items'][0]['file'],'.docker/config.json')
  def test_cli_does_not_print_subscription_contents_on_parse_failure(self):
   project=self.local/'cli-fixture';scripts=project/'scripts';scripts.mkdir(parents=True)
-  for name in ('client.py','baseline.py','checks.py','routing_checks.py'):shutil.copy2(client.PROJECT/'scripts'/name,scripts/name)
+  for path in (client.PROJECT/'scripts').glob('*.py'):
+   if not path.name.startswith('test_'):shutil.copy2(path,scripts/path.name)
   (self.root/'profiles').mkdir()
   (self.root/'profiles.yaml').write_text('current: a\nitems:\n- {uid: a, type: remote, file: source.yaml}\n')
   (self.root/'profiles'/'source.yaml').write_text('proxies: [DO-NOT-ECHO-FIXTURE-CREDENTIAL',encoding='utf-8')

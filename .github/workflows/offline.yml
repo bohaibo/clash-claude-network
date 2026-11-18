@@ -1,0 +1,52 @@
+name: Windows offline checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $node = (Get-Command node.exe).Source
+          New-Item -ItemType Directory -Path .runtime/node -Force | Out-Null
+          Copy-Item -LiteralPath $node -Destination .runtime/node/node.exe
+          "CCN_NODE=$((Resolve-Path .runtime/node/node.exe).Path)" >> $env:GITHUB_ENV
+      - name: Python regressions
+        run: python -m unittest discover -s scripts -p "test_*.py"
+      - name: Windows PowerShell 5.1 regressions
+        shell: pwsh
+        run: |
+          foreach ($file in Get-ChildItem scripts/test_*.ps1) {
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File $file.FullName
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Node regressions
+        shell: pwsh
+        run: |
+          foreach ($file in Get-ChildItem scripts/test_*.js) {
+            node $file.FullName
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+      - name: Publication safety and package
+        shell: pwsh
+        run: |
+          python scripts/check_project.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/package_app.py

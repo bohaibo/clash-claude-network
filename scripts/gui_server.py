@@ -12,6 +12,7 @@ import ctypes
 import datetime
 import hashlib
 import json
+import msvcrt
 import os
 import re
 import secrets
@@ -1650,20 +1651,38 @@ class App:
         if os.name != 'nt':
             print('本界面仅支持 Windows。', file=sys.stderr)
             return 2
-        self.local.joinpath('gui').mkdir(parents=True, exist_ok=True)
-        existing = self.existing_session()
-        if existing:
-            try:
-                gui_window.launch(existing, local=self.local, gui=True, app=True)
-            except Exception as exc:
-                # Same rule as a fresh start: reuse the app window, never the
-                # user's default browser.
-                self.log('existing session browser open failed: ' + repr(exc))
-            return 0
-        try:
-            self.session_file.unlink()
-        except OSError:
-            pass
+        self.session_file.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 60
+        with self.session_file.with_name('server-startup.lock').open('a+b') as lock:
+            while True:
+                lock.seek(0)
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError as exc:
+                    if exc.errno != 13:
+                        raise
+                    existing = self.existing_session()
+                    if existing:
+                        if self.open_browser:
+                            try:
+                                gui_window.launch(existing, local=self.local, gui=True, app=True)
+                            except Exception as error:
+                                self.log('existing session browser open failed: ' + repr(error))
+                                return 1
+                        return 0
+                    if time.monotonic() >= deadline:
+                        self.log('Existing GUI server did not become ready')
+                        return 1
+                    time.sleep(0.2)
+                else:
+                    try:
+                        return self._serve()
+                    finally:
+                        lock.seek(0)
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+    def _serve(self):
+        self.session_file.unlink(missing_ok=True)
         self._cleanup_jobs()
         handler = make_handler(self)
         self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), handler)
@@ -1685,6 +1704,7 @@ class App:
         try:
             self.httpd.serve_forever(poll_interval=0.5)
         finally:
+            self.httpd.server_close()
             self._cleanup_session()
         return 0
 

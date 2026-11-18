@@ -191,7 +191,7 @@ function renderBanners() {
   const rows = [];
   if (app.data?.operation?.pending_tun?.length) {
     rows.push(ui.note(h('div', {class: 'note-with-action'},
-      h('span', {text: 'TUN 演练恢复尚未确认，后续操作已暂停。请等待独立看护；若报告恢复失败，请查看本地记录，不要删除恢复标记。'}),
+      h('span', {text: '故障演练恢复尚未确认，后续操作已暂停。请等待独立看护；若报告恢复失败，请查看本地记录，不要删除恢复标记。'}),
       ui.button('查看恢复记录', {variant: 'secondary', size: 'small', onClick: () => navigate('logs')})), 'bad'));
   }
   if (app.data?.operation?.pending_rule_update) {

@@ -3,7 +3,8 @@ import contextlib,io,json,os,socket,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch,Mock
 import client,verify_tun as tun,firewall_audit as firewall,safety_audit as audit,verification_reports as reports,gui_server
-from operation_lock import check_pending_tun
+import drill_recovery
+from operation_lock import check_pending_tun, pending_tun
 
 class SafetyAudit(unittest.TestCase):
  def setUp(self):
@@ -132,7 +133,7 @@ class SafetyAudit(unittest.TestCase):
   project=self.local/'watchdog';scripts=project/'scripts';scripts.mkdir(parents=True)
   local=project/'.local';local.mkdir()
   shutil.copy2(client.PROJECT/'scripts/watchdog.ps1',scripts/'watchdog.ps1')
-  (scripts/'operation_guard.ps1').write_text("function Resolve-PendingFirewall {param($LocalDir,$Python,$ExpectedToken) Write-Output (($global:clockTime-$global:clockStart).TotalSeconds)}")
+  (scripts/'operation_guard.ps1').write_text("function New-GuardClock {$clock=[pscustomobject]@{Start=$global:clockTime}; $clock | Add-Member ScriptProperty Elapsed {$global:clockTime-$this.Start}; $clock}\nfunction Resolve-PendingFirewall {param($LocalDir,$Python,$ExpectedToken) Write-Output (($global:clockTime-$global:clockStart).TotalSeconds)}")
   wrapper=scripts/'clock.ps1'
   wrapper.write_text('''param($Armed,$Window)
 $global:clockStart=[datetime]'2000-01-01';$global:clockTime=$global:clockStart
@@ -145,6 +146,45 @@ if($Armed -eq 'yes'){Set-Content -LiteralPath $marker 'armed'}elseif(Test-Path $
   for armed,window,expected in [('no',360,180),('yes',180,180),('yes',360,360)]:
    run=subprocess.run(['powershell.exe','-NoProfile','-File',str(wrapper),armed,str(window)],capture_output=True,timeout=12)
    self.assertEqual(run.returncode,0,run.stderr);self.assertEqual(int(run.stdout.strip()),expected)
+
+class OutageGuard(unittest.TestCase):
+ def setUp(self):
+  temp=tempfile.TemporaryDirectory(dir=client.LOCAL,prefix='outage-test-')
+  self.addCleanup(temp.cleanup)
+  self.local=Path(temp.name)
+  self.folder=self.local/'tun-drills'/('a'*32)
+  self.folder.mkdir(parents=True)
+  (self.folder/'runtime.before').write_bytes(b'original')
+  self.record={'kind':'core-exit','root':str(self.local),'sha256':drill_recovery.hashlib.sha256(b'original').hexdigest()}
+  client.write(self.folder/'guard.json',self.record)
+  self.enterContext(patch.object(drill_recovery,'root_path',return_value=self.local))
+  self.apply=self.enterContext(patch.object(drill_recovery,'apply_fault'))
+  self.restore=self.enterContext(patch.object(drill_recovery,'restore_runtime'))
+ def test_worker_restores_both_fault_types_after_parent_stops(self):
+  for kind in drill_recovery.KINDS:
+   with self.subTest(kind=kind):
+    record=dict(self.record,kind=kind)
+    (self.folder/'runtime.before').write_bytes(b'original')
+    (self.folder/'armed').touch()
+    drill_recovery.run_guard(self.folder,record,iter([True,False]).__next__)
+    self.apply.assert_called_with(self.local,kind,self.folder)
+    self.restore.assert_called_with(self.local,kind,'original')
+    self.assertTrue(client.load(self.folder/'recovery.json')['automatic'])
+    self.assertTrue((self.folder/'done').exists())
+    self.assertEqual(pending_tun(self.local),[])
+ def test_worker_recovers_partial_fault_and_retains_failed_recovery(self):
+  (self.folder/'armed').touch()
+  self.apply.side_effect=TimeoutError('fault timed out')
+  self.restore.side_effect=RuntimeError('restore failed')
+  with self.assertRaises(RuntimeError):
+   drill_recovery.run_guard(self.folder,self.record,lambda:True)
+  self.assertEqual(pending_tun(self.local),[{'id':self.folder.name,'kind':'core-exit','status':'failed'}])
+  self.assertTrue((self.folder/'runtime.before').is_file())
+ def test_worker_does_not_touch_runtime_before_arming(self):
+  drill_recovery.run_guard(self.folder,self.record,lambda:False)
+  self.apply.assert_not_called()
+  self.restore.assert_not_called()
+  self.assertEqual(pending_tun(self.local),[])
 
 class ControllerDeadline(unittest.TestCase):
  def test_controller_has_a_finite_deadline(self):

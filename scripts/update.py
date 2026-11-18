@@ -72,6 +72,12 @@ def recover_pending():
  folder=LOCAL/'rule-updates'/token;record=load(folder/'transaction.json')
  root,targets=transaction_targets(record)
  require(load(root/'profiles.yaml').get('current')==record['current_uid'],'Rule update recovery needs review')
+ if record.get('state')=='committed':
+  for name,path in targets.items():
+   current=path.read_bytes() if path.exists() else None
+   require(digest(current)==record['files'][name]['after'],'Rule update recovery needs review')
+  pending.unlink()
+  return True
  # A crash must not allow a later user edit to be silently overwritten.
  for name,path in targets.items():
   entry=record['files'][name];current=path.read_bytes() if path.exists() else None

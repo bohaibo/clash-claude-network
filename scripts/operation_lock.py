@@ -49,18 +49,27 @@ def check_pending_firewall(local):
 def pending_tun(local):
     rows=[]
     for folder in (Path(local)/'tun-drills').glob('*'):
-        if re.fullmatch(r'[a-f0-9]{32}',folder.name) and (folder/'ready').exists() and not (folder/'done').exists():
+        if not re.fullmatch(r'[a-f0-9]{32}',folder.name) or not (folder/'ready').exists() or (folder/'done').exists():
+            continue
+        try:
+            guard=json.loads((folder/'guard.json').read_text(encoding='utf-8-sig'))
+            kind=guard.get('kind') if isinstance(guard,dict) else None
+        except (OSError,ValueError):
+            kind=None
+        if kind not in ('node-outage','core-exit') or (folder/'armed').exists():
             try:
                 recovery=json.loads((folder/'recovery.json').read_text(encoding='utf-8-sig'))
                 failed=isinstance(recovery,dict) and recovery.get('success') is False
             except (OSError,ValueError):
                 failed=False
-            rows.append({'id':folder.name,'status':'failed' if failed else 'pending'})
+            row={'id':folder.name,'status':'failed' if failed else 'pending'}
+            if kind in ('node-outage','core-exit'):row['kind']=kind
+            rows.append(row)
     return sorted(rows,key=lambda row:row['id'])
 
 def check_pending_tun(local):
     if pending_tun(local):
-        raise RuntimeError('TUN drill recovery is pending; wait for local recovery and inspect its report')
+        raise RuntimeError('TUN drill recovery or another outage recovery is pending; wait for local recovery and inspect its report')
 
 def check_pending_rules(local):
     if (Path(local)/'rule-update-pending.json').exists():

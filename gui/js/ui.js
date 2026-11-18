@@ -219,7 +219,9 @@ export function verificationLabel(verification = {}) {
 }
 
 export function recoveryLabel(operation = {}) {
-  if (operation.pending_tun?.length) return 'TUN 演练待恢复';
+  if (operation.pending_tun?.length) {
+    return operation.pending_tun.some(row => row.kind) ? '故障演练待恢复' : 'TUN 演练待恢复';
+  }
   if (operation.pending_firewall) return '防火墙待恢复';
   if (operation.pending_rule_update) return '规则更新待恢复';
   if (operation.settings_pending?.length) return '设置保存待恢复';
