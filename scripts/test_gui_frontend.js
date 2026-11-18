@@ -228,9 +228,14 @@ async function main() {
     confirm: async () => true, startJob: value => jobs.push(value)};
   networkContext.pageTest.diagnosticsCard(diagnosticCtx);
   assert.equal(jobs.length, 0);
-  await buttons.find(b => b.label === '检查连通性').onClick();
-  await buttons.find(b => b.label === '完整复核与演练').onClick();
-  assert.deepEqual(jobs.map(j => j.action), ['verify', 'audit']);
+  assert.deepEqual(buttons.map(b => b.label), ['完整网络验收']);
+  await buttons[0].onClick();
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].action, 'audit');
+  assert.equal(jobs[0].confirm, 'AUDIT');
+  diagnosticCtx.busy = true;
+  await buttons[0].onClick();
+  assert.equal(jobs.length, 1, 'busy state blocks another audit');
   const configured = {configured: true, plan: {}, last_run: {success: true, action: 'apply',
     network_tested: false, configuration_time: '2026-11-13T20:00:00+08:00'},
     verification: {available: true, success: true, time: '2026-11-13T19:00:00+08:00'}};

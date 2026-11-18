@@ -28,7 +28,7 @@ const ACTION_LABELS = {
   'drill-recover': '恢复故障演练',
   'update-recover': '恢复上次规则更新',
   verify: '检查连通性',
-  audit: '完整防火墙复核与故障演练',
+  audit: '完整网络验收',
   'settings-recover': '恢复原设置',
 };
 
@@ -234,10 +234,14 @@ function renderBanners() {
   if (lastRun.success === false && lastRun.action) {
     rows.push(ui.note('上次' + (ACTION_LABELS[lastRun.action] || '操作') + '未完成：' + (lastRun.error || '请查看日志。'), 'bad'));
   }
+  if (app.data.configured && !app.jobId && ['failed', 'pending'].includes(lastRun.network_audit)) {
+    rows.push(ui.note('配置已写入，但本次完整网络验收' + (lastRun.network_audit === 'failed' ? '未通过' : '尚未确认完成') +
+      '。请查看「日志与验证」，可在「网络环境」重新验收。', 'warn'));
+  }
   const verification = app.data.verification || {};
   const verificationAge = verification.time ? (Date.now() - new Date(verification.time).getTime()) / 3600000 : Infinity;
   if (app.data.configured && verification.dns_failed) {
-    rows.push(ui.note('上次网络验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。请立即重新检查连通性；必要时恢复或重新配置。', 'bad'));
+    rows.push(ui.note('上次网络验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。可在「网络环境」重新运行完整网络验收。', 'bad'));
   } else if (app.data.configured && verification.available && verification.success === false) {
     rows.push(ui.note('上次网络验收未通过，请查看失败项目并重新检查。', 'warn'));
   } else if (app.data.configured && !verification.available) {

@@ -303,9 +303,11 @@ if($Action -eq 'reconfigure'){
  return
 }
 $activeJob=Join-Path $local 'reconfigure-active.json'
+$autoVerify=$Action -eq 'apply'
 if((Test-Path -LiteralPath $activeJob) -and $Action -ne 'restore'){
  $owner=(Get-Content -LiteralPath $activeJob -Raw -Encoding UTF8 | ConvertFrom-Json).id
  if(!$env:CCN_RECONFIGURE_JOB -or $env:CCN_RECONFIGURE_JOB -cne $owner){throw '安全重新配置或网络恢复仍在执行，请等待本机看护完成，不要同时开始其他操作。'}
+ $autoVerify=$false
 }
 if($Action -eq 'drill-recover'){
  if(!$Acknowledged -or !$RecoveryId){throw '缺少演练恢复确认。'}
@@ -433,6 +435,7 @@ if(!$Acknowledged) {
   Write-PlanItem 5 '清理系统、WinHTTP、环境变量与 Git/npm/Docker 的代理覆盖' '普通本机流量交给 TUN 分流；已打开的终端需重新启动，容器内部行为未验证'
   Write-Host ''
   Write-Host '执行时会逐条显示进度。中途失败可以在「快照与恢复」中还原本项目记录的改动；后加订阅和正常更新会保留。' -ForegroundColor White
+  if($autoVerify){Write-Host '配置完成后会自动执行完整网络验收和故障演练，公网连接会短暂中断。' -ForegroundColor Yellow}
  }
  else{
   Write-Host ''
@@ -451,6 +454,7 @@ $result=[ordered]@{success=$false;action=$Action}
 # 先按本次实际会跑的分支确定步骤总数，进度条才能显示「第几步/共几步」。
 if($Action -eq 'apply'){
  $plan=@('检查运行环境','选择节点','准备分流规则','生成候选配置与备份','备份系统状态','封存快照','写入 Clash 客户端配置','启动防火墙看门狗','应用系统设置','确认配置写入','配置规则更新方式')
+ if($autoVerify){$plan+='完整网络验收'}
 } else {
  $plan=@('校验快照','移除规则更新任务','还原系统设置','还原 Clash 客户端')
 }
@@ -569,7 +573,7 @@ try {
    $firewallPlan=Get-Content -LiteralPath (Join-Path $local 'plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
    Assert-StrictFirewall -coreProgram ([string]$firewallPlan.core_program)
   }finally{$applyMutex.ReleaseMutex();$applyMutex.Dispose()}
-  Write-Step '确认本机内核已加载规则和固定节点组；不访问测试网站，不进行故障演练'
+  Write-Step '确认本机内核已加载规则和固定节点组'
   $guardMutex=New-Object Threading.Mutex($false,('Global\CCN-'+$watchToken))
   try{[void]$guardMutex.WaitOne()}catch [Threading.AbandonedMutexException]{}
   try {
@@ -666,9 +670,15 @@ try {
     $extensionNote=' '+($protection.installation_pending -join '、')+' 尚有标准资料未完成扩展安装。请正常重启浏览器；仍未安装时，在扩展页启用开发者模式并加载项目 .local\webrtc-addon\1.0.0。'
    }
   }catch{$extensionNote=' 扩展安装状态未确认，请查看「网络环境」的网络保护；自动安装失败时可使用项目离线包手动加载。'}
-  Write-Done ('已配置，网络未验收（共 '+$planCount+' 步）。本次的回滚点（快照）：'+$env:CCN_SNAPSHOT+$extensionNote)
+  $configurationMessage='配置写入已确认。本次回滚点：'+$env:CCN_SNAPSHOT+$extensionNote
+  if($autoVerify){
+   $result.network_audit='pending'
+   Complete-StepTiming 'passed'
+   Write-Host $configurationMessage
+  }else{
+   Write-Done ('已配置，网络未验收。'+$configurationMessage)
+  }
   Write-Host '  固定节点组 Claude-Overseas-Pinned 只包含你指定的节点。要撤销请在「快照与恢复」中恢复。'
-  Write-Host '  配置写入已确认；未运行联网检查或故障演练。需要时请在「网络环境」点击独立检查按钮。'
 
  } else {
   Write-Done ('恢复已完成（共 '+$planCount+' 步）。使用的快照：'+$env:CCN_SNAPSHOT)
@@ -722,9 +732,33 @@ try {
   # 配置/恢复不会关闭或修改默认浏览器；浏览器由用户自行管理。
 
 }
+$auditPassed=$true
+if($autoVerify -and $result.success){
+ # Configuration is committed. Keep the operation lock through the audit and
+ # let the drill guards handle recovery independently of the apply watchdog.
+ Write-Step '检查连通性与防火墙，演练节点故障、关闭 TUN 和内核退出，再复测恢复后的网络。'
+ $auditPassed=$false
+ try{
+  & $python (Join-Path $PSScriptRoot 'safety_audit.py')
+  $auditPassed=$LASTEXITCODE -eq 0
+ }catch{
+  Write-Host ('网络验收执行中断：'+$_.Exception.Message) -ForegroundColor Yellow
+ }
+ $result.network_tested=$auditPassed
+ $result.network_audit=if($auditPassed){'passed'}else{'failed'}
+ $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
+ if($auditPassed){
+  Write-Done ('配置完成，完整网络验收通过。'+$extensionNote)
+ }else{
+  Complete-StepTiming 'failed'
+  $auditMessage='配置已写入，但完整网络验收未通过。请在「日志与验证」查看阶段记录。'
+  Write-Host $auditMessage -ForegroundColor Yellow
+  Write-GuiEvent 'error' ([ordered]@{message=$auditMessage})
+ }
+}
 $operationStream.Dispose()
 if(!$NoPause){Read-Host '按回车键关闭窗口'}
-if(!$result.success){exit 1}
+if(!$result.success -or !$auditPassed){exit 1}
 
 } finally {$operationStream.Dispose()}
 } catch {

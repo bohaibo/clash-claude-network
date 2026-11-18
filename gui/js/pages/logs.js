@@ -47,7 +47,7 @@ function lastRunCard(ctx) {
 function verificationCard(ctx) {
   const verification = ctx.state.verification || {};
   if (!verification.available) {
-    return ui.card({ title: '网络验收', help: '配置不自动运行验收；请在网络环境页面检查或演练。' }, ui.el('p', { class: 'muted', text: '还没有验收记录' }));
+    return ui.card({ title: '网络验收', help: '一键配置完成后自动验收，也可在「网络环境」手动运行完整网络验收。' }, ui.el('p', { class: 'muted', text: '还没有验收记录' }));
   }
   const coverage = verification.coverage;
   const complete = coverage === 'full-network';
@@ -96,7 +96,7 @@ function reconfigureCard(ctx) {
 function actionName(action) {
   return {
     apply: '配置网络', restore: '恢复快照', snapshot: '保存快照',
-    supplement: '补充配置', reconfigure: '恢复并重新配置', update: '更新规则', verify: '连通性检查', audit: '完整复核与故障演练',
+    supplement: '补充配置', reconfigure: '恢复并重新配置', update: '更新规则', verify: '连通性检查', audit: '完整网络验收',
   }[action] || action;
 }
 

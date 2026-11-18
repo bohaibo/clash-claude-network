@@ -21,10 +21,10 @@ Workflow:
 1. `python scripts/client.py discover` shows subscriptions/node names without credentials.
 3. Windows Settings → Time & language → Language & region → Regional format follows the selected region's culture (SG → zh-SG, US → en-US). Keep Locale and LocaleName consistent, verify in a fresh process, and restore the pinned original culture. First apply creates the original snapshot automatically. Later applies reuse the pinned first recovery point; manual snapshots are additive. Never overwrite the baseline with the current state.
 4. Apply: `scripts/run.ps1 -Action apply -Node "<exact>" -Acknowledged` (or the GUI). Use `-Subscription` for duplicate names and `-Region` when the hint is wrong.
-   Chain mode uses the same apply/system/guard/restore path, with a `.local/`-only `-ChainSpecPath` containing two exact existing remote nodes and the user-chosen new name. Clone nodes into an independent registered local source; never edit either original subscription. Preserve entry-node encrypted DNS only for that node's server domain. Confirm the loaded exit's `dialer-proxy` and the single pinned group locally. Both hops must fail closed; opt-in outage verification exercises each hop. The final hop determines region. No apply-time network probes.
+   Chain mode uses the same apply/system/guard/restore path, with a `.local/`-only `-ChainSpecPath` containing two exact existing remote nodes and the user-chosen new name. Clone nodes into an independent registered local source; never edit either original subscription. Preserve entry-node encrypted DNS only for that node's server domain. Confirm the loaded exit's `dialer-proxy` and the single pinned group locally. Both hops must fail closed; the audit exercises each hop. The final hop determines region.
 5. Apply/supplement block all non-project outbound allows, close IPv6 bindings, set strict firewall and system region/language. Node failure keeps domestic direct; core failure blocks all public traffic. Explain this before acting.
 6. Rule updates: manual, or scheduled every 1–365 days at HH:MM (current user task). Read `.local/ui-settings.json`; do not replace a manual choice with a scheduled task.
-7. Optional, user-triggered verification only (never part of apply/reconfigure): `scripts/verify.py`: domestic HTTP, foreign exit region, DNS 1/64/65, fake-IP, IPv6 block, UDP STUN/route, Git/npm, node outage, core outage. Report passed/failed/not tested.
+7. After a successful one-click apply, run the complete audit with `scripts/safety_audit.py`. The same audit can be rerun from the network page. Its connectivity checks cover domestic HTTP, foreign exit region, DNS 1/64/65, fake-IP, IPv6 block, UDP STUN/route, and Git/npm. Record the configuration and audit results separately.
 9. Restore: use the GUI snapshot page or `-Action restore`. Restore keeps current subscriptions/node updates and removes the project update task; it restores the managed WebRTC policies without editing browser profiles.
 10. Report what changed, evidence, and untested items. Never commit `.local`, `.runtime`, credentials, real profiles or IP logs.
 
@@ -57,7 +57,7 @@ TUN 演练先确认正常状态可连接通用测试 IP，再启用独立本机�
 
 软件版本由 assets/app-release.json 统一管理。打包严格遵守 assets/package-files.json，不包含 .local、.runtime、节点、密钥、日志或基线；包输出放 .local/packages/。软件更新只检查指定 GitHub Releases 并提示，不自动执行下载文件或覆盖程序；网络失败或私有来源不得显示已是最新。打包授权不等于提交、推送或发布授权。
 
-默认完整配置和恢复并重新配置只执行配置，不自动运行联网检查或故障演练。保留候选内核校验、本机控制通道写入确认、防火墙写入核对、IPv6 绑定核对及超时回滚。独立「检查连通性」和「完整复核与演练」由用户按需触发；配置完成不等于网络已验收，历史验收不得冒充本次结果。
+一键配置确认写入后自动执行完整网络验收。候选内核校验、本机控制通道写入确认、防火墙写入核对、IPv6 绑定核对及超时回滚均先于验收。恢复并重新配置完成后可在「网络环境」点击「完整网络验收」手动执行。历史验收按对应的配置显示。
 
 
 性能维护：完整配置在关闭 Clash 客户端前下载并校验规则，使用 `.local/rule-preparations/` 内本次操作专属、15 分钟有效的一次性记录；禁止复用过期记录或回退旧规则。关闭后重新选择精确节点，写入前核对准备输入摘要，输入变化停止。YAML 只允许安全 Loader/Dumper；C 实现不可用时使用安全 Python 回退。耗时记录仅放 `.local/performance/`，不得记录参数、结果、节点或错误正文；记录失败不得阻断恢复。按变更范围使用规则更新、补充或完整应用，不基于缓存自动跳过校验。首次基线、系统写入串行、候选内核校验、两阶段看护和本机确认保持不变。

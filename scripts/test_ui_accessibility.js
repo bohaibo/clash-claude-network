@@ -245,7 +245,7 @@ async function main() {
   network.expose('globalThis.probe={actionsCard,diagnosticsCard};');
   pending.state.baseline = 'first'; pending.state.plan = {node:'Node A'};
   network.document.root.append(network.context.probe.actionsCard(pending),network.context.probe.diagnosticsCard(pending));
-  for (const text of ['补充配置','恢复并重新配置','检查连通性','完整复核与演练']) assert(byText(network.document.root,text).disabled, text);
+  for (const text of ['补充配置','恢复并重新配置','完整网络验收']) assert(byText(network.document.root,text).disabled, text);
   assert(!byText(network.document.root,'去规则更新').disabled);
   const snapshots = environment('gui/js/pages/snapshots.js');
   snapshots.expose('globalThis.page=render;');

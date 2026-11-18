@@ -846,6 +846,7 @@ class App:
                 'status': str(last_run.get('status') or ''),
                 'error': str(last_run.get('error') or ''),
                 'network_tested': last_run.get('network_tested') if type(last_run.get('network_tested')) is bool else None,
+                'network_audit': str(last_run.get('network_audit') or '')[:20],
                 'configuration_time': str(last_run.get('configuration_time') or '')[:80],
             },
             'reconfigure_runs': self.reconfigure_runs(),

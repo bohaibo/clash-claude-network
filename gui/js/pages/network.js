@@ -35,7 +35,7 @@ export function configurationDetails(ctx) {
   const cards = [];
   cards.push(configCard(ctx));
   if (state.verification?.dns_failed) {
-    cards.push(ui.note('上次验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。请点击「重新检查连通性」；若仍失败，恢复关联快照并重新配置。', 'bad'));
+    cards.push(ui.note('上次验收的 DNS A/64/65 未通过，可能存在 DNS 泄漏。请在「网络环境」重新运行完整网络验收。', 'bad'));
   }
   const health = state.preview?.current?.health;
   cards.push(ui.card({ title: '当前配置一致性', subtitle: '核对本地配置文件和系统状态。规则或版本不一致请重新配置；系统地区或新增网卡请补充配置。' },
@@ -100,9 +100,9 @@ function verificationCard(ctx) {
   if (!verification.available) {
     body.push(ui.el('p', { class: 'muted', text: '还没有验收结果' }));
   } else {
-    if (verification.dns_failed) body.push(ui.note('上次 DNS 验收未通过，请重新检查连通性；仍失败时恢复关联快照并重新配置。', 'bad'));
+    if (verification.dns_failed) body.push(ui.note('上次 DNS 验收未通过，可重新运行完整网络验收。', 'bad'));
     if (verification.configuration_matches_current === false) body.push(ui.note('网络配置或规则已变化。需要时请重新检查。', 'warn'));
-    if (!verification.source_matches_current) body.push(ui.note('该历史报告未对应当前软件版本；需要时请重新检查或演练。', 'warn'));
+    if (!verification.source_matches_current) body.push(ui.note('该历史报告未对应当前软件版本，可重新验收。', 'warn'));
     body.push(ui.el('div', { class: 'verification-head' },
       ui.badge(ui.verificationLabel(verification), ui.verificationTone(verification)),
       ui.el('span', { class: 'muted', text: '记录时间 ' + ui.formatTime(verification.time) + ' · ' + ui.verificationRelation(ctx.state) }),
@@ -114,7 +114,7 @@ function verificationCard(ctx) {
       ui.el('span', { class: 'status-dot ' + (stage.success ? 'ok' : stage.status === 'unverified' ? 'warn' : stage.tested ? 'bad' : 'warn') }),
       ui.el('div', {}, ui.el('strong', { text: stage.title }), ui.el('small', { text: stage.success ? '已通过' : stage.status === 'unverified' ? '待检查' : stage.tested ? '未通过' : '未记录' }))))));
   }
-  return ui.card({ title: '上次网络验收', help: '这里只显示历史结果，不代表当前网络已通过验收。配置不自动运行检查；需要时使用下方检查按钮。浏览器、虚拟网络、Claude 服务和账号行为未验证。', actions: ui.button('查看日志', { variant: 'ghost', size: 'small', icon: 'list', onClick: () => ctx.navigate('logs') }) }, ...body);
+  return ui.card({ title: '上次网络验收', help: '显示最近一次验收记录及其与当前配置的对应关系。浏览器、虚拟网络、Claude 服务和账号行为未验证。', actions: ui.button('查看日志', { variant: 'ghost', size: 'small', icon: 'list', onClick: () => ctx.navigate('logs') }) }, ...body);
 }
 
 function actionsCard(ctx) {
@@ -145,13 +145,10 @@ function actionRow(title, text, action) {
 }
 
 function diagnosticsCard(ctx) {
-  const unavailable = !ctx.state.configured;
-  return ui.card({ title: '检查与故障演练', help: '一键配置不运行这些检查。可自行选择；故障演练会短暂中断公网。' },
-    ui.el('div', { class: 'action-grid' },
-      actionRow('重新检查连通性', '运行一次连通性验收（不模拟节点故障或停核），检查出口地区、DNS、IPv6 与工具出口。',
-        ui.button('检查连通性', { variant: 'secondary', icon: 'refresh', disabled: unavailable || operationsBlocked(ctx), onClick: () => verify(ctx) })),
-      actionRow('完整防火墙复核与故障演练', '以管理员权限完整检查防火墙，分别演练节点故障、关闭 TUN 但保持内核运行、内核退出，并在恢复后复测。公网会短暂中断。',
-        ui.button('完整复核与演练', { variant: 'secondary', icon: 'shield', disabled: unavailable || operationsBlocked(ctx), onClick: () => audit(ctx) }))));
+  return ui.card({ title: '检查与故障演练',
+    subtitle: '检查连通性和防火墙，演练节点故障、关闭 TUN 和内核退出，并在恢复后复测。执行期间公网会短暂中断。',
+    actions: ui.button('完整网络验收', { variant: 'secondary', icon: 'shield',
+      disabled: !ctx.state.configured || operationsBlocked(ctx), onClick: () => audit(ctx) }) });
 }
 
 async function supplement(ctx) {
@@ -162,7 +159,7 @@ async function supplement(ctx) {
     description: '会扫描当前本地防火墙规则与全部网卡，禁用非项目的出站放行规则、关闭启用的 IPv6 绑定、系统定位、自动时区和自动校时，按所选节点地区设置国家/区域格式/时区，将改动记录到关联快照。入站规则保留。',
     items: [
       { title: '可能影响', text: '新软件、其他 VPN、Docker/WSL、远程控制和依赖 IPv6 的内网资源可能失效；三款标准浏览器的 WebRTC 策略和扩展安装策略也会补充，网页通话可能受影响。' },
-      { title: '不运行测试', text: '补充配置不会运行网络或断网测试；需要时请另行检查连通性。' },
+      { title: '验收入口', text: '补充配置完成后，可在「检查与故障演练」手动运行完整网络验收。' },
     ],
     note: '需要已有完整配置记录和可校验的原始快照；缺失时会停止，不会覆盖首次基线。',
     confirmText: '补充配置',
@@ -172,25 +169,14 @@ async function supplement(ctx) {
   ctx.startJob({ action: 'supplement', confirm: 'SUPPLEMENT' });
 }
 
-async function verify(ctx) {
-  if (operationsBlocked(ctx)) return;
-  const ok = await ctx.confirm({
-    title: '重新检查连通性？',
-    description: '会读取当前运行配置并测试国内网站、海外出口地区、DNS A/64/65、TUN 接管、IPv6 阻断以及 Git/npm/UDP。不会模拟节点故障或停核。',
-    confirmText: '开始检查',
-  });
-  if (!ok) return;
-  ctx.startJob({ action: 'verify', confirm: 'VERIFY' });
-}
-
 async function audit(ctx) {
-  if (operationsBlocked(ctx)) return;
+  if (!ctx.state.configured || operationsBlocked(ctx)) return;
   const ok = await ctx.confirm({
-    title: '完整复核防火墙并演练故障？',
-    description: '将请求管理员权限，检查完整生效策略，分别模拟节点故障、关闭 TUN、内核退出，并验证恢复。公网和正在使用的连接会短暂中断，可能需要数分钟。',
+    title: '开始完整网络验收？',
+    description: '将请求管理员权限，检查国内连通性、海外出口、DNS、IPv6 与防火墙，并演练节点故障、关闭 TUN 和内核退出。恢复后将再次核对网络与防火墙。公网连接会短暂中断，整个过程可能需要数分钟。',
     items: [{title: '独立恢复看护', text: '每个故障阶段由本机看护负责恢复；恢复失败可在「日志与验证」重试。'},
       {title: '检查未完成', text: '补齐管理员权限或修复失败项目后重新检查。'}],
-    confirmText: '开始完整复核',
+    confirmText: '开始验收',
   });
   if (ok) ctx.startJob({action: 'audit', confirm: 'AUDIT'});
 }

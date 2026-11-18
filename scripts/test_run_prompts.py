@@ -11,7 +11,7 @@ class RunPrompts(unittest.TestCase):
   self.local=self.project/'.local';self.local.mkdir()
   (self.local/'env.json').write_text(json.dumps({'python':sys.executable}))
   source=(client.PROJECT/'scripts/run.ps1').read_text(encoding='utf-8-sig')
-  start=source.index('$identity=');end=source.index('# The same byte-range lock',start)
+  start=source.index('$identity=');end=source.index('$activeJob=',start)
   source=source[:start]+source[end:]
   mocks="""
 function Get-Process { return @() }
@@ -76,7 +76,7 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   types=[row.get('type') for row in rows]
   self.assertIn('start',types);self.assertIn('step',types);self.assertIn('error',types)
   first_step=next(row for row in rows if row.get('type')=='step')
-  self.assertEqual(first_step.get('total'),11)
+  self.assertEqual(first_step.get('total'),12)
   self.assertTrue(all('浏览器' not in str(row.get('title','')) for row in rows))
  def test_duplicate_node_stops_without_substituting(self):
   self.discover([{'uid':uid,'name':'Same','nodes':['Chosen']} for uid in ('first','second')])
@@ -146,9 +146,9 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
  def test_cancelled_elevation_is_not_reported_as_configuration_failure(self):
   path=self.scripts/'run.ps1';source=path.read_text(encoding='utf-8-sig')
   original=(client.PROJECT/'scripts/run.ps1').read_text(encoding='utf-8-sig')
-  start=original.index('$identity=');end=original.index('# The same byte-range lock',start)
+  start=original.index('$identity=');end=original.index('$activeJob=',start)
   block=original[start:end];block='if($true){\n'+block[block.index('  $arguments='):]
-  source=source.replace('# The same byte-range lock',block+'# The same byte-range lock',1)
+  source=source.replace('$activeJob=',block+'$activeJob=',1)
   source=source.replace("throw 'Unexpected process start'",'throw (New-Object ComponentModel.Win32Exception(1223))')
   path.write_text(source,encoding='utf-8-sig')
   result,text=self.run_entry('snapshot')
@@ -178,6 +178,62 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
    self.assertEqual(report['firewallRollback'],not fails,text)
    self.assertIn('防火墙回滚失败' if fails else '防火墙回滚已完成',text)
    self.assertIn('重试之前请先在',text)
+
+ def test_apply_runs_audit_after_committing_and_keeps_configuration_on_audit_failure(self):
+  snapshot=self.local/'snapshots'/'fixture';snapshot.mkdir(parents=True)
+  plan={'snapshot':str(snapshot),'core_program':'fixture.exe','node':'Chosen','root':'fixture'}
+  (self.local/'plan.json').write_text(json.dumps(plan))
+  discover={'subscriptions':[{'uid':'first','name':'Same','nodes':['Chosen']}]}
+  (self.scripts/'client.py').write_text(f"""import json, sys
+from pathlib import Path
+LOCAL = Path(__file__).resolve().parents[1] / '.local'
+GROUP = 'fixture'
+load = lambda path: json.loads(path.read_text(encoding='utf-8-sig'))
+root_path = lambda root: root
+def api(root, method, path):
+    return {{'proxies': {{GROUP: {{'all': ['Chosen'], 'now': 'Chosen'}}}}}}
+if __name__ == '__main__':
+    command = sys.argv[1]
+    if command == 'discover': print(json.dumps({discover!r}))
+    elif command == 'prefetch-rules': print(json.dumps({{'rules_bundle': 'a'*32}}))
+    elif command == 'prepare': print(json.dumps({plan!r}))
+    else: assert command in ('seal', 'apply-client'), command
+""",encoding='utf-8')
+  (self.scripts/'config_health.py').write_text('def assert_live(*args): pass\n')
+  (self.scripts/'system.ps1').write_text('param($Action,$Python,$TimeZoneId,$RegionCode,$CultureName)\n')
+  (self.scripts/'update_task.ps1').write_text('param($Action,$Python,$At,$DaysInterval)\n')
+  (self.scripts/'webrtc_system.py').write_text('print(\'{"installation_pending": [], "manual_fallback_available": false}\')\n')
+  path=self.scripts/'run.ps1';source=path.read_text(encoding='utf-8-sig')
+  source=source.replace("throw 'Unexpected process mutation'",'return')
+  source=source.replace("throw 'Unexpected process start'",'return')
+  bypass="if($Force){throw 'Unexpected firewall rollback'}"
+  source=source.replace('function Resolve-PendingFirewall { return $null }',
+                        "function Resolve-PendingFirewall {param($LocalDir,$Python,$ExpectedToken,[switch]$Force) "+bypass+"}")
+  source=source.replace('function Assert-FirewallAvailable', 'function Assert-StrictFirewall { return }\nfunction Assert-FirewallAvailable')
+  path.write_text(source,encoding='utf-8-sig')
+  for exit_code in (0,1):
+   with self.subTest(audit_exit=exit_code):
+    seen=self.local/'audit-ran.txt';seen.unlink(missing_ok=True)
+    (self.scripts/'safety_audit.py').write_text(f"""from client import LOCAL, load
+configuration = load(LOCAL / 'configuration-applied.json')
+result = load(LOCAL / 'last-run.json')
+assert result['success'] is True and result['network_audit'] == 'pending'
+assert result['configuration_id'] == configuration['configuration_id']
+assert any(LOCAL.glob('guard-*.commit'))
+(LOCAL / 'audit-ran.txt').write_text('ran')
+raise SystemExit({exit_code})
+""")
+    events=self.local/'audit-events.jsonl';events.unlink(missing_ok=True)
+    result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Chosen','-EventsFile',str(events))
+    self.assertEqual(result.returncode,exit_code,text)
+    self.assertTrue(seen.exists(),text)
+    report=json.loads((self.local/'last-run.json').read_text(encoding='utf-8-sig'))
+    self.assertTrue(report['success'])
+    self.assertEqual(report['network_audit'],'failed' if exit_code else 'passed')
+    self.assertEqual(report['network_tested'],not exit_code)
+    rows=[json.loads(line) for line in events.read_text(encoding='utf-8-sig').splitlines()]
+    self.assertEqual([row['title'] for row in rows if row['type']=='step'][-1],'完整网络验收')
+    self.assertEqual(rows[-1]['type'],'error' if exit_code else 'done')
 
 
 if __name__=='__main__':unittest.main()

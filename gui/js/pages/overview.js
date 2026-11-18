@@ -415,7 +415,7 @@ function renderChoices(ctx) {
       form.regionManual = Boolean(value);
       form.acknowledged = false;
       renderChoices(ctx);
-    }), '从节点名自动填入地区提示；实际出口可通过独立的连通性检查核对，可随时手动修改。'),
+    }), '从节点名自动填入地区提示，可随时手动修改。完整网络验收会核对实际出口。'),
   );
 
   const selected = ui.el('div', { class: 'selected-node' },
@@ -562,12 +562,12 @@ async function beginApply(ctx) {
   const ok = await ctx.confirm({
     title: '开始配置网络？',
     subtitle: (chain ? chain.name+'：电脑 → '+chain.front_node+' → '+chain.exit_node : form.node) + ' · 最终出口 ' + form.region,
-    description: '生成并校验网络规则，应用系统设置和三款常用浏览器的 WebRTC 策略，不自动运行联网检查或故障演练；外部指纹浏览器自行管理。',
+    description: '写入并确认网络配置后，自动检查连通性和防火墙，并演练节点故障、关闭 TUN 和内核退出。演练期间公网会短暂中断。',
     items: IMPACT,
     note: 'Mihomo 停止时所有公网（包括国内网站）都会短暂断开；请先保存正在进行的网络工作。',
     noteType: 'warn',
     confirmText: '确认配置',
-    requireCheck: '我已保存工作，并了解严格防火墙、IPv6、定位、自动时间和国家/区域格式/时区改动的影响。',
+    requireCheck: '我已保存工作，并了解系统设置改动和故障演练造成的短暂断网。',
   });
   if (!ok) return;
   ctx.startJob({
@@ -670,7 +670,7 @@ async function quickReapply(ctx) {
   const ok = await ctx.confirm({
     title: '按当前记录重新配置？',
     subtitle: plan.node + ' · 出口 ' + (plan.region || 'SG'),
-    description: '沿用上次记录的精确节点、订阅和地区，生成校验后重新应用配置，不先恢复最早状态。节点不存在时停止；只更新名单请去规则更新，新增网卡或地区设置偏差请使用补充配置。不自动运行联网检查或故障演练。',
+    description: '沿用上次记录的精确节点、订阅和地区重新配置，写入确认后自动执行完整网络验收。验收包含故障演练，公网会短暂中断。',
     items: IMPACT,
     confirmText: '重新配置',
     requireCheck: '我已了解重新配置会关闭 Clash 并短暂中断网络。',
