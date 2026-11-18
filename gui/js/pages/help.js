@@ -90,7 +90,7 @@ export function refreshStatus(ctx) {
   }
   const software = document.getElementById('help-software');
   if (software) {
-    const signature = JSON.stringify(ctx.state?.software || {});
+    const signature = JSON.stringify([ctx.state?.software, ctx.softwareChecking]);
     if (software.dataset.signature === signature) return;
     software.dataset.signature = signature;
     const focused = software.contains(document.activeElement) && document.activeElement.id === 'help-check-software-update';

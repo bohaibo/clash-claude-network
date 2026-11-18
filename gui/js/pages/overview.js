@@ -77,7 +77,7 @@ export function render(ctx) {
   rootNode.append(ui.pageHeader({
     title: state.configured ? '网络配置' : '一键配置',
     actions: [
-      ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) }),
+      ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: ctx.refreshManually }),
     ],
   }));
   rootNode.append(statusGrid(ctx));
@@ -644,7 +644,8 @@ function renderChainChoices(ctx,mode) {
     else{form.chainName='';form.frontSubscription='';form.frontNode='';form.acknowledged=false;}
     renderChoices(ctx);
   }),'已有链式配置可再次选择；新建链式配置会保留已配置的单一节点。');
-  choicesHost.replaceChildren(mode,
+  choicesHost.replaceChildren(...[
+    mode,
     reloadButton(ctx),
     savedPicker,
     ui.note('原订阅和原节点保持不变。链式配置使用与普通配置相同的分流、TUN、DNS、IPv6、防火墙及受管 WebRTC 防护；任一跳故障均不切换到直连。','neutral'),
@@ -657,7 +658,8 @@ function renderChainChoices(ctx,mode) {
     ui.el('p',{class:'muted',text:'电脑 → '+(form.frontNode || '前置节点')+' → '+(form.node || '最终出口节点')+' → 目标网站'}),
     form.node && !form.region ? ui.note('未识别最终出口地区，请手动选择。','warn') : null,
     form.regionManual ? ui.pill('出口地区为手动选择','neutral') : null,
-    acknowledgement,start);
+    acknowledgement, start,
+  ].filter(Boolean));
   renderImpact(ctx);
 }
 

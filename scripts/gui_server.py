@@ -241,6 +241,7 @@ class App:
         self.active_job = None
         self.jobs = {}
         self._lock = threading.RLock()
+        self._state_changed = threading.Condition(self._lock)
         self._background = {}
         self.release_checker = ReleaseChecker(project=self.project, local=self.local)
         self._software_check_running = False
@@ -683,7 +684,7 @@ class App:
         with self._lock:
             entry = self._background.setdefault(name, {'value': default, 'at': 0, 'running': False,
                 'generation': 0, 'read_at': '', 'error': ''})
-            if not entry['running'] and time.monotonic() - entry['at'] >= ttl:
+            if not entry['running'] and (not entry['at'] or time.monotonic() - entry['at'] >= ttl):
                 entry['running'] = True
                 generation = entry['generation']
                 def collect():
@@ -715,6 +716,7 @@ class App:
                             elif name == 'service':
                                 self._service_cache = (0.0, None)
                             entry['running'] = False
+                            self._state_changed.notify_all()
                 threading.Thread(target=collect, daemon=True, name='ccn-state-' + name).start()
             return entry['value']
 
@@ -753,7 +755,32 @@ class App:
                                     time.monotonic() - entry['at'] >= 30}
                     for name, entry in self._background.items()}
 
-    def app_state(self):
+    def collect_state(self, wait=False):
+        sections = {
+            'preview': (self.configuration_preview,
+                        {'current': {}, 'regions': region_profile.PROFILES, 'read_at': ''}, 30),
+            'update': (self.update_summary,
+                       {'mode': 'unknown', 'task': {'installed': None}, 'settings': {}, 'last': {}}, 12),
+            'service': (self.service_status, {'service': 'Unknown', 'app_running': False}, 15),
+        }
+        deadline = time.monotonic() + 30
+        with self._state_changed:
+            values = {name: self.background_value(name, *args) for name, args in sections.items()}
+            if wait:
+                entries = {name: self._background[name] for name in sections}
+                while (remaining := deadline - time.monotonic()) > 0:
+                    for name, entry in entries.items():
+                        # A forced read can invalidate a collector that was already running.
+                        if not entry['running'] and not entry['at']:
+                            self.background_value(name, *sections[name])
+                    if not any(entry['running'] for entry in entries.values()):
+                        break
+                    self._state_changed.wait(remaining)
+                values = {name: entry['value'] for name, entry in entries.items()}
+            return values, self.collection_status()
+
+    def app_state(self, wait=False):
+        values, collection = self.collect_state(wait)
         plan = self.plan()
         configured, configured_error = self.configured()
         root = plan.get('root') if isinstance(plan.get('root'), str) else ''
@@ -784,8 +811,7 @@ class App:
         applied_at = applied.get('configuration_time') if isinstance(applied, dict) else ''
         return {
             'configuration_time': str(applied_at or last_run.get('configuration_time') or '')[:80] if configured else '',
-            'preview': self.background_value('preview', self.configuration_preview,
-                {'current': {}, 'regions': region_profile.PROFILES, 'read_at': ''}),
+            'preview': values['preview'],
             'capabilities': {'managed_chain': True},
             'version': VERSION,
             'software': self.software_summary(),
@@ -796,10 +822,8 @@ class App:
             'baseline': self.baseline_name(),
             'snapshots': self.snapshots(),
             'verification': self.verification_summary(),
-            'update': self.background_value('update', self.update_summary,
-                {'mode': 'unknown', 'task': {'installed': None}, 'settings': {}, 'last': {}}, ttl=12),
-            'service': self.background_value('service', self.service_status,
-                {'service': 'Unknown', 'app_running': False}, ttl=15),
+            'update': values['update'],
+            'service': values['service'],
             'app': {
                 'python': sys.version.split()[0],
                 'node': bool(self.node_path()),
@@ -829,7 +853,7 @@ class App:
             'limits': {
                 'network': '未测试浏览器 WebRTC、Claude 网页、账号可用性、Docker/WSL 和虚拟机。',
             },
-            'collection': self.collection_status(),
+            'collection': collection,
         }
 
     def log_files(self):
@@ -1590,8 +1614,8 @@ class App:
         result['package'] = self.last_package
         return result
 
-    def request_software_check(self, force=True):
-        with self._lock:
+    def request_software_check(self, force=True, *, wait=False):
+        with self._state_changed:
             if not self._software_check_running:
                 self._software_check_running = True
                 def check():
@@ -1602,12 +1626,15 @@ class App:
                     finally:
                         with self._lock:
                             self._software_check_running = False
+                            self._state_changed.notify_all()
                 try:
                     threading.Thread(target=check, daemon=True, name='ccn-software-check').start()
                 except Exception:
                     self._software_check_running = False
                     raise ApiError(500, '无法启动更新检查，请重试。')
-        return self.software_summary()
+            if wait and not self._state_changed.wait_for(lambda: not self._software_check_running, timeout=35):
+                raise ApiError(504, '软件更新检查超时，请重试。')
+            return self.software_summary()
 
     def export_package(self):
         with self.settings_operation():
@@ -1969,12 +1996,13 @@ def make_handler(app):
                     self._json({'token': app.token, 'version': VERSION, 'admin': is_admin()})
                     return
                 if path == '/api/state':
-                    if parse_qs(parsed.query).get('refresh', ['0'])[0] == '1':
+                    query = parse_qs(parsed.query)
+                    if query.get('refresh') == ['1']:
                         with app._lock:
                             app._preview_cache = None
                             app.invalidate_background()
                     app.last_heartbeat = time.monotonic()
-                    self._json(app.app_state())
+                    self._json(app.app_state(wait=True) if query.get('wait') == ['1'] else app.app_state())
                     return
                 if path == '/api/nodes':
                     refresh = parse_qs(parsed.query).get('refresh', ['0'])[0] == '1'
@@ -2027,7 +2055,10 @@ def make_handler(app):
                 elif parsed.path == '/api/update-settings':
                     self._json(app.save_update_settings(payload))
                 elif parsed.path == '/api/software-check':
-                    self._json(app.request_software_check(), 202)
+                    if payload.get('wait') is True:
+                        self._json(app.request_software_check(wait=True))
+                    else:
+                        self._json(app.request_software_check(), 202)
                 elif parsed.path == '/api/package':
                     self._json(app.export_package())
                 elif parsed.path == '/api/snapshot-delete':

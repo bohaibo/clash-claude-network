@@ -18,7 +18,7 @@ export function render(ctx) {
   root.className = 'stack';
   root.append(ui.pageHeader({
     title: '网络环境',
-    actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) })],
+    actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: ctx.refreshManually })],
   }));
   root.append(verificationCard(ctx));
   root.append(diagnosticsCard(ctx));

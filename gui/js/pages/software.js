@@ -4,21 +4,14 @@ import { icon } from '../icons.js';
 let exporting = false;
 export function render(ctx, {id = 'check-software-update'} = {}) {
   const info = ctx.state?.software || {};
+  const checking = ctx.softwareChecking ?? info.checking;
   const root = document.createElement('div');
   root.className = 'stack';
-  const check = ui.button('检查软件更新', {variant: 'secondary', icon: 'refresh', disabled: info.checking,
-    onClick: async () => {
-      try {
-        const result = await ctx.api.post('/api/software-check', {});
-        ctx.softwareCheckRequested?.();
-        ctx.acceptState('software', result);
-        await ctx.refresh(true);
-      }
-      catch (error) { ui.toast(error.message || '更新检查未完成。', 'bad'); }
-    }});
+  const check = ui.button('检查软件更新', {variant: 'secondary', icon: 'refresh', disabled: checking || !ctx.state,
+    onClick: () => ctx.checkSoftware()});
   check.id = id;
   const labels = {available: '发现新版本', current: '当前无需更新', no_release: '尚未发布正式版本', error: '暂时无法检查', unchecked: '尚未检查'};
-  root.append(ui.card({title: '软件版本', actions: ui.badge(info.checking ? '正在检查' : labels[info.status] || '尚未检查', info.status === 'available' ? 'ok' : 'neutral')},
+  root.append(ui.card({title: '软件版本', actions: ui.badge(checking ? '正在检查' : labels[info.status] || '尚未检查', info.status === 'available' ? 'ok' : 'neutral')},
     ui.kv([['当前版本', info.current_version || ctx.state?.version || '—'], ['最新正式版', info.latest_version || '—'],
       ['最近检查', info.checked_at ? ui.formatTime(info.checked_at) : '—']]),
     info.reason ? ui.note(info.reason, 'warn') : null,
@@ -42,8 +35,13 @@ export function packageCard(ctx) {
         try {
           ctx.acceptState('software', await ctx.api.post('/api/package', {}, {timeout: 60000}));
           ui.toast('安装包已生成，可点击下载安装包。', 'ok');
-        } catch (error) { ui.toast(error.message || '打包未完成。', 'bad'); }
-        finally { exporting = false; await ctx.refresh(true); card.replaceWith(packageCard(ctx)); }
+        } catch (error) {
+          ui.toast(error.message || '打包未完成。', 'bad');
+          if (error.status === 409) await ctx.refresh(true);
+        } finally {
+          exporting = false;
+          card.replaceWith(packageCard(ctx));
+        }
       },
     });
   exportButton.id = 'export-package';
@@ -80,7 +78,8 @@ export function refreshControl(ctx) {
   const panel = document.getElementById('software-update-panel');
   if (!button || !panel) return;
   const info = ctx.state?.software || {};
-  const available = info.status === 'available' && !info.checking && ctx.softwareCheckStarted !== false;
+  const checking = ctx.softwareChecking ?? info.checking;
+  const available = info.status === 'available' && !checking && ctx.softwareCheckStarted !== false;
   button.hidden = !available;
   if (!available && panel.matches?.(':popover-open')) panel.hidePopover();
   const label = available ? '发现软件新版本 ' + (info.latest_version || '') : info.status === 'error' ? '软件更新：暂时无法检查' : '软件更新';
@@ -89,7 +88,7 @@ export function refreshControl(ctx) {
   button.classList.toggle('has-update', available);
   const hint = document.getElementById('software-update-label');
   if (hint) hint.hidden = !available;
-  const signature = JSON.stringify(info);
+  const signature = JSON.stringify([info, checking]);
   if (panel.dataset.signature === signature) return;
   panel.dataset.signature = signature;
   const checkingFocused = panel.contains(document.activeElement) && document.activeElement.id === 'check-software-update';

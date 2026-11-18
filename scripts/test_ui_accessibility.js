@@ -8,6 +8,14 @@ class Element {
   getAttribute(name) { return this.attrs[name]; }
   removeAttribute(name) { delete this.attrs[name]; }
   addEventListener(name, callback) { this.handlers[name] = callback; }
+  get childNodes() { return this.children; }
+  isEqualNode(other) {
+    return other instanceof Element && this.tagName === other.tagName &&
+      this.className === other.className && this.disabled === other.disabled &&
+      this.text === other.text && JSON.stringify(this.attrs) === JSON.stringify(other.attrs) &&
+      this.children.length === other.children.length &&
+      this.children.every((child, index) => child.isEqualNode(other.children[index]));
+  }
   get textContent() { return (this.text || '') + this.children.map(child => child.textContent).join(''); }
   set textContent(text) { this.text = String(text); this.children = []; }
   get isConnected() { return this === this.doc.root || Boolean(this.parentNode?.isConnected); }

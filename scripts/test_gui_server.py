@@ -146,6 +146,13 @@ class GuiServer(unittest.TestCase):
                                           {'Cookie': cookie, **self.token_headers()}, '{}')
             self.assertEqual(status, 202)
             self.assertTrue(json.loads(data)['checking'])
+            check.assert_called_once_with()
+        with patch.object(self.app.release_checker, 'check') as check:
+            status, _, data = self.request('POST', '/api/software-check',
+                                          {'Cookie': cookie, **self.token_headers()}, '{"wait":true}')
+            self.assertEqual(status, 200)
+            self.assertFalse(json.loads(data)['checking'])
+            check.assert_called_once_with(force=True)
 
     def test_clean_package_download_requires_session_and_returns_verified_zip(self):
         import hashlib, io, zipfile
@@ -205,6 +212,13 @@ class GuiServer(unittest.TestCase):
         status, _, data = self.request('GET', '/api/state', {'Cookie': cookie})
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(data), {'ok': True, 'configured': False})
+        with (patch.object(self.app, 'app_state', return_value={'ready': True}) as state,
+              patch.object(self.app, 'invalidate_background') as invalidate):
+            status, _, data = self.request('GET', '/api/state?wait=1&refresh=1', {'Cookie': cookie})
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(data), {'ready': True})
+            state.assert_called_once_with(wait=True)
+            invalidate.assert_called_once_with()
 
     def test_validation_rejects_missing_confirmation(self):
         with self.assertRaises(gui_server.ApiError):

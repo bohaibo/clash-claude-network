@@ -45,24 +45,30 @@ const app = {
   jobConnectionError: '',
   startingJob: false,
   stateLoading: false,
+  showCollectionProgress: true,
+  stateError: '',
   softwareCheckStarted: false,
+  softwareChecking: false,
 };
 let shell = null;
 let refreshPromise = null;
 let forceRefreshPending = false;
 let stateRevision = 0;
+const sectionRevisions = new Map();
 let logRequestRevision = 0;
 
 const ctx = {
   api,
   ui,
   get softwareCheckStarted() { return app.softwareCheckStarted; },
-  softwareCheckRequested() { app.softwareCheckStarted = true; },
+  get softwareChecking() { return app.softwareChecking; },
+  checkSoftware,
   get state() { return app.data; },
   get busy() { return Boolean(app.jobId) || app.startingJob || Boolean(app.data?.operation?.settings_busy); },
   get nodes() { return app.nodes; },
   navigate,
   refresh,
+  refreshManually,
   startJob,
   toast: ui.toast,
   confirm: ui.confirmDialog,
@@ -70,7 +76,7 @@ const ctx = {
   showLog,
   page: () => app.page,
   acceptState(section, value) {
-    stateRevision++;
+    sectionRevisions.set(section, ++stateRevision);
     app.data[section] = value;
   },
 };
@@ -107,7 +113,7 @@ function bootShell() {
     h('div', { class: 'topbar-actions' },
       h('div', { class: 'chips', id: 'top-chips' }),
       softwareControl(ctx),
-      ui.iconButton('refresh', '刷新状态', () => refresh(true))));
+      ui.iconButton('refresh', '刷新状态', refreshManually)));
 
   const content = h('main', { class: 'content', id: 'content', tabindex: '-1' });
   shell = h('div', { class: 'app' },
@@ -201,18 +207,18 @@ function renderBanners() {
       ui.button('去恢复上次更新', {variant: 'secondary', size: 'small', onClick: () => navigate('updates')})), 'bad'));
   }
   const labels = { preview: '系统设置', update: '规则更新', service: 'Clash 服务' };
-  const collecting = Object.entries(app.data?.collection || {}).filter(([, status]) => status.refreshing);
-  if (app.stateLoading || collecting.length) {
+  if (app.showCollectionProgress && app.stateLoading) {
     rows.push(h('div', { class: 'note configuration-loading', role: 'status', 'aria-live': 'polite', 'aria-busy': 'true' },
       h('span', { class: 'spinner', 'aria-hidden': 'true' }),
-      h('span', { text: app.stateLoading ? '正在读取本地配置…' : '正在读取' + collecting.map(([name]) => labels[name] || name).join('、') + '…' })));
+      h('span', { text: '正在读取系统设置、规则更新和 Clash 服务…' })));
   }
   if (!app.data) { host.replaceChildren(...rows); return; }
+  if (app.stateError) rows.push(ui.note(app.stateError + ' 当前显示上次成功读取的状态。', 'warn'));
   for (const [name, status] of Object.entries(app.data.collection || {})) {
-    if (!app.stateLoading && !status.refreshing && (status.error || status.stale)) {
+    if (status.error || status.refreshing || status.stale) {
       const last = status.read_at ? '上次读取：' + ui.formatTime(status.read_at) + '。' : '尚无成功读取记录。';
       rows.push(ui.note((labels[name] || name) + '：' + (status.error ||
-        (status.refreshing ? '正在更新状态。' : '请刷新状态。')) + last, 'warn'));
+        (status.refreshing ? '本次读取未完成，请刷新状态。' : '请刷新状态。')) + last, 'warn'));
     }
   }
   if (app.data.operation?.settings_pending?.length) {
@@ -257,7 +263,10 @@ function renderBanners() {
   if (app.data.update?.mode === 'scheduled' && app.data.update?.task?.installed === false && app.data.configured) {
     rows.push(ui.note('定时更新已选择，但当前没有检测到计划任务。请在「规则更新」保存一次，或重新配置以注册任务。', 'warn'));
   }
-  host.replaceChildren(...rows);
+  if (host.childNodes.length !== rows.length ||
+      rows.some((row, index) => !row.isEqualNode(host.childNodes[index]))) {
+    host.replaceChildren(...rows);
+  }
 }
 
 function ruleUpdateNotice(message, tone) {
@@ -320,6 +329,11 @@ function navigate(page, options = {}) {
   }
 }
 
+function refreshManually() {
+  app.showCollectionProgress = true;
+  return refresh(true);
+}
+
 function refresh(force = false) {
   forceRefreshPending ||= force;
   if (refreshPromise) return refreshPromise;
@@ -329,7 +343,9 @@ function refresh(force = false) {
       forceRefreshPending = false;
       await refreshState(requestedForce);
     } while (forceRefreshPending && !app.fatal);
-  })().finally(() => { refreshPromise = null; });
+  })().finally(() => {
+    refreshPromise = null;
+  });
   return refreshPromise;
 }
 
@@ -370,12 +386,15 @@ function refreshPage() {
 
 async function refreshState(force = false) {
   app.stateLoading = true;
-  renderBanners();
+  if (app.showCollectionProgress) renderBanners();
   try {
     const revision = stateRevision;
     const data = await api.getState(force);
-    if (revision !== stateRevision) return;
+    for (const [section, changedAt] of sectionRevisions) {
+      if (changedAt > revision) data[section] = app.data[section];
+    }
     app.data = data;
+    app.stateError = '';
     updateChrome();
     if (data.operation?.job && !app.jobId) resumeJob(data.operation.job.id);
     refreshPage();
@@ -383,17 +402,18 @@ async function refreshState(force = false) {
     if (error instanceof api.SessionError) {
       renderFatal(error.message);
     } else {
-      ui.toast(error.message || '读取状态失败。', 'bad');
+      app.stateError = error.message || '读取状态失败。';
       const content = document.getElementById('content');
       if (content && !app.data && app.page !== 'help') {
         content.removeAttribute('aria-busy');
         content.replaceChildren(h('div', { class: 'card' }, h('div', { class: 'card-body' },
           ui.note(error.message || '读取本地状态失败。请检查 .local/gui/server.log。', 'bad'),
-          ui.button('重试', { variant: 'ink', onClick: () => refresh(true) }))));
+          ui.button('重试', { variant: 'ink', onClick: refreshManually }))));
       }
     }
   } finally {
     app.stateLoading = false;
+    if (!forceRefreshPending) app.showCollectionProgress = false;
     renderBanners();
   }
 }
@@ -442,6 +462,7 @@ async function startJob(payload) {
     pollJob();
   } catch (error) {
     ui.toast(error.message || '无法开始操作。', 'bad');
+    if (error.status === 409) refresh(true);
   } finally {
     app.startingJob = false;
     updateChrome();
@@ -697,14 +718,24 @@ function renderFatal(message) {
     ui.button('重试', { variant: 'ink', onClick: () => location.reload() })));
 }
 
-async function checkSoftwareOnOpen() {
+async function checkSoftware({ silent = false } = {}) {
+  if (!app.data || app.softwareChecking || app.fatal) return;
+  app.softwareChecking = true;
+  updateChrome();
+  if (app.page === 'help') refreshPage();
   try {
-    const result = await api.post('/api/software-check', {});
+    const result = await api.post('/api/software-check', { wait: true }, { timeout: 40000 });
     app.softwareCheckStarted = true;
-    if (app.data) ctx.acceptState('software', result);
-    updateChrome();
-  } catch {
-    // Keep the update icon hidden when the startup check cannot be requested.
+    ctx.acceptState('software', result);
+  } catch (error) {
+    if (error instanceof api.SessionError) renderFatal(error.message);
+    else if (!silent) ui.toast(error.message || '更新检查未完成。', 'bad');
+  } finally {
+    app.softwareChecking = false;
+    if (!app.fatal) {
+      updateChrome();
+      if (app.page === 'help') refreshPage();
+    }
   }
 }
 
@@ -719,16 +750,10 @@ async function init() {
   const initial = (location.hash || '#/overview').replace('#/', '');
   app.page = PAGES.some((item) => item.id === initial) ? initial : 'overview';
   renderPage();
-  await refresh(true);
-  checkSoftwareOnOpen();
-  window.scrollTo(0, 0);
+  api.heartbeat().catch(() => {});
   setInterval(() => { api.heartbeat().catch(() => {}); }, 8000);
-  setInterval(() => { if (!app.fatal && !app.jobId && document.visibilityState === 'visible') refresh(false); }, 9000);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      api.heartbeat().catch(() => {});
-      refresh(false);
-    }
+    if (document.visibilityState === 'visible') api.heartbeat().catch(() => {});
   });
   window.addEventListener('hashchange', () => {
     const id = (location.hash || '#/overview').replace('#/', '');
@@ -737,6 +762,8 @@ async function init() {
       renderPage();
     }
   });
+  await refreshManually();
+  checkSoftware({ silent: true });
 }
 
 init();

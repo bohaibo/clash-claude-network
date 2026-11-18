@@ -8,7 +8,7 @@ export function render(ctx) {
   root.append(ui.pageHeader({
     title: '日志与验证',
     actions: [
-      ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) }),
+      ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: ctx.refreshManually }),
       ui.button('打开 .local', { variant: 'ghost', icon: 'folder', onClick: () => reveal(ctx) }),
     ],
   }));

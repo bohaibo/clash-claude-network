@@ -49,7 +49,7 @@ class BackgroundState(unittest.TestCase):
                      'software_summary':{},'settings_transactions':[],'pending_firewall':False,
                      'reconfigure_runs':[],'log_files':[],'node_path':'fixture','collection_status':{}}
             for method,value in methods.items():self.enterContext(patch.object(app,method,return_value=value))
-            self.enterContext(patch.object(app,'background_value',side_effect=lambda name,fn,default,**kw:default))
+            self.enterContext(patch.object(app,'background_value',side_effect=lambda name,fn,default,ttl:default))
             state=app.app_state()
             self.assertIs(state['last_run']['network_tested'],False)
             self.assertEqual(state['last_run']['configuration_time'],record['configuration_time'])
@@ -99,6 +99,29 @@ class BackgroundState(unittest.TestCase):
         self.wait_idle(app, 'browser')
         self.assertEqual(app._background['browser']['value'], {})
         self.assertTrue(app.collection_status()['browser']['stale'])
+
+    def test_waiting_state_request_returns_values_after_invalidated_read_is_replaced(self):
+        app = gui_server.App(open_browser=False)
+        entered, release = threading.Event(), threading.Event()
+        def old():
+            entered.set()
+            release.wait(2)
+            return {'current': {'fixture': 'old'}}
+        app.background_value('preview', old, {})
+        try:
+            self.assertTrue(entered.wait(1))
+            app.invalidate_background('preview')
+        finally:
+            release.set()
+        with (patch.object(app, 'configuration_preview', return_value={'current': {'fixture': 'new'}}) as preview,
+              patch.object(app, 'update_summary', return_value={'mode': 'manual'}),
+              patch.object(app, 'service_status', return_value={'service': 'Running'})):
+            values, status = app.collect_state(wait=True)
+            preview.assert_called_once_with()
+        self.assertEqual(values['preview']['current']['fixture'], 'new')
+        self.assertEqual(values['update']['mode'], 'manual')
+        self.assertEqual(values['service']['service'], 'Running')
+        self.assertTrue(all(row['read_at'] and not row['refreshing'] for row in status.values()))
 
     def test_slow_collection_is_nonblocking_and_single_flight(self):
         with tempfile.TemporaryDirectory(dir=client.LOCAL) as folder:

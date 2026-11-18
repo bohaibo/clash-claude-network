@@ -8,10 +8,12 @@ async function main() {
   let getJob;
   const timers = [];
   const messages = [];
+  const jobRefreshes = [];
   class SessionError extends Error {}
   const context = vm.createContext({
     api: { getJob: (...args) => getJob(...args), SessionError },
     ui: { toast: (...args) => messages.push(args) },
+    recordRefresh: force => jobRefreshes.push(force),
     software() {}, overview() {}, network() {}, browser() {}, snapshots() {}, updates() {}, logs() {}, help() {},
     browserHasDraft: () => true, updatesHasDraft: () => true,
     setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; }, clearTimeout() {},
@@ -19,12 +21,13 @@ async function main() {
   });
   const refreshContext = vm.createContext({ software() {}, overview() {}, network() {}, browser() {}, snapshots() {},
     updates() {}, logs() {}, help() {}, api: {}, ui: {}, console,
+    document: { visibilityState: 'hidden' }, clearTimeout() {},
     browserHasDraft: () => true, updatesHasDraft: () => true });
   vm.runInContext(source + `
     renderJobDock = () => {};
     updateChrome = () => {};
     renderFatal = message => { app.fatal = message; };
-    refresh = () => Promise.resolve();
+    refresh = async force => recordRefresh(force);
     globalThis.test = { app, ctx, resumeJob, pollJob, startJob };
   `, context);
   const t = context.test;
@@ -32,6 +35,7 @@ async function main() {
   t.resumeJob('done');
   await new Promise(setImmediate);
   assert.equal(t.app.jobId, null, 'resumed completed job must release busy state');
+  assert.deepEqual(jobRefreshes, [true], 'the completed job refreshes state once');
   t.app.jobId = 'active';
   getJob = async () => { throw new Error('offline'); };
   await t.pollJob();
@@ -41,6 +45,7 @@ async function main() {
   getJob = async () => ({ id: 'active', state: 'running' });
   await t.pollJob();
   assert.equal(t.app.jobConnectionError, '', 'successful polling clears warning');
+  assert.deepEqual(jobRefreshes, [true], 'running jobs only read their own progress');
   const count = timers.length;
   getJob = async () => { throw new SessionError('expired'); };
   await t.pollJob();
@@ -91,7 +96,7 @@ async function main() {
   // Use the same live stack shape as a rendered guide; its static DOM stays in place.
   content.firstElementChild.classList={contains:name=>name==='stack'};
   vm.runInContext("app.page='help';refreshPage();",refreshContext);
-  assert.equal(guideRefreshes,1,'guide polling must reach its dynamic status refresh');
+  assert.equal(guideRefreshes,1,'refreshing the guide updates its dynamic status');
   const raceContext = vm.createContext({ software() {}, overview() {}, network() {}, browser() {}, snapshots() {},
     updates() {}, logs() {}, help() {}, api: {}, ui: {}, console,
     document: { getElementById: () => null } });
@@ -110,17 +115,21 @@ async function main() {
   await pending;
   assert.equal(raceContext.race.read().settings, 'new', 'old HTTP responses cannot replace saved state');
   // Banner action uses the real job entry, with no HTTP or browser.
-  const host = { rows: [], replaceChildren(...rows) { this.rows = rows; } };
+  const host = { rows: [], get childNodes() { return this.rows; }, replaceChildren(...rows) { this.rows = rows; } };
+  const domNode = props => ({ ...props, isEqualNode(other) { return JSON.stringify(this) === JSON.stringify(other); } });
+  const statePolls = [];
   const posts = [];
   let acceptJob;
   const bannerContext = vm.createContext({
     software() {}, overview() {}, network() {}, browser() {}, snapshots() {}, updates() {}, logs() {}, help() {},
-    document: { getElementById: () => host }, console,
+    document: { visibilityState: 'visible', getElementById: () => host }, console,
+    setTimeout: (fn, ms) => statePolls.push({fn, ms}), clearTimeout() {},
     api: { SessionError, startJob: payload => { posts.push(payload); return new Promise(r => acceptJob = r); } },
     ui: {
-      el: (tag, props, ...children) => ({ tag, props, children }),
-      note: (content, tone) => ({ content, tone }),
+      el: (tag, props, ...children) => domNode({ tag, props, children }),
+      note: (content, tone) => domNode({ content, tone }),
       button: (label, options) => ({ label, ...options }),
+      formatTime: time => time,
       toast() {},
     },
   });
@@ -131,7 +140,7 @@ async function main() {
     refreshPage = () => {};
     app.data = { configured: true, browser: {engine: {name: 'fixture'}},
       update: { mode: 'scheduled', last: {success: false, time: 'fixture', reason: 'fixture failure'} } };
-    globalThis.banner = { app, renderBanners, refreshState };
+    globalThis.banner = { app, renderBanners, refresh, refreshManually };
   `, bannerContext);
   const banner = bannerContext.banner;
   const notices = () => host.rows.filter(row => row.content?.props?.class === 'note-with-action');
@@ -168,27 +177,42 @@ async function main() {
   banner.renderBanners();
   assert.equal(host.rows.length, 0, 'unconfigured state needs no historical configuration warning');
   const loader = () => host.rows.find(row => row.props?.class === 'note configuration-loading');
-  banner.app.data.collection.preview = {refreshing: true, stale: true, error: 'old read error'};
-  banner.renderBanners();
-  assert.ok(loader(), 'background collection displays a loader instead of an old warning');
-  assert.equal(loader().props.role, 'status');
-  assert.ok(loader().children.some(child => child.props?.class === 'spinner'));
-  assert.equal(host.rows.length, 1, 'collectors share one loading banner');
-  banner.app.data.collection = {};
-  banner.renderBanners();
-  assert.equal(loader(), undefined, 'loader disappears after collection completes');
+  const collecting = {configured: false, collection: {
+    update: {refreshing: true, stale: true}, service: {refreshing: true, stale: false},
+  }};
   let resolveState;
   bannerContext.api.getState = () => new Promise(resolve => { resolveState = resolve; });
   banner.app.data = null;
-  const initialRead = banner.refreshState(true);
+  const initialRead = banner.refresh(true);
   assert.ok(loader(), 'initial request shows the top loader before state exists');
-  resolveState({configured: false, collection: {}});
+  resolveState(collecting);
   await initialRead;
-  assert.equal(loader(), undefined, 'successful request stops the spinner');
+  assert.equal(loader(), undefined, 'a bounded read that returns incomplete results stops the spinner');
+  assert.match(host.rows[0].content, /本次读取未完成/);
+  assert.equal(statePolls.length, 0, 'an incomplete read does not schedule another status request');
+  const manual = banner.refreshManually();
+  assert.equal(loader().props.role, 'status');
+  assert.match(loader().children[1].props.text, /规则更新和 Clash 服务/);
+  const cached = {configured: false, collection: {}};
+  resolveState(cached);
+  await manual;
+  assert.equal(loader(), undefined, 'manual feedback ends with the same request');
+  assert.equal(statePolls.length, 0, 'manual refresh does not start polling');
   bannerContext.api.getState = async () => { throw new Error('fixture read failed'); };
-  await banner.refreshState(true);
+  await banner.refresh();
+  assert.equal(banner.app.data, cached, 'failed request keeps the previous state');
+  assert.match(host.rows[0].content, /当前显示上次成功读取的状态/);
   assert.equal(banner.app.stateLoading, false, 'failed request also clears loading state');
   assert.equal(loader(), undefined, 'failed request does not leave a stuck spinner');
+  bannerContext.api.getState = async () => ({configured: false, collection: {
+    update: {refreshing: true, error: 'fixture collector failed', read_at: 'fixture time'},
+  }});
+  await banner.refresh();
+  assert.match(host.rows[0].content, /fixture collector failed.*fixture time/);
+  assert.equal(loader(), undefined, 'retrying a failed collector keeps its warning visible');
+  bannerContext.api.getState = async () => ({configured: false, collection: {}});
+  await banner.refresh();
+  assert.equal(host.rows.length, 0, 'successful results dismiss stale warnings');
   // Diagnostics are opt-in buttons; rendering must never dispatch a job.
   const buttons = [], badges = [], jobs = [];
   const diagnosticUi = new Proxy({}, {get: (_, name) => (...args) => {
@@ -215,22 +239,45 @@ async function main() {
   configured.verification.time = '2026-11-13T21:00:00+08:00';
   networkContext.pageTest.configCard({state: configured});
   assert.equal(badges.at(-1), '已配置');
-  // Every newly opened UI requests a fresh update check, independent of yesterday's cache.
+  // After startup, heartbeat and visibility events never read system state.
   const startupPosts = [];
+  const intervals = [], listeners = {};
+  let startupReads = 0, heartbeats = 0;
   const startupContext = vm.createContext({overview() {}, network() {}, snapshots() {}, updates() {}, logs() {}, help() {},
-    api: {post: async (...args) => {startupPosts.push(args);return {checking:true};}}, ui:{}, console});
+    api: { bootstrap: async () => {}, heartbeat: async () => { heartbeats++; },
+      getState: async () => { startupReads++; return {}; },
+      post: async (...args) => { startupPosts.push(args); return {status: 'available'}; } }, ui:{}, console,
+    location: {hash: ''}, window: {addEventListener() {}},
+    document: {visibilityState: 'visible', getElementById: () => null,
+      addEventListener: (event, listener) => { listeners[event] = listener; }},
+    setInterval: fn => intervals.push(fn)});
   vm.runInContext(source + `
+    bootShell = () => {};
+    renderPage = () => {};
+    refreshPage = () => {};
     updateChrome = () => {};
-    app.data = {};
-    globalThis.startup = {checkSoftwareOnOpen, app};
+    globalThis.startup = {init, checkSoftware, app};
   `, startupContext);
-  await startupContext.startup.checkSoftwareOnOpen();
-  await startupContext.startup.checkSoftwareOnOpen();
-  assert.deepEqual(startupPosts.map(args => args[0]), ['/api/software-check', '/api/software-check']);
+  await startupContext.startup.init();
+  await new Promise(setImmediate);
+  assert.equal(intervals.length, 1);
+  intervals[0]();
+  startupContext.document.visibilityState = 'hidden';
+  listeners.visibilitychange();
+  startupContext.document.visibilityState = 'visible';
+  listeners.visibilitychange();
+  assert.equal(heartbeats, 3);
+  assert.equal(startupReads, 1);
+  assert.equal(startupPosts.length, 1);
+  assert.equal(startupPosts[0][1].wait, true);
   assert.equal(startupContext.startup.app.softwareCheckStarted, true);
+  assert.equal(startupContext.startup.app.data.software.status, 'available');
+  await startupContext.startup.checkSoftware();
+  assert.equal(startupPosts.length, 2);
+  assert.equal(startupReads, 1, 'explicit software checks do not read network status');
   // The comparison uses matching state labels, with installation evidence in a note.
   let impact;
-  const previewUi = new Proxy({}, {get: (_, name) => (...args) => ({name, args})});
+  const previewUi = new Proxy({}, {get: (_, name) => (...args) => ({name, args, replaceChildren() {}})});
   const overviewContext = vm.createContext({ui: previewUi, Intl, Date,
     host: {replaceChildren: value => { impact = value; }}});
   const overviewSource = fs.readFileSync('gui/js/pages/overview.js', 'utf8')
@@ -263,6 +310,28 @@ async function main() {
   }
   assert.ok(walk(impact).some(n => n.name === 'helpTip' && n.args?.[0]?.includes('安装记录：仅 1/3')), 'installation evidence remains available in contextual help');
   assert.ok(!JSON.stringify(impact).includes('配置完成'));
+  let chainChildren;
+  overviewContext.chainHost = { replaceChildren(...children) {
+    chainChildren = children.map(child => typeof child === 'object' && child !== null ? child : String(child));
+  } };
+  vm.runInContext(`
+    choicesHost = chainHost;
+    impactHost = null;
+    form.frontNode = 'fixture-hk';
+    globalThis.renderChain = (region, manual) => {
+      form.region = region;
+      form.regionManual = manual;
+      renderChainChoices({ state: {}, busy: false }, ui.el('div'));
+    };
+  `, overviewContext);
+  overviewContext.renderChain('SG', false);
+  assert.ok(!chainChildren.includes('null'), 'hidden region hints must not appear as text');
+  assert.ok(chainChildren.some(child => child.args?.[1]?.text === '电脑 → fixture-hk → fixture-sg → 目标网站'));
+  assert.ok(chainChildren.some(child => child.name === 'checkbox' && child.args[1].includes('我已核对两跳节点')));
+  overviewContext.renderChain('', false);
+  assert.ok(chainChildren.some(child => child.args?.[0] === '未识别最终出口地区，请手动选择。'));
+  overviewContext.renderChain('SG', true);
+  assert.ok(chainChildren.some(child => child.args?.[0] === '出口地区为手动选择'));
   console.log('GUI task lifecycle offline checks passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

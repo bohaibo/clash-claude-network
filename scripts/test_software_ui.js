@@ -52,18 +52,18 @@ exportButton.onClick().then(async()=>{
  const helpContext=vm.createContext({ui,configurationDetails:()=>[],softwareVersion:p.render,
   packageCard:p.packageCard,updateInstructions:()=>({}),document:{createElement:()=>({append(){}})}});
  vm.runInContext(helpSource+'\nglobalThis.helpPage=render;',helpContext);
- const requests=[];let refreshed=0,initiated=0;
- ctx.softwareCheckRequested=()=>{initiated++;};
- ctx.api.post=async(path)=>{requests.push(path);return {checking:true};};ctx.refresh=async()=>{refreshed++;};
+ let checks=0, refreshed=0;
+ ctx.checkSoftware=async()=>{checks++;};
+ ctx.refresh=async()=>{refreshed++;};
  for(const status of ['error','current','no_release','unchecked']){
   ctx.state.software={status,checking:false};buttons.length=0;
   helpContext.helpPage(ctx);
   const retry=buttons.find(button=>button.label==='检查软件更新');
   assert(retry && !retry.disabled,'help page always provides software retry');
   assert.equal(retry.id,'help-check-software-update','help and popover must not duplicate IDs');
-  await retry.onClick();assert.equal(requests.at(-1),'/api/software-check');
+  await retry.onClick();
  }
- assert.equal(refreshed,4);
- assert.equal(initiated,4,'manual retry advertises the result after a failed startup request');
+ assert.equal(refreshed,0);
+ assert.equal(checks,4,'manual retry requests only a software update check');
  console.log('Offline software UI checks passed: update icon states, stable panel, release links, errors and ZIP download');
 }).catch(error=>{console.error(error);process.exitCode=1;});

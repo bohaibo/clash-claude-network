@@ -25,7 +25,7 @@ export function render(ctx) {
   root.className = 'stack';
   root.append(ui.pageHeader({
     title: '规则更新',
-    actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: () => ctx.refresh(true) })],
+    actions: [ui.button('刷新状态', { variant: 'secondary', icon: 'refresh', onClick: ctx.refreshManually })],
   }));
   if (state.operation?.pending_rule_update) {
     root.append(ui.card({title: '上次规则更新待恢复'},
@@ -187,10 +187,10 @@ async function saveSettings(ctx) {
     ctx.acceptState('update', result);
     if (revision === sentRevision) draft.dirty = false;
     ui.toast('规则更新方式已保存。', 'ok');
-    await ctx.refresh(true);
   } catch (error) {
     ui.toast(error.message || '保存更新方式失败。', 'bad');
   } finally {
+    await ctx.refresh(true);
     saving = false;
     updateSaveState();
   }
