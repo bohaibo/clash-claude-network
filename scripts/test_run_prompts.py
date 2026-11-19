@@ -85,6 +85,18 @@ function Read-Host {param($Prompt) if(!$script:answers.Count){throw 'Unexpected 
   result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Chosen')
   self.assertEqual(result.returncode,1,text);self.assertIn('多个订阅',text)
   self.assertNotIn('Unexpected process',text)
+ def test_new_single_static_preflights_without_subscription_discovery(self):
+  spec=self.local/'static.json';spec.write_text('{}')
+  seen=self.local/'preflight.json'
+  (self.scripts/'client.py').write_text(
+   'import pathlib,sys,json\nif sys.argv[1] == "chain-preflight":\n'
+   f' pathlib.Path({str(seen)!r}).write_text(json.dumps(sys.argv[2:]));sys.exit(0)\n'
+   'sys.exit(1)\n')
+  result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Static test','-ChainSpecPath',str(spec))
+  self.assertEqual(result.returncode,1,text)
+  self.assertEqual(json.loads(seen.read_text()),['--chain-spec',str(spec),'--node','Static test'])
+  self.assertIn('规则准备失败',text)
+  self.assertNotIn('Unexpected process',text)
  def test_download_failure_keeps_client_open_and_records_failed_step(self):
   (self.scripts/'client.py').write_text('import sys,json\nif sys.argv[1] == "prefetch-rules": sys.exit(1)\nprint(json.dumps({"subscriptions":[{"uid":"first","name":"Same","nodes":["Chosen"]}]}))\n')
   result,text=self.run_entry('apply',(),'-Acknowledged','-Node','Chosen')

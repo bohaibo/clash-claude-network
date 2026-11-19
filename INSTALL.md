@@ -7,7 +7,7 @@
 必须由你手动准备：
 
 - **Clash Verge Rev**：从 https://github.com/clash-verge-rev/clash-verge-rev/releases 安装。
-- 在 Clash Verge Rev 中导入至少一个订阅，并启动服务 `clash_verge_service`。
+- 启动服务 `clash_verge_service`。使用订阅节点时先在 Clash Verge Rev 中导入订阅。
 - 浏览器：Windows 11 自带 Microsoft Edge；也可以使用已安装的 Chrome。项目不会修改它的默认资料。
 - 可访问互联网（首次下载运行环境）。
 

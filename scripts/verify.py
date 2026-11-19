@@ -222,6 +222,8 @@ def verify(outage=False,stage=None):
  stage=stage or ('node-outage' if outage else 'connectivity')
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root']);node=plan['node']
  from config_health import configuration_revision
+ managed_profile=plan.get('chain') or {}
+ static_exit=managed_profile.get('static_exit')
  report={'success':False,'configuration_revision':configuration_revision(LOCAL),'account_tested':False,'application_usability_verified':False,
          'not_tested':['browser_webrtc','browser_fingerprint','claude_http','claude_dns','claude_live_routing']}
  check='runtime'
@@ -255,6 +257,9 @@ def verify(outage=False,stage=None):
   require(egress['exit']==0 and egress['http']==200,'海外出口连接失败；详见 egress_attempts')
   address=json.loads(egress['body']);require(address.get('country')==plan['region'],'Exit country differs from required region')
   report['egress']={k:address.get(k) for k in ('ip','country','city')}
+  if static_exit:
+   require(address.get('ip')==static_exit['ip'],'海外出口 IP 与配置的静态 IP 不符')
+   report['static_exit_ip_matches']=True
   check='dns'
   with ThreadPoolExecutor(max_workers=6) as pool:
    probes=[pool.submit(query,'8.8.8.8',53,t,tcp) for t in (1,64,65) for tcp in (False,True)]
@@ -269,11 +274,15 @@ def verify(outage=False,stage=None):
   report['ipv6_public_blocked']=True
   check='tools'
   with ThreadPoolExecutor(max_workers=3) as pool:
-   probes={'stun':pool.submit(stun,route_probe=lambda probe:udp_route(root,node,probe)),
-           'git':pool.submit(git_egress),'npm':pool.submit(npm_egress)}
+   probes={'git':pool.submit(git_egress),'npm':pool.submit(npm_egress)}
+   if static_exit:
+    probes['stun']=pool.submit(stun)
+   else:
+    probes['stun']=pool.submit(stun,route_probe=lambda probe:udp_route(root,node,probe))
    for name,probe in probes.items():report[name]=probe.result()
   failed=[]
   for name in ('stun','git','npm'):
+   if static_exit and name=='stun':continue
    value=report[name]
    if value.get('tested',True) is False:
     report['not_tested'].append(name);value['status']='not-tested'
@@ -282,8 +291,15 @@ def verify(outage=False,stage=None):
     if value['status']=='failed':failed.append(name)
   require(not failed,'Required egress checks failed: '+', '.join(failed))
   check='udp_egress'
-  report['udp_egress']=udp_egress(report['stun'],report['egress'],plan['region'])
-  require(report['udp_egress']['verified'],'UDP exit country or pinned route could not be verified')
+  if static_exit:
+   attempts=report['stun']['attempts']
+   blocked=bool(attempts) and all(a.get('error')=='TimeoutError' for a in attempts)
+   report['stun']['status']='blocked' if blocked else 'failed'
+   report['udp_egress']={'expected':'blocked','verified':blocked}
+   require(blocked,'静态 IP 模式未能确认海外 UDP 已阻断')
+  else:
+   report['udp_egress']=udp_egress(report['stun'],report['egress'],plan['region'])
+   require(report['udp_egress']['verified'],'UDP exit country or pinned route could not be verified')
   scope=workload_scope();report['workload_scope']=scope
   if scope['docker_installed']:report['not_tested'].append('docker_container_egress')
   if scope['wsl_installed']:report['not_tested'].append('wsl_egress')
@@ -292,7 +308,7 @@ def verify(outage=False,stage=None):
    from verify_tun import api as outage_api
    check='node_outage'
    current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
-   targets=([__import__('managed_chain').FRONT,node] if plan.get('chain') else [node])
+   targets=([managed_chain.FRONT,node] if managed_profile and not managed_profile.get('direct') else [node])
    for failed_node in targets:
     check='chain_front_outage' if failed_node!=node else 'node_outage'
     broken=__import__('yaml').safe_load(current)
@@ -324,6 +340,8 @@ def verify(outage=False,stage=None):
      else:
       evidence['country']=address.get('country')
       require(address.get('country')==plan['region'],'节点恢复后出口地区不符；详见 recovery_attempts')
+      if static_exit:
+       require(address.get('ip')==static_exit['ip'],'节点恢复后出口 IP 与配置的静态 IP 不符')
       recovery_ok=True;break
     if attempt<2:time.sleep(2)
    require(recovery_ok,'节点恢复后海外出口连接失败；详见 recovery_attempts')

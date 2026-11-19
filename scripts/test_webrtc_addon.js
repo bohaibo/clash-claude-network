@@ -40,6 +40,7 @@ const source = fs.readFileSync('gui/js/pages/overview.js', 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
 vm.runInContext(source + `
   impactHost = { replaceChildren(...nodes) { globalThis.output = nodes; } };
+  form.mode = 'single';
   globalThis.renderPreview = renderImpact;
 `, preview);
 preview.renderPreview({ state: { preview: { current: { webrtc: { browsers: [

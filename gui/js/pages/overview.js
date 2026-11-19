@@ -29,10 +29,16 @@ const REGIONS = [
 ];
 
 const form = {
-  mode: 'single',
+  mode: '',
   frontSubscription: '',
   frontNode: '',
   chainName: '',
+  staticProtocol: 'socks5',
+  staticIp: '',
+  staticPort: '',
+  staticUser: '',
+  staticPassword: '',
+  staticSaved: '',
   node: '',
   subscription: '',
   region: '',
@@ -44,12 +50,14 @@ const form = {
   regionAuto: null,
   regionManual: false,
 };
-const modeDrafts = { single: null, chain: null };
+const modeDrafts = { single: null, chain: null, static: null, staticDirect: null };
 const draftFields = ['node','subscription','region','regionAuto','regionManual','search',
-  'frontSubscription','frontNode','chainName','frontSearch','exitSearch'];
+  'frontSubscription','frontNode','chainName','frontSearch','exitSearch',
+  'staticProtocol','staticIp','staticPort','staticUser','staticPassword','staticSaved'];
+const captureDraft = () => Object.fromEntries(draftFields.map(key => [key,form[key]]));
+const emptyDraft = captureDraft();
 
 let nodesState = { loading: false, error: '', data: null, selectionNotice: '' };
-let subscriptionUid = '';
 let rootNode = null;
 let choicesHost = null;
 let listHost = null;
@@ -61,13 +69,15 @@ export function render(ctx) {
   const state = ctx.state;
   const plan = state.plan || {};
   if (!form.initialized) {
-    form.region = plan.node && plan.region || '';
-    form.regionManual = Boolean(form.region);
-    form.subscription = plan.subscription || '';
-    form.node = plan.node || '';
-    if (plan.chain) {
-      form.mode='chain';loadChainSelection(ctx,plan.chain);
-      if (plan.region) { form.region=plan.region;form.regionManual=true; }
+    if (plan.node) {
+      const lastMode = !plan.chain ? 'single' : plan.chain.direct ? 'staticDirect' :
+        plan.chain.static_exit ? 'static' : 'chain';
+      if (plan.chain) loadChainSelection(ctx,plan.chain,plan.subscription);
+      else Object.assign(form,{subscription:plan.subscription || '',node:plan.node});
+      form.region = plan.region || '';
+      form.regionManual = Boolean(form.region);
+      modeDrafts[lastMode] = captureDraft();
+      Object.assign(form,emptyDraft);
     }
     form.initialized = true;
   }
@@ -160,28 +170,39 @@ function setupCard(ctx) {
 
   const currentBand = configured ? ui.el('div', { class: 'current-band' },
     ui.el('div', {}, ui.el('strong', { text: plan.node || '—' })),
-    plan.chain ? ui.el('p',{class:'muted small',text:'链式：'+plan.chain.front_node+' → '+plan.chain.exit_node+'；完整防护状态请查看网络环境。'}) : null,
+    plan.chain ? ui.el('p',{class:'muted small',text:proxyRoute(plan.chain)+' · 完整防护状态请查看网络环境。'}) : null,
     ui.el('div', { class: 'current-meta' },
       ui.pill('订阅 ' + (plan.subscription ? plan.subscription.slice(0, 8) : '—'), 'neutral'),
       ui.pill('出口 ' + (plan.region || 'SG'), 'neutral'),
       ui.helpTip('恢复点：' + (plan.snapshot || '尚未记录'), '当前恢复点'))) : null;
 
+  const modes = ui.field('配置方式', ui.select([
+    {value:'',label:'请选择配置方式'},
+    {value:'single',label:'单一节点配置'},
+    {value:'chain',label:'链式代理配置'},
+    {value:'static',label:'静态 IP 出口链式代理'},
+    {value:'staticDirect',label:'单一静态 IP 配置'},
+  ], form.mode, value => switchMode(ctx,value), {id:'configuration-mode'}),
+  '四种方式可以同时保留。在 Clash Verge 的「订阅」页启用要使用的配置。');
   const card = ui.card({
-    title: configured ? '更换节点或重新配置' : '选择节点',
-    help: '从已有订阅选择精确节点；固定节点组只包含所选节点，节点故障不回落直连。配置会请求管理员权限。',
+    title: configured ? '更换配置或重新配置' : '连接配置',
+    help: '每份配置固定一个海外出口。配置会请求管理员权限。',
     actions: headerActions,
-  }, currentBand, choicesHost);
+  }, currentBand, modes, choicesHost);
 
-  loadChoices(ctx);
+  renderChoices(ctx);
+  if (form.mode) loadChoices(ctx);
   return card;
 }
 
 function renderImpact(ctx) {
   if (!impactHost) return;
+  impactHost.hidden = !form.mode;
+  if (!form.mode) return;
   const preview = ctx.state.preview || {};
   const now = preview.current || {};
   const target = preview.regions?.[form.region] || {};
-  const selected = Boolean(form.node && (currentSubscription(ctx)?.nodes || []).includes(form.node));
+  const selected = form.mode === 'single' ? Boolean(form.node && (currentSubscription(ctx)?.nodes || []).includes(form.node)) : chainReady();
   const unknown = '未能确认';
   const pending = '选择节点后确定';
   const countryName = (code) => {
@@ -217,7 +238,7 @@ function renderImpact(ctx) {
     ['npm 代理', proxyState(now.npm), '关闭'],
     ['Docker 代理', proxyState(now.docker), '关闭'],
     ['网站连接方式', now.routing_simple, '按规则分流'],
-    ['国外连接节点', now.fixed_node || unknown, after(form.node)],
+    ['国外连接节点', now.fixed_node || unknown, after(form.mode === 'single' ? form.node : form.chainName)],
     ['DNS 解析', now.dns_simple, '开启'],
     ['DNS 额外过滤', now.dns_filter_simple, '开启'],
     ['接管应用网络', now.tun_simple, '开启'],
@@ -271,9 +292,10 @@ async function loadChoices(ctx) {
   if (!choicesHost) return;
   if (nodesState.loading) return;
   nodesState.loading = true;
-  choicesHost.replaceChildren(ui.el('div', { class: 'loading-inline' }, ui.el('span', { class: 'spinner' }), '正在读取订阅与节点…'));
+  renderChoices(ctx);
   try {
     const data = await ctx.loadNodes(true);
+    const firstLoad = !nodesState.data;
     nodesState.data = data;
     nodesState.error = '';
     const previousSubscription=form.subscription;
@@ -284,7 +306,7 @@ async function loadChoices(ctx) {
     nodesState.selectionNotice = reconcileSubscriptions(form, rows) ? '原订阅已不可用，请重新选择订阅和节点。' : '';
     const hasNode = (uid, node) => rows.some(row => row.uid === uid && row.nodes.includes(node));
     if ((form.node && !hasNode(form.subscription, form.node)) ||
-        (form.mode === 'chain' && form.frontNode && !hasNode(form.frontSubscription, form.frontNode))) {
+        (form.mode !== 'single' && form.frontNode && !hasNode(form.frontSubscription, form.frontNode))) {
       form.acknowledged = false;
     }
     if (form.mode==='single') {
@@ -295,13 +317,12 @@ async function loadChoices(ctx) {
         if (data.plan_region) { form.region=data.plan_region;form.regionManual=true; }
       }
     }
-    renderChoices(ctx);
+    if (firstLoad && form.mode === 'chain' && !form.chainName && data.chain_defaults) loadChainSelection(ctx,data.chain_defaults);
   } catch (error) {
     nodesState.error = error.message || '读取订阅失败。';
-    choicesHost.replaceChildren(ui.note(nodesState.error, 'bad'),
-      ui.button('重试', { variant: 'secondary', size: 'small', onClick: () => loadChoices(ctx) }));
   } finally {
     nodesState.loading = false;
+    renderChoices(ctx);
   }
 }
 
@@ -332,45 +353,59 @@ function currentSubscription(ctx) {
   return subscriptions.find((row) => row.uid === form.subscription) || subscriptions[0] || null;
 }
 
-function loadChainSelection(ctx, saved) {
-  form.subscription=saved.exit_subscription;form.node=saved.exit_node;
-  form.frontSubscription=saved.front_subscription;form.frontNode=saved.front_node;form.chainName=saved.name;
+function loadChainSelection(ctx, saved, uid) {
+  form.subscription=saved.exit_subscription || '';form.node=saved.exit_node || '';
+  form.frontSubscription=saved.front_subscription || '';form.frontNode=saved.front_node || '';form.chainName=saved.name;
+  form.staticSaved=saved.static_exit ? uid : '';
   form.regionManual=false;form.regionAuto=null;form.acknowledged=false;
-  applyRegionHint(ctx,form.node);
+  if (saved.static_exit) {
+    form.region = uid === nodesState.data?.plan_subscription ? nodesState.data?.plan_region || '' : '';
+  } else applyRegionHint(ctx,form.node);
 }
 
 function switchMode(ctx, value) {
   if (value===form.mode) return;
-  modeDrafts[form.mode]=Object.fromEntries(draftFields.map(key=>[key,form[key]]));
-  form.mode=value;form.acknowledged=false;
-  if (modeDrafts[value]) Object.assign(form,modeDrafts[value]);
-  else if (value==='chain' && nodesState.data?.chain_defaults) loadChainSelection(ctx,nodesState.data.chain_defaults);
-  else {
-    form.node='';form.subscription='';form.frontSubscription='';form.frontNode='';form.chainName='';
-    form.region='';form.regionAuto=null;form.regionManual=false;form.search='';form.frontSearch='';form.exitSearch='';
+  if (form.mode) modeDrafts[form.mode]=captureDraft();
+  form.mode=value;
+  form.acknowledged=false;
+  nodesState.selectionNotice='';
+  Object.assign(form,modeDrafts[value] || emptyDraft);
+  if (!modeDrafts[value] && value === 'chain' && nodesState.data?.chain_defaults) {
+    loadChainSelection(ctx,nodesState.data.chain_defaults);
   }
-  renderChoices(ctx);
+  if (value && !nodesState.data && !nodesState.loading) loadChoices(ctx);
+  else renderChoices(ctx);
 }
 
 function renderChoices(ctx) {
   if (!choicesHost) return;
+  if (!form.mode) {
+    choicesHost.replaceChildren();
+    renderImpact(ctx);
+    return;
+  }
+  if (nodesState.loading) {
+    choicesHost.replaceChildren(ui.el('div', { class:'loading-inline', role:'status' },
+      ui.el('span', { class:'spinner' }), '正在读取 Clash 配置…'));
+    return;
+  }
+  if (nodesState.error) {
+    choicesHost.replaceChildren(ui.note(nodesState.error,'bad'),reloadButton(ctx));
+    return;
+  }
   const data = nodesState.data;
   const subscriptions = (data?.subscriptions || []).filter(row=>!row.chain);
   if (reconcileSubscriptions(form, subscriptions)) nodesState.selectionNotice='原订阅已不可用，请重新选择订阅和节点。';
-  const mode = ui.field('配置方式', ui.select([
-    {value:'single',label:'单一节点配置'},
-    {value:'chain',label:'链式代理配置'},
-  ], form.mode, value => switchMode(ctx,value)), '两种配置可以先后添加并同时保留，切换表单不会清空另一种方式的选择。');
-  if (form.mode==='chain') {
-    if (!ctx.state.capabilities?.managed_chain) {
-      choicesHost.replaceChildren(mode,ui.note('软件后台仍是旧版本。请点击退出界面后，重新运行「一键网络.cmd」，再创建链式代理。','warn'));
+  if (form.mode!=='single') {
+    if (!supportsMode(ctx)) {
+      choicesHost.replaceChildren(ui.note('软件后台仍是旧版本。请退出界面后，重新运行「一键网络.cmd」。','warn'));
       return;
     }
-    renderChainChoices(ctx,mode);return;
+    renderChainChoices(ctx);return;
   }
   if (form.node && !form.regionAuto && !form.regionManual) applyRegionHint(ctx, form.node);
   if (!subscriptions.length) {
-    choicesHost.replaceChildren(ui.note('当前没有可读取的远程订阅。请在 Clash Verge 导入或更新订阅，然后重新读取。', 'warn'), reloadButton(ctx));
+    choicesHost.replaceChildren(ui.note('当前没有可读取的远程订阅。可以使用单一静态 IP，或在 Clash Verge 导入订阅。', 'warn'), reloadButton(ctx));
     return;
   }
   const current = currentSubscription(ctx);
@@ -448,7 +483,6 @@ function renderChoices(ctx) {
   const regionHint = form.node && !form.regionAuto && !form.regionManual
     ? ui.note('未识别出口地区，请手动选择。', 'warn') : null;
   choicesHost.replaceChildren(...[
-    mode,
     columns,
     nodesState.selectionNotice ? ui.note(nodesState.selectionNotice, 'warn') : null,
     hint,
@@ -536,58 +570,112 @@ function updateStartButton(ctx) {
   if (!button) return;
   const current = currentSubscription(ctx);
   const inside = Boolean(current && (current.nodes || []).includes(form.node));
-  button.disabled = !form.node || !form.region || !inside || (form.mode==='chain' && !chainReady()) || !form.acknowledged || operationsBlocked(ctx);
-  button.title = form.node && !inside ? '所选节点不在当前订阅中，请重新选择。' : '';
+  const ready = form.mode === 'single' ? Boolean(form.node && inside) : chainReady();
+  button.disabled = !form.region || !ready || !form.acknowledged || operationsBlocked(ctx);
+  button.title = form.mode === 'single' && form.node && !inside ? '所选节点不在当前订阅中，请重新选择。' : '';
 }
 
 function stateText(ctx) {
-  return form.mode==='chain' ? '配置此链式代理' : '配置此单一节点';
+  if (isStaticMode()) return '配置此静态 IP 出口';
+  return form.mode === 'chain' ? '配置此链式代理' : '配置此单一节点';
+}
+
+function isStaticMode() {
+  return form.mode === 'static' || form.mode === 'staticDirect';
+}
+
+function supportsMode(ctx) {
+  if (form.mode === 'staticDirect') return ctx.state.capabilities?.static_direct;
+  return form.mode === 'static' ? ctx.state.capabilities?.static_exit : ctx.state.capabilities?.managed_chain;
+}
+
+function proxyRoute(selection) {
+  const exit = selection.static_exit?.ip || selection.exit_node;
+  return ['电脑', selection.front_node, exit, '目标网站'].filter(Boolean).join(' → ');
+}
+
+function savedStatic() {
+  return nodesState.data?.subscriptions?.find(row => row.uid === form.staticSaved && row.chain?.static_exit &&
+    Boolean(row.chain.direct) === (form.mode === 'staticDirect'));
+}
+
+function staticEndpoint() {
+  return {protocol:form.staticProtocol,ip:form.staticIp.trim(),port:Number(form.staticPort),
+    username:form.staticUser,password:form.staticPassword};
 }
 
 async function beginApply(ctx) {
-  if (operationsBlocked(ctx)) return;
-  if (form.mode==='chain' && !ctx.state.capabilities?.managed_chain) {
+  if (!form.mode || operationsBlocked(ctx)) return;
+  if (form.mode !== 'single' && !supportsMode(ctx)) {
     ui.toast('请先退出并重新打开软件，加载链式代理功能。','warn');return;
   }
-  if (!form.node || !form.region) return;
+  if (!form.region) return;
   if (!form.acknowledged) {
     ui.toast('请先勾选确认。', 'warn');
     return;
   }
-  const subscription = currentSubscription(ctx);
-  if (subscription?.uid !== form.subscription || !subscription.nodes.includes(form.node)) return;
-  const chain=form.mode==='chain' ? {name:form.chainName.trim(),exit_subscription:form.subscription,
-    exit_node:form.node,front_subscription:form.frontSubscription,front_node:form.frontNode} : null;
-  if (chain && !chainReady()) return;
+  const staticMode = isStaticMode();
+  const saved = staticMode ? savedStatic() : null;
+  const region = form.region;
+  let node = form.node;
+  let subscription = form.subscription;
+  let chain = null;
+  if (form.mode === 'single') {
+    const selected = currentSubscription(ctx);
+    if (selected?.uid !== subscription || !selected.nodes.includes(node)) return;
+  } else {
+    if (!chainReady()) return;
+    chain = {name:form.chainName.trim()};
+    const direct = form.mode === 'staticDirect';
+    if (direct) chain.direct = true;
+    else Object.assign(chain,{front_subscription:form.frontSubscription,front_node:form.frontNode});
+    if (staticMode) {
+      if (saved) [subscription,node] = [saved.uid,saved.chain.name];
+      else if (direct) [subscription,node] = ['',chain.name];
+      else [subscription,node] = [form.frontSubscription,form.frontNode];
+      chain.static_exit = saved ? saved.chain.static_exit : staticEndpoint();
+    } else Object.assign(chain,{exit_subscription:subscription,exit_node:node});
+  }
   const ok = await ctx.confirm({
     title: '开始配置网络？',
-    subtitle: (chain ? chain.name+'：电脑 → '+chain.front_node+' → '+chain.exit_node : form.node) + ' · 最终出口 ' + form.region,
-    description: '写入并确认网络配置后，自动检查连通性和防火墙，并演练节点故障、关闭 TUN 和内核退出。演练期间公网会短暂中断。',
+    subtitle: (chain ? chain.name+' · '+proxyRoute(chain) : node) + ' · 最终出口 ' + region,
+    description: '配置会重启 Clash 并核对本机配置。完成后可在「网络环境」运行完整网络验收。',
     items: IMPACT,
-    note: 'Mihomo 停止时所有公网（包括国内网站）都会短暂断开；请先保存正在进行的网络工作。',
+    note: '重启 Mihomo 时公网会短暂断开，请先保存正在进行的网络工作。',
     noteType: 'warn',
     confirmText: '确认配置',
-    requireCheck: '我已保存工作，并了解系统设置改动和故障演练造成的短暂断网。',
+    requireCheck: '我已保存工作，并了解配置会修改系统设置和短暂断网。',
   });
   if (!ok) return;
   ctx.startJob({
     action: 'apply',
-    node: form.node,
-    subscription: form.subscription,
-    region: form.region,
-    ...(chain ? {chain} : {}),
+    node,
+    subscription,
+    region,
+    ...(chain && !saved ? {chain} : {}),
     confirm: 'APPLY',
   });
 }
 
 function chainReady() {
   const rows=(nodesState.data?.subscriptions || []).filter(r=>!r.chain);
-  return Boolean(form.chainName.trim() && rows.some(r=>r.uid===form.subscription && r.nodes.includes(form.node)) &&
-    rows.some(r=>r.uid===form.frontSubscription && r.nodes.includes(form.frontNode)) &&
-    !(form.subscription===form.frontSubscription && form.node===form.frontNode));
+  if (!form.chainName.trim()) return false;
+  if (form.mode !== 'staticDirect' && !rows.some(r=>r.uid===form.frontSubscription && r.nodes.includes(form.frontNode))) return false;
+  if (isStaticMode()) {
+    if (form.staticSaved) return Boolean(savedStatic());
+    const endpoint = staticEndpoint();
+    const octets = endpoint.ip.split('.');
+    return octets.length === 4 && octets.every(octet => /^(0|[1-9]\d{0,2})$/.test(octet) && Number(octet) < 256) &&
+      /^[0-9]{1,5}$/.test(form.staticPort) && endpoint.port >= 1 && endpoint.port <= 65535 &&
+      Boolean(endpoint.username) === Boolean(endpoint.password);
+  }
+  return rows.some(r=>r.uid===form.subscription && r.nodes.includes(form.node)) &&
+    !(form.subscription===form.frontSubscription && form.node===form.frontNode);
 }
 
-function renderChainChoices(ctx,mode) {
+function renderChainChoices(ctx) {
+  const staticMode = isStaticMode();
+  const direct = form.mode === 'staticDirect';
   const rows=(nodesState.data?.subscriptions || []).filter(r=>!r.chain);
   const getSub=uid=>rows.find(r=>r.uid===uid);
   const subOptions=[{value:'',label:'请选择原订阅'},...rows.map(r=>({value:r.uid,label:r.name}))];
@@ -627,35 +715,59 @@ function renderChainChoices(ctx,mode) {
         node && !all.includes(node) ? ui.note('原选节点已不可用，请重新选择。','warn') : null));
   };
   let acknowledgement;
-  const name=ui.input(form.chainName,{'aria-label':'链式节点名称',placeholder:'请输入新链式节点名称',oninput:event=>{
-    form.chainName=event.target.value;form.acknowledged=false;
+  const setField = (key,value) => {
+    form[key]=value;form.acknowledged=false;
     const check=acknowledgement?.querySelector?.('input');if(check)check.checked=false;
     updateStartButton(ctx);
-  }});
-  acknowledgement=ui.checkbox(form.acknowledged,'我已核对两跳节点及最终出口，并了解将应用完整网络防护。',value=>{form.acknowledged=value;updateStartButton(ctx);});
+  };
+  const name=ui.input(form.chainName,{placeholder:'请输入新配置名称',
+    oninput:event=>setField('chainName',event.target.value)});
+  const acknowledgementLabel = direct ? '我已核对静态代理出口，并了解将应用完整网络防护。' :
+    '我已核对两跳节点及最终出口，并了解将应用完整网络防护。';
+  acknowledgement=ui.checkbox(form.acknowledged,acknowledgementLabel,value=>{form.acknowledged=value;updateStartButton(ctx);});
   const start=ui.button(stateText(ctx),{variant:'ink',icon:'play',disabled:!form.region || !chainReady() || !form.acknowledged || operationsBlocked(ctx),onClick:()=>beginApply(ctx)});
   start.id='start-apply';
-  const saved=(nodesState.data?.subscriptions || []).filter(row=>row.chain);
-  const selected=saved.find(row=>row.chain.name===form.chainName && row.chain.front_subscription===form.frontSubscription &&
-    row.chain.front_node===form.frontNode && row.chain.exit_subscription===form.subscription && row.chain.exit_node===form.node);
-  const savedPicker=ui.field('链式配置',ui.select([{value:'',label:'新建链式配置'},...saved.map(row=>({value:row.uid,label:row.chain.name}))],selected?.uid || '',value=>{
+  const saved=(nodesState.data?.subscriptions || []).filter(row=>row.chain &&
+    Boolean(row.chain.static_exit) === staticMode && Boolean(row.chain.direct) === direct);
+  const selected=staticMode ? savedStatic() : saved.find(row=>row.chain.name===form.chainName &&
+    row.chain.front_subscription===form.frontSubscription && row.chain.front_node===form.frontNode &&
+    row.chain.exit_subscription===form.subscription && row.chain.exit_node===form.node);
+  const savedPicker=ui.field('已保存配置',ui.select([{value:'',label:'新建配置'},...saved.map(row=>({value:row.uid,label:row.chain.name}))],selected?.uid || '',value=>{
     const row=saved.find(row=>row.uid===value);
-    if(row)loadChainSelection(ctx,row.chain);
-    else{form.chainName='';form.frontSubscription='';form.frontNode='';form.acknowledged=false;}
+    if(row)loadChainSelection(ctx,row.chain,row.uid);
+    else {
+      form.chainName='';form.frontSubscription='';form.frontNode='';form.acknowledged=false;
+      form.staticSaved='';form.staticIp='';form.staticPort='';form.staticUser='';form.staticPassword='';
+    }
     renderChoices(ctx);
-  }),'已有链式配置可再次选择；新建链式配置会保留已配置的单一节点。');
+  }));
+  const field=(label,key,attrs={})=>ui.field(label,ui.input(form[key],{
+    ...attrs,oninput:event=>setField(key,event.target.value),
+  }));
+  const endpoint = staticMode && !selected ? ui.el('div',{class:'choice-grid'},
+    ui.field('代理协议',ui.select([{value:'socks5',label:'SOCKS5'},{value:'http',label:'HTTP'},
+      {value:'https',label:'HTTPS'}],form.staticProtocol,value=>setField('staticProtocol',value))),
+    field('公网静态 IPv4','staticIp',{placeholder:'填写供应商提供的 IP'}),
+    field('代理端口','staticPort',{inputmode:'numeric',maxlength:5}),
+    field('代理用户名（可选）','staticUser',{autocomplete:'off'}),
+    field('代理密码（可选）','staticPassword',{type:'password',autocomplete:'new-password'}),
+  ) : null;
   choicesHost.replaceChildren(...[
-    mode,
     reloadButton(ctx),
     savedPicker,
-    ui.note('原订阅和原节点保持不变。链式配置使用与普通配置相同的分流、TUN、DNS、IPv6、防火墙及受管 WebRTC 防护；任一跳故障均不切换到直连。','neutral'),
-    ui.note('流量条按两份订阅的剩余额度取较小者，显示该账户的已用量/总量，并采用较早到期日。使用 Clash 缓存数据，缺少数据不显示；不是此链路独占的实时用量。','info'),
-    picker('前置（第一跳）','front'),picker('后置 / 最终出口（第二跳）','exit'),
-    ui.el('div',{class:'choice-grid'},ui.field('链式节点名称',name),
+    ui.note(direct ? 'Clash 直接连接静态 IP 上的代理服务。出口失效时，海外流量中断。' :
+      '链式配置使用与普通配置相同的分流和网络防护；任一跳故障时，海外流量中断。','neutral'),
+    staticMode ? ui.note('静态 IP 必须已运行代理服务。海外 TCP 经静态出口，海外 UDP 被阻断，国内和局域网按原规则分流。' +
+      (direct ? '' : '流量条显示前置订阅额度。'),'info') :
+      ui.note('流量条按两份订阅的剩余额度取较小者，显示该账户的已用量/总量，并采用较早到期日。使用 Clash 缓存数据，缺少数据不显示；不是此链路独占的实时用量。','info'),
+    !direct && (!staticMode || !selected) ? picker('前置（第一跳）','front') : null,
+    staticMode ? endpoint : picker('后置 / 最终出口（第二跳）','exit'),
+    ui.el('div',{class:'choice-grid'},!staticMode || !selected ? ui.field('配置名称',name) : null,
       ui.field('最终出口地区',ui.select(regionOptions(),form.region,value=>{
         form.region=value;form.regionManual=Boolean(value);form.regionAuto=null;form.acknowledged=false;renderChoices(ctx);
-      }),'以第二跳所在地区为准；不会使用前置节点的地区。')),
-    ui.el('p',{class:'muted',text:'电脑 → '+(form.frontNode || '前置节点')+' → '+(form.node || '最终出口节点')+' → 目标网站'}),
+      }),direct ? '按供应商提供的出口地区选择。' : '按第二跳所在地区选择。')),
+    ui.el('p',{class:'muted',text:proxyRoute({front_node:direct ? '' : form.frontNode || '前置节点',
+      exit_node:staticMode ? selected?.chain.static_exit.ip || '静态 IP' : form.node || '最终出口节点'})}),
     form.node && !form.region ? ui.note('未识别最终出口地区，请手动选择。','warn') : null,
     form.regionManual ? ui.pill('出口地区为手动选择','neutral') : null,
     acknowledgement, start,

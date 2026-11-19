@@ -289,6 +289,7 @@ async function main() {
     .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
   vm.runInContext(overviewSource + `
     impactHost = host;
+    form.mode = 'single';
     form.node = 'fixture-sg';
     nodesState.data = {subscriptions: [{nodes: ['fixture-sg']}]};
     globalThis.renderPreview = renderImpact;
@@ -322,11 +323,12 @@ async function main() {
   vm.runInContext(`
     choicesHost = chainHost;
     impactHost = null;
+    form.mode = 'chain';
     form.frontNode = 'fixture-hk';
     globalThis.renderChain = (region, manual) => {
       form.region = region;
       form.regionManual = manual;
-      renderChainChoices({ state: {}, busy: false }, ui.el('div'));
+      renderChainChoices({ state: {}, busy: false });
     };
   `, overviewContext);
   overviewContext.renderChain('SG', false);

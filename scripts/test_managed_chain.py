@@ -44,6 +44,111 @@ class ManagedChain(unittest.TestCase):
         with patch.object(client,'api',return_value={}):client.apply_client()
         return client.load(self.local/'plan.json')
 
+    def static_request(self, protocol='socks5'):
+        return {'name':'Static exit','front_subscription':'front','front_node':'Entry',
+                'static_exit':{'protocol':protocol,'ip':'93.184.215.1','port':1234,
+                               'username':'fixture-user','password':'fixture-password'}}
+
+    def direct_request(self, protocol='socks5'):
+        static=self.static_request(protocol)['static_exit']
+        return {'name':'Single static','direct':True,'static_exit':static}
+
+    def test_single_static_can_apply_and_update_without_a_subscription(self):
+        self.put('profiles.yaml',{'items':None})
+        self.assertEqual(client.discover(self.root)['subscriptions'],[])
+        request=self.direct_request('https')
+        with patch.object(client,'api',return_value={}):
+            client.prepare(self.root,request['name'],None,'US',chain_spec=request)
+            client.apply_client()
+        plan=client.load(self.local/'plan.json')
+        uid=plan['subscription_uid']
+        profiles=client.load(self.root/'profiles.yaml')
+        self.assertEqual(profiles['current'],uid)
+        self.assertEqual(sum(i['type']=='local' for i in profiles['items']),1)
+        self.assertNotIn('extra',profiles['items'][0])
+        source=client.load(self.root/'profiles'/plan['chain']['file'])
+        self.assertEqual(len(source['proxies']),1)
+        self.assertNotIn('dialer-proxy',source['proxies'][0])
+        marker=client.discover(self.root)['subscriptions'][0]['chain']
+        self.assertEqual(set(marker),{'name','direct','static_exit'})
+        self.assertEqual(set(marker['static_exit']),{'protocol','ip','port'})
+        self.assertNotIn('front_uid',plan['chain'])
+        self.assertTrue(self.run_update()['unchanged'])
+        self.data['domains'].append('+.example.cn')
+        self.assertTrue(self.run_update()['active_profile_reloaded'])
+        client.prepare(self.root,request['name'],uid,'US')
+        self.assertEqual(client.load(self.local/'plan.json')['subscription_uid'],uid)
+
+    def test_static_exit_coexists_with_single_and_double_chain_and_updates_when_active(self):
+        with patch.object(client,'api',return_value={}):
+            client.prepare(self.root,'Exit','exit','SG')
+            client.apply_client()
+            double=self.apply()
+            client.prepare(self.root,'Entry','front','US',chain_spec=self.static_request())
+            client.apply_client()
+        static=client.load(self.local/'plan.json')
+        request=self.direct_request()
+        with patch.object(client,'api',return_value={}):
+            client.prepare(self.root,request['name'],None,'US',chain_spec=request)
+            client.apply_client()
+        direct=client.load(self.local/'plan.json')
+        profiles=client.load(self.root/'profiles.yaml')
+        entries={i['uid']:i for i in profiles['items']}
+        for uid in ('exit', double['subscription_uid'], static['subscription_uid'], direct['subscription_uid']):
+            self.assertTrue(entries[uid]['option']['script'].startswith('PortableClaude'))
+        source=client.load(self.root/'profiles'/static['chain']['file'])
+        self.assertEqual(source['proxies'][0],{'type':'socks5','server':'93.184.215.1','port':1234,
+                         'udp':False,'username':'fixture-user','password':'fixture-password',
+                         'name':'Static exit','dialer-proxy':managed_chain.FRONT})
+        self.assertNotIn('password',json.dumps(client.discover(self.root)))
+        self.assertNotIn('username',source['x-portable-chain']['static_exit'])
+        with patch.object(client,'api',return_value={}):
+            client.prepare(self.root,'Exit','exit','SG')
+            client.apply_client()
+        profiles=client.load(self.root/'profiles.yaml')
+        # Simulate activating the static profile in Clash while the last plan is the single node.
+        profiles['current']=static['subscription_uid']
+        self.put('profiles.yaml',profiles)
+        self.front['proxies'][0]['port']=5555
+        self.put('profiles/front.yaml',self.front)
+        result=self.run_update()
+        self.assertTrue(result['active_profile_reloaded'])
+        self.assertTrue(result['chain_profile_updated'])
+        runtime=client.load(self.root/'clash-verge.yaml')
+        self.assertEqual(runtime['proxies'][0],source['proxies'][0])
+        self.assertEqual(runtime['proxies'][1]['port'],5555)
+        self.assertEqual(runtime['proxy-groups'][-1]['proxies'],['Static exit'])
+        with patch.object(client,'api',return_value={}):
+            client.prepare(self.root,'Static exit',static['subscription_uid'],'US')
+            client.apply_client()
+        self.assertEqual(client.load(self.local/'plan.json')['subscription_uid'],static['subscription_uid'])
+
+    def test_static_exit_keeps_rule_order_and_requires_udp_rejections(self):
+        client.prepare(self.root,'Entry','front','US',chain_spec=self.static_request('https'))
+        original=client.load(self.local/'managed-chain-source.yaml')
+        candidate=client.load(self.local/'candidate.yaml')
+        self.assertEqual(candidate['proxies'][0]['type'],'http')
+        self.assertTrue(candidate['proxies'][0]['tls'])
+        _,_,normal,_=client.build(self.root,self.index['items'][1],'Entry',copy.deepcopy(self.data))
+        plain_rules=[r for r in candidate['rules'] if not r.startswith(('AND,','NETWORK,udp,REJECT'))]
+        self.assertEqual(plain_rules,normal['rules'])
+        self.assertEqual(candidate['dns']['nameserver-policy'],normal['dns']['nameserver-policy'])
+        for rule in ('NETWORK,udp,REJECT','AND,((NETWORK,udp),(DOMAIN-SUFFIX,claude.ai)),REJECT'):
+            changed=copy.deepcopy(candidate)
+            changed['rules'].remove(rule)
+            with self.assertRaises(AssertionError):client.validate(changed,original,'Static exit')
+
+    def test_static_exit_rejects_invalid_endpoint_before_configuration(self):
+        for fields in ({'ip':'127.0.0.1'}, {'ip':'224.0.0.1'}, {'ip':'example.invalid'},
+                       {'port':0}, {'port':65536}, {'port':True}, {'protocol':'ssh'},
+                       {'password':''}):
+            with self.subTest(fields=fields):
+                request=self.static_request()
+                request['static_exit'].update(fields)
+                with self.assertRaises(AssertionError):
+                    client.prepare(self.root,'Entry','front','US',chain_spec=request)
+        self.assertEqual(client.load(self.root/'profiles.yaml'),self.index)
+
     def test_uses_the_same_rules_tun_and_target_dns_as_regular_apply(self):
         self.exit['rules'].insert(0,'IP-CIDR6,fe80::/10,DIRECT,no-resolve');self.put('profiles/exit.yaml',self.exit)
         _,_,normal,_=client.build(self.root,self.index['items'][0],'Exit',copy.deepcopy(self.data))
@@ -212,9 +317,13 @@ class ManagedChain(unittest.TestCase):
                                           {'type':'RuleSet','payload':'strict-cn-domain','proxy':'DIRECT'}]}
         if path=='/providers/rules':return {'providers':{k:{'ruleCount':len(v['payload'])} for k,v in client.load(self.root/'clash-verge.yaml')['rule-providers'].items()}}
         if path=='/proxies':
-            node=client.load(self.root/'clash-verge.yaml')['x-portable-chain']['name']
-            return {'proxies':{client.GROUP:{'all':[node],'now':node},
-                    node:{'dialer-proxy':managed_chain.FRONT},managed_chain.FRONT:{'dialer-proxy':''}}}
+            marker=client.load(self.root/'clash-verge.yaml')['x-portable-chain']
+            node=marker['name']
+            proxies={client.GROUP:{'all':[node],'now':node},node:{'udp':False}}
+            if not marker.get('direct'):
+                proxies[node]['dialer-proxy']=managed_chain.FRONT
+                proxies[managed_chain.FRONT]={'dialer-proxy':''}
+            return {'proxies':proxies}
         raise AssertionError('Unexpected offline controller request')
 
     def run_update(self):
@@ -256,6 +365,21 @@ class ManagedChain(unittest.TestCase):
         with patch.object(app,'configured',return_value=(False,None)),patch.object(app,'plan',return_value={}):
             with self.assertRaises(gui_server.ApiError):
                 app._validate_job({'action':'apply','confirm':'APPLY','node':'Wrong','region':'SG','chain':self.request})
+
+    def test_static_credentials_are_not_returned_in_job_status(self):
+        app=gui_server.App(local=self.local,open_browser=False,idle_exit=False)
+        payload={'action':'apply','confirm':'APPLY','node':'Entry','subscription':'front',
+                 'region':'US','chain':self.static_request()}
+        with patch.object(app,'configured',return_value=(False,None)),patch.object(app,'plan',return_value={}),\
+             patch.object(gui_server.threading.Thread,'start'):
+            view=app.start_job(payload)
+        folder=app.jobs_dir/view['id']
+        command,_=app._job_command('apply',app.active_job['params'],folder)
+        self.assertIn(str(folder/'chain-selection.json'),command)
+        self.assertEqual(client.load(folder/'chain-selection.json'),payload['chain'])
+        for public in (json.dumps(view),(folder/'job.json').read_text(encoding='utf-8'),' '.join(command)):
+            self.assertNotIn('fixture-password',public)
+            self.assertNotIn('fixture-user',public)
 
     def test_other_chain_and_active_companion_receive_the_same_rule_update(self):
         first=self.apply();self.request['name']='Second chain';second=self.apply()

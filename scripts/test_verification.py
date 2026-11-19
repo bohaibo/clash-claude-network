@@ -77,6 +77,39 @@ class Verification(unittest.TestCase):
   self.assertEqual(failed,[managed_chain.FRONT,'Chosen']);self.assertFalse(self.broken)
   self.assertTrue(report['chain_front_failure_blocks_foreign_preserves_domestic'])
   self.assertTrue(report['node_failure_blocks_foreign_preserves_domestic'])
+ def test_single_static_drill_only_changes_the_exit(self):
+  import managed_chain
+  plan={'root':str(self.local),'node':'Chosen','region':'SG',
+        'chain':{'file':'direct.yaml','direct':True,'static_exit':{'ip':'8.8.8.8'}}}
+  (self.local/'plan.json').write_text(json.dumps(plan));(self.local/'profiles').mkdir()
+  (self.local/'profiles.yaml').write_text('{}')
+  (self.local/'profiles/direct.yaml').write_text('{}')
+  self.stun.return_value={'ok':False,'attempts':[{'error':'TimeoutError'}]}
+  response={'proxies':{client.GROUP:{'all':['Chosen'],'now':'Chosen'},'Chosen':{'udp':False}}}
+  self.api.side_effect=lambda root,method,path,body=None: response if path=='/proxies' else self.fake_api(root,method,path,body)
+  with patch.object(managed_chain,'check_fresh'),patch.object(client,'validate'):
+   report=verify.verify(outage=True)
+  writes=[call for call in self.api.call_args_list if call.args[1]=='PUT']
+  self.assertEqual(len(writes),2)
+  self.assertTrue(report['node_failure_blocks_foreign_preserves_domestic'])
+  self.assertNotIn('chain_front_failure_blocks_foreign_preserves_domestic',report)
+  self.assertTrue(report['recovered'])
+ def test_static_exit_verifies_exact_ip_and_requires_no_foreign_udp_response(self):
+  import managed_chain
+  plan={'root':str(self.local),'node':'Chosen','region':'SG',
+        'chain':{'file':'chain.yaml','static_exit':{'ip':'8.8.8.8'}}}
+  path=self.local/'plan.json'
+  path.write_text(json.dumps(plan));(self.local/'profiles').mkdir()
+  (self.local/'profiles.yaml').write_text('{}')
+  (self.local/'profiles/chain.yaml').write_text('{}')
+  with patch.object(managed_chain,'check_fresh'),patch.object(managed_chain,'assert_live'),patch.object(client,'validate'):
+   self.stun.return_value={'ok':False,'attempts':[{'error':'TimeoutError'}]}
+   self.assertTrue(verify.verify()['static_exit_ip_matches'])
+   self.stun.return_value={'ok':True,'attempts':[{'ok':True}]}
+   with self.assertRaisesRegex(AssertionError,'UDP'):verify.verify()
+   plan['chain']['static_exit']['ip']='9.9.9.9'
+   path.write_text(json.dumps(plan))
+   with self.assertRaisesRegex(AssertionError,'IP'):verify.verify()
  def fake_api(self,root,method,path,body=None):
   if method=='PUT':self.broken=client.yaml.safe_load(body['payload'])['proxies'][0]['port']==1;return {}
   if path=='/configs':return {'mode':'rule','find-process-mode':'strict'}

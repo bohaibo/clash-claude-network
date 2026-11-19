@@ -81,22 +81,22 @@ def executables():
  return node,actual_core()
 @timed("client.discover")
 def discover(root):
- profiles=load(root/'profiles.yaml');rows=[]
- for item in profiles['items']:
+ profiles=load(root/'profiles.yaml');rows=[];items=profiles.get('items') or []
+ for item in items:
   if item.get('type')!='remote' or not item.get('file'):continue
   source=safe_file(root,'profiles/'+item['file'])
   if not source.is_file():continue
   value=load(source) or {}
   rows.append({'uid':item['uid'],'name':item.get('name'),'nodes':[n['name'] for n in value.get('proxies',[])]})
  for uid,record in managed_chain.records(root,LOCAL).items():
-  if any(i.get('uid')==uid and i.get('type')=='local' and i.get('file')==record['file'] for i in profiles['items']):
+  if any(i.get('uid')==uid and i.get('type')=='local' and i.get('file')==record['file'] for i in items):
    rows.append({'uid':uid,'name':record['name'],'nodes':[record['node']],'chain':managed_chain.selection(record)})
- return {'client':'Clash Verge Rev','root':str(root),'active_uid':profiles['current'],'subscriptions':rows}
+ return {'client':'Clash Verge Rev','root':str(root),'active_uid':profiles.get('current'),'subscriptions':rows}
 @timed("client.select")
 def select(root,node,subscription=None,profiles=None):
  profiles=profiles if profiles is not None else load(root/'profiles.yaml')
  matches=[]
- for item in profiles['items']:
+ for item in profiles.get('items') or []:
   if item.get('type')=='local' and item.get('file'):
    record=managed_chain.registered(root,profiles,item['uid'],LOCAL)
    if record and node==record['node'] and (subscription is None or subscription in (item.get('name'),item['uid'])):matches.append(item)
@@ -245,7 +245,11 @@ def build(root,item,node,data=None,*,runtime=None,profiles=None,original=None):
  data=copy.deepcopy(data or download_rules());data.update(json.loads((PROJECT/'assets/claude-policy.json').read_text(encoding='utf-8')))
  if original.get('x-portable-chain'):
   data['chainNodeDns']=original['dns'].get('proxy-server-nameserver-policy',{})
-  data['chainPin']={'node':node,'front':managed_chain.FRONT}
+  data['chainPin']={'node':node,'front':None if original['x-portable-chain'].get('direct') else managed_chain.FRONT}
+ static_exit=bool(original.get('x-portable-chain',{}).get('static_exit'))
+ if static_exit:
+  endpoint=next(n for n in original['proxies'] if n['name']==node)
+  data['chainPin']['staticExit']={**{key:endpoint[key] for key in ('type','server','port')},'tls':bool(endpoint.get('tls'))}
  lan_audit=[]
  data['lanSourceCidrs']=list(data['lanCidrs'])
  data['lanCidrs']=normalize_lan_cidrs(data['lanCidrs'],lan_audit)
@@ -265,7 +269,7 @@ def build(root,item,node,data=None,*,runtime=None,profiles=None,original=None):
  selected=next(n for n in original.get('proxies',[]) if n['name']==node)
  try:
   address=ipaddress.ip_address(selected['server'])
-  if address.version==4:data['lan'].insert(0,f'IP-CIDR,{address}/32,DIRECT,no-resolve')
+  if address.version==4 and not static_exit:data['lan'].insert(0,f'IP-CIDR,{address}/32,DIRECT,no-resolve')
  except ValueError:pass
  # Preserve the selected subscription's cached classical LAN provider rules, not another subscription's.
  data['lanProviderOverrides']={}
@@ -353,7 +357,7 @@ def validate(config,original,node):
   elif parts[0] in ('DOMAIN','DOMAIN-SUFFIX'):lan_domain(parts[1],policy)
   elif parts[0] in ('IP-CIDR','IP-CIDR6'):
    network=ipaddress.ip_network(parts[1],strict=False)
-   node_exception=bool(server and server.version==4 and network==ipaddress.ip_network(str(server)+'/32'))
+   node_exception=bool(not original.get('x-portable-chain',{}).get('static_exit') and server and server.version==4 and network==ipaddress.ip_network(str(server)+'/32'))
    require(local_network(network) or node_exception,'Public address in early LAN DIRECT rules')
   else:raise AssertionError('Unknown early DIRECT rule; review required')
  for server in config['dns']['nameserver']:
@@ -439,23 +443,40 @@ def assert_preparation_inputs(root,inputs):
  require(all(hashlib.sha256(safe_file(root,name).read_bytes()).hexdigest()==digest for name,digest in inputs.items()),
          'Client configuration changed during preparation; retry without publishing')
 
+def setup_record(root,profiles,request,node,subscription):
+ record=managed_chain.resolve(root,profiles,request,LOCAL)
+ anchor=managed_chain.anchor(record)
+ if anchor is None:
+  require(node==record['node'] and not subscription,'Single static proxy selection changed')
+ else:
+  item=select(root,node,subscription or None,profiles)
+  require((item['uid'],node)==anchor,'Chain source selection changed')
+ return record
+
 @timed("client.prepare")
 def prepare(root,node,subscription,region,rules_bundle=None,chain_spec=None):
  data=consume_rules(rules_bundle) if rules_bundle else None
- index_bytes=(root/'profiles.yaml').read_bytes();profiles=yaml_loads(index_bytes);item=select(root,node,subscription,profiles)
- inputs=preparation_inputs(root,item,profiles)
- record=managed_chain.resolve(root,profiles,chain_spec,LOCAL) if chain_spec else managed_chain.registered(root,profiles,item['uid'],LOCAL) if item.get('type')=='local' else None
- original=None;new_profile=False
+ index_bytes=(root/'profiles.yaml').read_bytes();profiles=yaml_loads(index_bytes)
+ if profiles.get('items') is None:profiles['items']=[]
+ if chain_spec is not None:
+  record=setup_record(root,profiles,chain_spec,node,subscription)
+  item=next((i for i in profiles['items'] if i['uid']==record['uid']),None)
+  if item is not None:record=managed_chain.registered(root,profiles,item['uid'],LOCAL)
+ else:
+  item=select(root,node,subscription,profiles)
+  record=managed_chain.registered(root,profiles,item['uid'],LOCAL) if item.get('type')=='local' else None
+ inputs=preparation_inputs(root,item,profiles) if item is not None else {
+  'clash-verge.yaml':hashlib.sha256((root/'clash-verge.yaml').read_bytes()).hexdigest()}
+ original=None
  if record:
-  if chain_spec:require(item['uid']==record['source_uid'] and node==record['exit_node'],'Chain exit selection changed')
   managed_chain.check_source(root,record)
-  exit_item=next(i for i in profiles['items'] if i['uid']==record['source_uid'])
-  inputs.update(preparation_inputs(root,exit_item,profiles))
+  anchor=managed_chain.anchor(record)
+  if anchor:
+   source_item=next(i for i in profiles['items'] if i['uid']==anchor[0])
+   inputs.update(preparation_inputs(root,source_item,profiles))
   for name in managed_chain.input_files(record):inputs[name]=hashlib.sha256(safe_file(root,name).read_bytes()).hexdigest()
   original=managed_chain.source(root,profiles,record);node=record['node']
-  existing=next((i for i in profiles['items'] if i['uid']==record['uid']),None)
-  new_profile=existing is None
-  item=existing or {'uid':record['uid'],'type':'local','name':record['name'],'file':record['file'],'option':{}}
+  item=item or {'uid':record['uid'],'type':'local','name':record['name'],'file':record['file'],'option':{}}
  inputs['profiles.yaml']=hashlib.sha256(index_bytes).hexdigest()
  runtime=executables()
  path=snapshot_dir(create=True);backup(root,path)
@@ -510,6 +531,7 @@ def apply_client():
   assert_preparation_inputs(root,plan['input_sha256'])
  text=(LOCAL/'candidate.yaml').read_text(encoding='utf-8');current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
  profiles=load(root/'profiles.yaml')
+ if profiles.get('items') is None:profiles['items']=[]
  item=next((x for x in profiles['items'] if x['uid']==plan['subscription_uid']),None)
  if item is None and plan.get('chain'):
   item=copy.deepcopy(plan['chain_profile_entry']);profiles['items'].append(item)
@@ -536,6 +558,7 @@ def apply_client():
  old={p:p.read_bytes() if p.exists() else None for p in targets}
  try:
   api(root,'PUT','/configs?force=true',{'payload':text})
+  if chain_target:(root/'profiles').mkdir(exist_ok=True)
   for path,value in targets.items():
    if path==chain_target:path.write_bytes(value.encode('utf-8'))
    else:path.write_text(value,encoding='utf-8')
@@ -595,7 +618,7 @@ def client_restore_targets(root,original,plan,journal):
   if not isinstance(restore_yaml(safe_file(root,'profiles/'+active['file'])),dict):
    raise ValueError('Active subscription source is invalid')
  before=restore_yaml(original/'profiles.yaml') or {}
- originals={entry['uid']:entry for entry in before.get('items',[])}
+ originals={entry['uid']:entry for entry in before.get('items') or []}
  targets={};remove=[];owned={};preserved=set()
  generated=set(plan.get('generated_files',[]))
  for entry in items:
@@ -795,9 +818,8 @@ if __name__=='__main__':
   elif args.action=='prefetch-rules':result=prefetch_rules()
   elif args.action=='chain-preflight':
    root=root_path(args.root);profiles=load(root/'profiles.yaml')
-   if chain_spec:
-    record=managed_chain.resolve(root,profiles,chain_spec,LOCAL)
-    require(args.node==record['exit_node'] and args.subscription==record['source_uid'],'Chain exit selection changed')
+   if chain_spec is not None:
+    record=setup_record(root,profiles,chain_spec,args.node,args.subscription)
    else:
     item=select(root,args.node,args.subscription,profiles);record=managed_chain.registered(root,profiles,item['uid'],LOCAL)
     require(record is not None,'Managed chain registration missing')

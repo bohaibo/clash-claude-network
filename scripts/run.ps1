@@ -532,13 +532,15 @@ try {
   }
   if([string]::IsNullOrWhiteSpace($Node)){$result.status='cancelled';Write-Host '未选择节点，已取消配置；未关闭应用或写入配置。';return}
   # Validate the exact selection before closing the client; never guess a replacement.
-  $discoveryOutput=& $python (Join-Path $PSScriptRoot 'client.py') discover
-  if($LASTEXITCODE -ne 0){throw '读取订阅失败，未关闭 Clash。详情见 .local/client-error.log。'}
-  $available=($discoveryOutput | Select-Object -Last 1) | ConvertFrom-Json
-  $matches=@($available.subscriptions | Where-Object {(@($_.nodes) -ccontains $Node) -and (!$Subscription -or $_.uid -ceq $Subscription -or $_.name -ceq $Subscription)})
-  if(!$matches.Count){throw '所选订阅中没有这个精确节点。请在 Clash 更新订阅并核对完整名称；未关闭应用或写入配置。'}
-  if($matches.Count -gt 1){throw '此节点在多个订阅中存在。请按订阅编号选择，或使用 -Subscription 指定唯一 UID；未关闭应用或写入配置。'}
-  $Subscription=[string]$matches[0].uid
+  if(!$ChainSpecPath){
+   $discoveryOutput=& $python (Join-Path $PSScriptRoot 'client.py') discover
+   if($LASTEXITCODE -ne 0){throw '读取订阅失败，未关闭 Clash。详情见 .local/client-error.log。'}
+   $available=($discoveryOutput | Select-Object -Last 1) | ConvertFrom-Json
+   $matches=@($available.subscriptions | Where-Object {(@($_.nodes) -ccontains $Node) -and (!$Subscription -or $_.uid -ceq $Subscription -or $_.name -ceq $Subscription)})
+   if(!$matches.Count){throw '所选订阅中没有这个精确节点。请在 Clash 更新订阅并核对完整名称；未关闭应用或写入配置。'}
+   if($matches.Count -gt 1){throw '此节点在多个订阅中存在。请按订阅编号选择，或使用 -Subscription 指定唯一 UID；未关闭应用或写入配置。'}
+   $Subscription=[string]$matches[0].uid
+  }
   if(!$env:CCN_NODE -or !(Test-Path -LiteralPath $env:CCN_NODE)){
  $localNode=Join-Path $project '.runtime\node\node.exe'
  if(Test-Path -LiteralPath $localNode){$env:CCN_NODE=$localNode}
@@ -546,11 +548,13 @@ try {
  else{throw '未找到项目内 Node.js。请重新运行「一键网络.cmd」修复 .runtime；未关闭应用或写入配置。'}
 }
   if($ChainSpecPath){
-   & $python (Join-Path $PSScriptRoot 'client.py') chain-preflight --chain-spec $ChainSpecPath --node $Node --subscription $Subscription
-   if($LASTEXITCODE -ne 0){throw '链式代理的精确节点或名称校验失败；未关闭 Clash 或修改系统。'}
+   $proxyPreflight=@((Join-Path $PSScriptRoot 'client.py'),'chain-preflight','--chain-spec',$ChainSpecPath,'--node',$Node)
+   if($Subscription){$proxyPreflight+=@('--subscription',$Subscription)}
+   & $python @proxyPreflight
+   if($LASTEXITCODE -ne 0){throw '代理的节点、名称或静态端点校验失败；未关闭 Clash 或修改系统。'}
   }elseif($matches[0].chain){
    & $python (Join-Path $PSScriptRoot 'client.py') chain-preflight --node $Node --subscription $Subscription
-   if($LASTEXITCODE -ne 0){throw '已有链式配置的源节点或关联已改变；未关闭 Clash 或修改系统。'}
+   if($LASTEXITCODE -ne 0){throw '已有代理配置的源节点或关联已改变；未关闭 Clash 或修改系统。'}
   }
   Write-Step '先下载并严格校验四份规则；失败时不关闭 Clash 客户端'
   $rulePreparation=& $python (Join-Path $PSScriptRoot 'client.py') prefetch-rules

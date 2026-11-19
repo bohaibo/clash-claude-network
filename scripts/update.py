@@ -42,7 +42,8 @@ def update_inputs(root,profiles,selected):
  for uid,record in managed_chain.records(root,LOCAL).items():
   if uid not in items or not (uid in participating or record.get('legacy') and record['source_uid'] in participating):continue
   for name in managed_chain.input_files(record):inputs[name]=digest(safe_file(root,name).read_bytes())
-  inputs.update(preparation_inputs(root,items[record['source_uid']],profiles))
+  anchor=managed_chain.anchor(record)
+  if anchor:inputs.update(preparation_inputs(root,items[anchor[0]],profiles))
  return inputs
 
 def transaction_targets(record):
@@ -120,7 +121,7 @@ def companion_contexts(root,profiles,plan,fresh,migrate_source):
   if record:
    require(node==record['node'],'Managed chain script node changed')
    managed_chain.check_source(root,record)
-   different=different or record.get('source_fingerprint')!=chain_profile.source_fingerprint(root,profiles,record)
+   different=different or record.get('source_fingerprint')!=managed_chain.source_fingerprint(root,profiles,record)
   contexts.append({'item':item,'record':record,'node':node,'script_file':script['file'],'script_before':before})
   needed=needed or different or migration
  return contexts,needed
@@ -270,7 +271,7 @@ def update(migrate_source=False):
   record=managed_chain.registered(root,profiles,plan['subscription_uid'],LOCAL)
   require(record is not None,'Managed chain registration missing')
   managed_chain.check_source(root,record)
- refresh=(record.get('source_fingerprint')!=chain_profile.source_fingerprint(root,profiles,record)) if record else chain_profile.refresh_required(LOCAL,root,profiles,plan)
+ refresh=(record.get('source_fingerprint')!=managed_chain.source_fingerprint(root,profiles,record)) if record else chain_profile.refresh_required(LOCAL,root,profiles,plan)
  contexts,companions_changed=companion_contexts(root,profiles,plan,fresh,migrate_source)
  if unchanged and not migration and plan.get('source_digest')==source_digest() and not refresh and not companions_changed:
   assert_preparation_inputs(root,inputs)

@@ -3,10 +3,21 @@ function secureMain(config,data,node,group) {
   if (!(config.proxies || []).some(p => p.name === node)) throw new Error('Selected node missing: refuse configuration');
   if (data.chainPin) {
     const exit = (config.proxies || []).find(p => p.name === data.chainPin.node);
-    const front = (config.proxies || []).find(p => p.name === data.chainPin.front);
-    if (config.proxies.length !== 2 || !exit || !front ||
-        exit['dialer-proxy'] !== data.chainPin.front || front['dialer-proxy'])
-      throw new Error('Chain direction changed: refuse configuration');
+    const frontName = data.chainPin.front;
+    if (frontName) {
+      const front = config.proxies.find(p => p.name === frontName);
+      if (config.proxies.length !== 2 || !exit || !front ||
+          exit['dialer-proxy'] !== frontName || front['dialer-proxy'])
+        throw new Error('Chain direction changed: refuse configuration');
+    } else if (config.proxies.length !== 1 || !exit || 'dialer-proxy' in exit) {
+      throw new Error('Single static exit changed: refuse configuration');
+    }
+    if (data.chainPin.staticExit) {
+      const {type, server, port, tls} = data.chainPin.staticExit;
+      if (exit.type !== type || exit.server !== server || exit.port !== port ||
+          Boolean(exit.tls) !== tls || (type === 'socks5' && exit.udp !== false))
+        throw new Error('Static exit changed: refuse configuration');
+    }
   }
   // Also runs when the native client reapplies an updated subscription.
   for (const field of ['listeners','tunnels']) {
@@ -68,6 +79,16 @@ function secureMain(config,data,node,group) {
     'GEOIP,CN,DIRECT,no-resolve',
     'MATCH,'+group
   ];
+  if (data.chainPin && data.chainPin.staticExit) {
+    // Mihomo skips TCP-only destinations for UDP. Preserve the rule order with
+    // an explicit rejection before each overseas match and before the default.
+    config.rules = config.rules.flatMap(rule => {
+      const [type, target, policy, ...flags] = rule.split(',');
+      if (type === 'MATCH') return ['NETWORK,udp,REJECT', rule];
+      if (policy === group) return ['AND,((NETWORK,udp),('+[type, target, ...flags].join(',')+')),REJECT', rule];
+      return [rule];
+    });
+  }
   const overseas = ['https://1.1.1.1/dns-query#'+group,'https://8.8.8.8/dns-query#'+group];
   const domestic = ['https://223.5.5.5/dns-query#DIRECT','https://223.6.6.6/dns-query#DIRECT'];
   const policy = {};

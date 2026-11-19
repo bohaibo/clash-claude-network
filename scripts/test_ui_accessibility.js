@@ -168,7 +168,7 @@ async function main() {
   const overview = environment('gui/js/pages/overview.js');
   overview.context.host = overview.document.root;
   overview.context.fixture = {subscriptions: [{uid: 'offline', nodes: ['Node A', 'Node B', 'Node C']}], regions: {}};
-  overview.expose('choicesHost=host;nodesState.data=fixture;Object.assign(form,{subscription:"offline",node:"Node A",regionManual:true,acknowledged:true});renderImpact=()=>{};globalThis.probe={form,renderChoices,statusGrid};');
+  overview.expose('choicesHost=host;nodesState.data=fixture;Object.assign(form,{mode:"single",subscription:"offline",node:"Node A",regionManual:true,acknowledged:true});renderImpact=()=>{};globalThis.probe={form,renderChoices,statusGrid};');
   const picker = overview.context.probe, ctx = {state: {configured: true, plan: {node: 'Node A'}}, busy: false};
   const historical = {...state, verification: {...state.verification, time: new Date(now - 3600000).toISOString()}};
   const grid = picker.statusGrid({state:historical});
@@ -317,6 +317,44 @@ async function main() {
   assert(entrySelect.textContent.includes('First JP'));
   assert(!exitSelect.textContent.includes('Second US'));
   assert.equal(exitSelect.value,'Second SG');
+
+  const dynamic = environment('gui/js/pages/overview.js');
+  dynamic.expose('globalThis.setup=render;');
+  let discoveryCount=0, finishDiscovery;
+  const configureCtx={state:{capabilities:{managed_chain:true,static_exit:true,static_direct:true}},
+    loadNodes:async()=>{discoveryCount++;return new Promise(resolve=>{finishDiscovery=resolve;});}};
+  dynamic.document.root.append(dynamic.context.setup(configureCtx));
+  const modeSelect=dynamic.document.getElementById('configuration-mode');
+  const fields=dynamic.document.root.querySelector('.choice-area');
+  const choose=value=>modeSelect.handlers.change({target:{value}});
+  assert.equal(modeSelect.value,'');
+  assert.equal(modeSelect.children.length,5);
+  assert.equal(fields.children.length,0);
+  assert.equal(discoveryCount,0);
+  modeSelect.focus();
+  choose('staticDirect');
+  assert(fields.textContent.includes('正在读取'));
+  choose('static');
+  assert.equal(discoveryCount,1,'switching while loading must reuse discovery');
+  finishDiscovery(chain.context.fixture);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert(fields.textContent.includes('公网静态 IPv4'));
+  assert(fields.querySelector('[aria-label="前置（第一跳）节点"]'));
+  choose('staticDirect');
+  assert(fields.textContent.includes('公网静态 IPv4'));
+  assert(!fields.querySelector('[aria-label="前置（第一跳）节点"]'));
+  assert(!fields.querySelector('[aria-label="后置 / 最终出口（第二跳）节点"]'));
+  choose('single');
+  assert(fields.querySelector('.node-list'));
+  assert(!fields.textContent.includes('公网静态 IPv4'));
+  choose('chain');
+  assert(fields.querySelector('[aria-label="前置（第一跳）节点"]'));
+  assert(fields.querySelector('[aria-label="后置 / 最终出口（第二跳）节点"]'));
+  assert(!fields.textContent.includes('公网静态 IPv4'));
+  choose('');
+  assert.equal(fields.children.length,0);
+  assert.equal(dynamic.document.activeElement,modeSelect);
+  assert(modeSelect.isConnected);
 
   const networkPage=environment('gui/js/pages/network.js');
   networkPage.expose('globalThis.card=verificationCard;');

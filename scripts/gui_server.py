@@ -813,7 +813,7 @@ class App:
         return {
             'configuration_time': str(applied_at or last_run.get('configuration_time') or '')[:80] if configured else '',
             'preview': values['preview'],
-            'capabilities': {'managed_chain': True},
+            'capabilities': {'managed_chain': True, 'static_exit': True, 'static_direct': True},
             'version': VERSION,
             'software': self.software_summary(),
             'admin': is_admin(),
@@ -908,7 +908,7 @@ class App:
         except (OSError, subprocess.SubprocessError) as exc:
             raise ApiError(500, '读取当前订阅失败：' + type(exc).__name__ + '。详情见日志。') from exc
         if completed.returncode != 0:
-            raise ApiError(500, '读取当前订阅失败。请确认 Clash Verge Rev 已安装并至少有一个远程订阅；详情见日志。')
+            raise ApiError(500, '读取当前订阅失败。请确认 Clash Verge Rev 已安装并已启动；详情见日志。')
         parsed = _last_json_line(completed.stdout)
         if not isinstance(parsed, dict):
             raise ApiError(500, '订阅输出格式无效。详情见日志。')
@@ -922,7 +922,15 @@ class App:
             name = str(row.get('name') or '')
             clean_row={'uid': uid, 'name': name, 'nodes': nodes}
             if isinstance(row.get('chain'), dict):
-                clean_row['chain']={k:str(row['chain'].get(k) or '') for k in ('name','exit_subscription','exit_node','front_subscription','front_node')}
+                chain=row['chain']
+                fields=('name',) if chain.get('direct') else ('name','front_subscription','front_node')
+                if isinstance(chain.get('static_exit'), dict):
+                    endpoint=chain['static_exit']
+                    clean_row['chain']={k:str(chain.get(k) or '') for k in fields}
+                    clean_row['chain']['static_exit']={k:endpoint[k] for k in ('ip','port','protocol')}
+                    if chain.get('direct') is True:clean_row['chain']['direct']=True
+                else:
+                    clean_row['chain']={k:str(chain.get(k) or '') for k in (*fields,'exit_subscription','exit_node')}
             subscriptions.append(clean_row)
             regions[uid] = {}
             subscription_hint = node_region.infer(name)
@@ -932,7 +940,7 @@ class App:
                     regions[uid][node] = hint
         for row in subscriptions:
             chain=row.get('chain')
-            if chain:
+            if chain and 'static_exit' not in chain:
                 hint=regions.get(chain['exit_subscription'],{}).get(chain['exit_node'])
                 if hint:regions[row['uid']][chain['name']]=hint
         plan = self.plan()
@@ -943,7 +951,7 @@ class App:
             'plan_subscription': str(plan.get('subscription_uid') or ''),
             'plan_region': str(plan.get('region') or 'SG'),
             'regions': regions,
-            'chain_defaults': next((r['chain'] for r in subscriptions if r.get('chain')), None),
+            'chain_defaults': next((r['chain'] for r in subscriptions if r.get('chain') and 'static_exit' not in r['chain']), None),
         }
         self._nodes_cache = (now, result)
         return result
@@ -1120,7 +1128,7 @@ class App:
         if action == 'apply':
             node = str(payload.get('node') or '').strip()
             if not node or len(node) > 200 or any(ord(ch) < 32 for ch in node):
-                raise ApiError(400, '请选择订阅中已存在的完整节点名。')
+                raise ApiError(400, '请选择节点或填写静态代理配置名称。')
             subscription = str(payload.get('subscription') or '').strip()
             if len(subscription) > 160:
                 raise ApiError(400, '订阅标识过长。')
@@ -1130,12 +1138,30 @@ class App:
             params.update(node=node, subscription=subscription, region=region)
             if payload.get('chain') is not None:
                 chain=payload['chain']
-                keys=('name','exit_subscription','exit_node','front_subscription','front_node')
-                if not isinstance(chain,dict) or set(chain)!=set(keys) or any(not isinstance(chain[k],str) or not chain[k].strip() or len(chain[k])>200 or any(ord(c)<32 for c in chain[k]) for k in keys):
-                    raise ApiError(400,'链式代理需要完整名称和两个精确节点。')
-                if chain['exit_node']!=node or chain['exit_subscription']!=subscription:
-                    raise ApiError(400,'链式代理的最终出口与所选节点不一致。')
+                if not isinstance(chain,dict):
+                    raise ApiError(400,'无效的链式代理选择。')
+                static='static_exit' in chain
+                direct=static and chain.get('direct') is True
+                keys=('name',)
+                if not direct:keys+=('front_subscription','front_node')
+                if not static:keys+=('exit_subscription','exit_node')
+                expected=set(keys) | ({'static_exit'} if static else set()) | ({'direct'} if direct else set())
+                if set(chain)!=expected or any(not isinstance(chain[k],str) or not chain[k].strip() or len(chain[k])>200 or any(ord(c)<32 for c in chain[k]) for k in keys):
+                    raise ApiError(400,'请填写有效的配置名称和所需节点。')
+                if direct:
+                    if node!=chain['name'] or subscription:
+                        raise ApiError(400,'单一静态 IP 配置的名称不匹配。')
+                else:
+                    side='front' if static else 'exit'
+                    if (chain[side+'_node'],chain[side+'_subscription'])!=(node,subscription):
+                        raise ApiError(400,'链式代理的订阅与所选节点不一致。')
                 params['chain']=dict(chain)
+                if static:
+                    import managed_chain
+                    try:
+                        params['chain']['static_exit']=managed_chain.static_exit(chain['static_exit'])
+                    except AssertionError as exc:
+                        raise ApiError(400,'请填写公网 IPv4、有效协议和端口，认证需同时填写用户名和密码。') from exc
         if action in ('supplement', 'reconfigure', 'update', 'verify', 'audit') and not plan:
             raise ApiError(400, '还没有配置记录；请先完成一次配置。')
         if action in ('supplement', 'reconfigure') and not self.baseline_name():
@@ -1170,6 +1196,8 @@ class App:
                 'folder': str(folder),
             }
             try:
+                if 'static_exit' in params.get('chain', {}):
+                    atomic_json(folder/'chain-selection.json',params.pop('chain'))
                 atomic_json(folder / 'job.json', {k: job[k] for k in ('id', 'action', 'params', 'created', 'state')})
                 atomic_json(folder / 'status.json', {'state': 'running', 'action': action, 'started': job['created'], 'exit_code': None})
                 thread = threading.Thread(target=self._run_job, args=(job,), daemon=True, name='ccn-job-' + job_id[:8])
@@ -1202,6 +1230,7 @@ class App:
                     command += ['-Subscription', params['subscription']]
                 if params.get('chain'):
                     atomic_json(folder/'chain-selection.json',params['chain'])
+                if (folder/'chain-selection.json').is_file():
                     command += ['-ChainSpecPath',str(folder/'chain-selection.json')]
             elif action == 'restore':
                 command += ['-Snapshot', params['snapshot']]
