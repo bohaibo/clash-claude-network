@@ -4,6 +4,13 @@ class Element {
   constructor(tag, doc) { this.tagName = tag; this.doc = doc; this.children = []; this.attrs = {}; this.handlers = {}; this.dataset = {}; this.style={}; this.scrollTop = 0; this.scrollLeft=0; this.scrollHeight=doc.fixtureHeight || 500; this.clientHeight=100; this.disabled = false; }
   append(...nodes) { for (const node of nodes) { if (!node) continue; node.parentNode = this; this.children.push(node); } }
   replaceChildren(...nodes) { for (const child of this.children) child.parentNode = null; this.children = []; this.append(...nodes); }
+  replaceWith(node) {
+    const parent = this.parentNode;
+    if (!parent) return;
+    parent.children[parent.children.indexOf(this)] = node;
+    node.parentNode = parent;
+    this.parentNode = null;
+  }
   setAttribute(name, value) { this.attrs[name] = String(value); }
   getAttribute(name) { return this.attrs[name]; }
   removeAttribute(name) { delete this.attrs[name]; }
@@ -44,6 +51,11 @@ function environment(page) {
   const names = [...uiSource.matchAll(/export function (\w+)/g)].map(match => match[1]);
   vm.runInContext(strip(uiSource) + '\nglobalThis.ui = {' + names.join(',') + '};', context);
   document.root = document.createElement('div');
+  if (page === 'gui/js/pages/overview.js') {
+    const network = strip(fs.readFileSync('gui/js/pages/network.js', 'utf8'));
+    vm.runInContext('Object.assign(globalThis, (() => {\n' + network +
+      '\nreturn {mobileExportCard, refreshMobileExportCard};\n})());', context);
+  }
   vm.runInContext(strip(fs.readFileSync(page, 'utf8')), context);
   return {document, context, expose: code => vm.runInContext(code, context)};
 }
@@ -324,6 +336,13 @@ async function main() {
   const configureCtx={state:{capabilities:{managed_chain:true,static_exit:true,static_direct:true}},
     loadNodes:async()=>{discoveryCount++;return new Promise(resolve=>{finishDiscovery=resolve;});}};
   dynamic.document.root.append(dynamic.context.setup(configureCtx));
+  const mobileCard = dynamic.document.getElementById('mobile-export-card');
+  assert.equal(dynamic.document.root.children[0].children.at(-1), mobileCard, 'mobile export is below the configuration form');
+  assert(dynamic.document.getElementById('generate-mobile-files').disabled);
+  configureCtx.state.configured = true;
+  configureCtx.state.plan = {};
+  dynamic.context.refreshStatus(configureCtx);
+  assert(!dynamic.document.getElementById('generate-mobile-files').disabled, 'newly applied configuration enables export');
   const modeSelect=dynamic.document.getElementById('configuration-mode');
   const fields=dynamic.document.root.querySelector('.choice-area');
   const choose=value=>modeSelect.handlers.change({target:{value}});

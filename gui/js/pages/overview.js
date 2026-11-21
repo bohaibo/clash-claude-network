@@ -1,5 +1,6 @@
 import { icon } from '../icons.js';
 import * as ui from '../ui.js';
+import { mobileExportCard, refreshMobileExportCard } from './network.js';
 
 const IMPACT = [
   { title: 'Clash 客户端', text: '为所选订阅关联独立的项目增强脚本与固定节点组；保留原自定义脚本和现有节点。' },
@@ -96,6 +97,7 @@ export function render(ctx) {
   rootNode.append(setupCard(ctx));
   rootNode.append(impactHost);
   renderImpact(ctx);
+  rootNode.append(mobileExportCard(ctx));
   return rootNode;
 }
 
@@ -106,6 +108,7 @@ export function refreshStatus(ctx) {
   updateStartButton(ctx);
   const reapply = rootNode.querySelector('#quick-reapply');
   if (reapply) reapply.disabled = operationsBlocked(ctx) || !ctx.state.plan?.node;
+  refreshMobileExportCard(ctx);
 }
 
 function statusGrid(ctx) {

@@ -23,51 +23,276 @@ export function render(ctx) {
   root.append(verificationCard(ctx));
   root.append(diagnosticsCard(ctx));
   root.append(actionsCard(ctx));
-  root.append(mobileExportCard(ctx));
   return root;
 }
 
 let mobileExport = null;
-let exportingMobile = false;
+let mobileProgress = '';
+let gistLinks = {};
+let gistError = '';
+let gistDraft = '';
+let syncGistDraft = '';
+let gistNotice = '';
+const MOBILE_FILES = [
+  {platform: 'android', name: 'Android', format: 'YAML', filename: 'android-clash-meta.yaml', importHint: '在 Clash Meta 的配置页选择文件或 URL 导入。'},
+  {platform: 'ios', name: 'iOS', format: 'CONF', filename: 'ios-shadowrocket.conf', importHint: '在 Shadowrocket 的「配置」页导入，再将全局路由设为「配置」。'},
+];
 
-function mobileExportCard(ctx) {
-  const downloads = [['android', '下载 Android YAML'], ['ios', '下载 iOS CONF']]
-    .map(([platform, label]) => {
-      const href = mobileExport?.[platform];
-      return href && new RegExp('^/api/mobile-exports/[a-f0-9]{32}/' + platform + '$').test(href)
-        ? ui.el('a', {class: 'btn btn-secondary', href, text: label}) : null;
-    });
-  const button = ui.button(exportingMobile ? '正在生成…' : '生成手机配置', {
-    variant: 'secondary', icon: 'download',
-    disabled: exportingMobile || !ctx.state.configured || operationsBlocked(ctx),
-    onClick: async () => {
-      if (exportingMobile || operationsBlocked(ctx)) return;
-      exportingMobile = true;
-      mobileExport = null;
-      button.disabled = true;
-      button.textContent = '正在生成…';
+function mobileFiles() {
+  return MOBILE_FILES.map(file => ({...file, href: mobileExport?.[file.platform]}))
+    .filter(({platform, href}) => href && new RegExp('^/api/mobile-exports/[a-f0-9]{32}/' + platform + '$').test(href));
+}
+
+async function generateMobileFiles(api) {
+  mobileExport = null;
+  gistLinks = {};
+  gistError = '';
+  gistNotice = '';
+  try {
+    mobileExport = await api.post('/api/mobile-export');
+    return mobileFiles();
+  } catch (error) {
+    mobileExport = {error: error.message || '手机配置生成失败。'};
+    throw error;
+  }
+}
+
+function mobileExportBlockReason(ctx) {
+  return !ctx.state.configured ? '完成一键配置后可以导出。'
+    : operationsBlocked(ctx) ? '当前有操作或恢复待处理，完成后可以导出。' : '';
+}
+
+export function refreshMobileExportCard(ctx) {
+  const card = document.getElementById('mobile-export-card');
+  if (card && (card.dataset.blockReason !== mobileExportBlockReason(ctx) ||
+      card.dataset.gistUrl !== (ctx.state.mobile_gist?.url || ''))) card.replaceWith(mobileExportCard(ctx));
+}
+
+export function mobileExportCard(ctx) {
+  const files = mobileFiles();
+  const blockReason = mobileExportBlockReason(ctx);
+  const binding = ctx.state.mobile_gist || {};
+  const boundUrl = binding.url || '';
+  const destinationInput = !boundUrl ? ui.input(syncGistDraft, {type: 'url', autocomplete: 'off',
+    placeholder: '可粘贴原 Gist 页面或 Raw 地址',
+    oninput: event => { syncGistDraft = event.target.value; }}) : null;
+  function refresh(focusId) {
+    const current = document.getElementById('mobile-export-card');
+    if (!current) return;
+    current.replaceWith(mobileExportCard(ctx));
+    if (focusId) document.getElementById(focusId)?.focus({preventScroll: true});
+  }
+  async function run(mode, action) {
+    if (mobileProgress || !ctx.state.configured || operationsBlocked(ctx)) return;
+    const buttonId = mode === 'export' ? 'generate-mobile-files' : 'create-mobile-gist';
+    const restoreFocus = document.activeElement?.id === buttonId;
+    mobileProgress = mode;
+    refresh();
+    try {
+      await action();
+    } finally {
+      mobileProgress = '';
+      refresh(restoreFocus ? buttonId : null);
+    }
+  }
+  const disabled = Boolean(blockReason || mobileProgress);
+  const generate = ui.button(files.length ? '重新生成手机配置' : '生成手机配置', {
+    variant: 'secondary', icon: 'download', disabled,
+    onClick: () => run('export', async () => {
       try {
-        mobileExport = await ctx.api.post('/api/mobile-export');
-      } catch (error) {
-        mobileExport = {error: error.message || '手机配置生成失败。'};
-      } finally {
-        exportingMobile = false;
-        document.getElementById('mobile-export-card')?.replaceWith(mobileExportCard(ctx));
+        await generateMobileFiles(ctx.api);
+      } catch {
+        // The card displays the export error.
       }
-    },
+    }),
   });
-  const message = mobileExport?.error || mobileExport?.ios_error;
-  const manual = mobileExport?.ios_manual || [];
-  const card = ui.card({title: '导出手机配置'},
-    ui.el('p', {class: 'muted small', text: '使用当前启用的固定节点与分流规则。Android 导入支持 Mihomo 的 Clash 客户端；iOS 导入 Shadowrocket 并选择「配置」路由。文件含节点凭据，请私下传输。'}),
-    ui.el('div', {class: 'form-foot'}, button, ...downloads),
-    message ? ui.note(message, 'warn') : null,
-    manual.length ? ui.note('iOS 需先在 Shadowrocket 中导入以下原节点，并设为对应名称，再启用 CONF。', 'warn') : null,
+  generate.id = 'generate-mobile-files';
+  const create = ui.button('同步到 Secret Gist', {
+    variant: 'ink', disabled: disabled || Boolean(binding.error),
+    onClick: () => run('prepare', async () => {
+      gistError = '';
+      try {
+        const address = destinationInput?.value.trim() || '';
+        const rawBase = address ? gistRawBase(address) : '';
+        if (address && !rawBase) throw new Error('请粘贴有效的 Secret Gist 页面地址或 Raw 地址。');
+        const destination = boundUrl || rawBase?.replace('gist.githubusercontent.com', 'gist.github.com').replace(/\/raw\/$/, '') || '';
+        const available = await generateMobileFiles(ctx.api);
+        if (!available.length) throw new Error('本次没有可上传的手机配置。');
+        if (boundUrl) gistLinks = subscriptionsFromGist(boundUrl, available.filter(file => binding.platforms?.includes(file.platform)));
+        mobileProgress = 'confirm';
+        refresh();
+        const confirmed = await ui.confirmDialog({
+          title: destination ? '覆盖原 Secret Gist 的同名配置' : '首次创建 Secret Gist',
+          description: destination ? '更新目标 ' + destination : '将使用 Windows 上已登录 GitHub CLI 的账号创建并绑定 Secret Gist。',
+          items: available.map(({filename}) => ({title: filename})),
+          requireCheck: '我了解这些文件可能含有节点凭据，持有链接的人可以匿名下载。',
+          confirmText: destination ? '覆盖并保持链接' : '创建并生成链接',
+        });
+        if (!confirmed) return;
+        mobileProgress = 'upload';
+        refresh();
+        const result = await ctx.api.post('/api/mobile-gist', {
+          id: available[0].href.split('/')[3], platforms: available.map(({platform}) => platform), confirm: true,
+          gist_url: destination,
+        }, {timeout: 85000});
+        const links = subscriptionsFromGist(result.gist_url || '', available);
+        if (!links) throw new Error('未收到有效的 Gist 地址，请到 GitHub Gist 核对。');
+        ctx.acceptState('mobile_gist', result.binding);
+        gistLinks = links;
+        syncGistDraft = '';
+        gistNotice = destination ? '已覆盖原 Gist 的配置。现在可在手机上刷新原订阅。' : '已创建并绑定 Secret Gist。以后同步可沿用同一订阅链接。';
+      } catch (error) {
+        if (!mobileExport?.error) gistError = error.message || '同步 Secret Gist 未完成。';
+      }
+    }),
+  });
+  create.id = 'create-mobile-gist';
+  const progress = {export: '正在生成手机配置…', prepare: '正在准备上传的配置…',
+    confirm: '等待确认上传…', upload: '正在同步到 GitHub…'}[mobileProgress];
+  const card = ui.card({title: '导出手机配置',
+    subtitle: 'Android（Mihomo）支持所有配置方式。iOS（Shadowrocket）的链式代理仅支持固定第一跳。'},
+    ui.el('div', {class: 'mobile-export-grid'},
+      ui.el('div', {class: 'mobile-export-option'},
+        ui.el('h3', {text: '本地文件'}),
+        ui.el('p', {class: 'muted small', text: '下载配置文件，私下传到手机后导入。'}),
+        generate),
+      ui.el('div', {class: 'mobile-export-option'},
+        ui.el('h3', {text: '订阅链接'}),
+        ui.el('p', {class: 'muted small', text: boundUrl ? '已绑定 Secret Gist。同步会覆盖同名文件并保留订阅链接。'
+          : '填写以前的 Gist 可沿用原链接。留空时，首次同步会创建一个新的 Secret Gist。'}),
+        destinationInput ? ui.field('已有 Secret Gist（可选）', destinationInput) : null,
+        binding.error ? ui.note(binding.error, 'warn') : null,
+        create)),
+    progress ? ui.el('p', {class: 'muted small', role: 'status', text: progress}) : null,
+    blockReason ? ui.note(blockReason, 'info') : null,
+    mobileExport?.error ? ui.note(mobileExport.error, 'warn') : null,
+    gistError ? ui.note(gistError, 'warn') : null,
+    gistNotice ? ui.note(gistNotice, 'ok') : null,
+    files.length && mobileProgress !== 'export' ? ui.el('div', {class: 'mobile-export-grid', id: 'mobile-export-results',
+      tabindex: '-1', 'aria-label': '手机配置结果'},
+      MOBILE_FILES.map(file => {
+        const available = files.find(item => item.platform === file.platform);
+        if (available) return mobileFileResult(available, binding.ios_alias);
+        return file.platform === 'ios' && mobileExport?.ios_error
+          ? ui.el('section', {class: 'mobile-export-option'}, ui.el('h3', {text: 'iOS'}),
+            ui.note(mobileExport.ios_error, 'warn'))
+          : null;
+      })) : null,
+    secretGistGuide(files, ctx.api, refresh));
+  card.id = 'mobile-export-card';
+  card.dataset.blockReason = blockReason;
+  card.dataset.gistUrl = boundUrl;
+  return card;
+}
+
+function gistRawBase(address) {
+  let url;
+  try { url = new URL(address.trim()); } catch { return null; }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port) return null;
+  const match = url.pathname.match(/^\/([a-z\d-]{1,39})\/([a-f\d]{32}|[a-f\d]{20}|\d{1,20})(\/.*)?$/i);
+  if (!match) return null;
+  const [, owner, id, suffix = ''] = match;
+  if ((url.hostname === 'gist.github.com' && (suffix === '' || suffix === '/')) ||
+      (url.hostname === 'gist.githubusercontent.com' && /^\/raw(?:\/|$)/.test(suffix))) {
+    return 'https://gist.githubusercontent.com/' + owner + '/' + id + '/raw/';
+  }
+  return null;
+}
+
+function subscriptionsFromGist(address, files) {
+  const base = gistRawBase(address);
+  return base ? Object.fromEntries(files.map(({platform, filename}) => [platform, base + filename])) : null;
+}
+
+async function copyGistText(text, message, fallback = '剪贴板不可用，可以手动选择并复制。') {
+  try {
+    await navigator.clipboard.writeText(text);
+    ui.toast(message, 'ok');
+  } catch {
+    ui.toast(fallback, 'warn');
+  }
+}
+
+function mobileFileResult({platform, href, name, format, importHint}, gistAlias) {
+  const link = gistLinks[platform];
+  const manual = platform === 'ios' ? mobileExport?.ios_manual || [] : [];
+  const subscriptionAliases = link && gistAlias ? manual.map(({name, alias}) =>
+    ({name, alias: alias.replace(/^CCN-[a-f0-9]{12}-/, 'CCN-' + gistAlias + '-')})) : manual;
+  const distinctAliases = subscriptionAliases.some((entry, index) => entry.alias !== manual[index].alias);
+  const omitted = platform === 'ios' ? mobileExport?.omitted_geo_regex : 0;
+  return ui.el('section', {class: 'mobile-export-option'},
+    ui.el('h3', {text: name}),
+    ui.el('p', {class: 'muted small', text: importHint}),
+    manual.length ? ui.note(distinctAliases ? '订阅沿用原 Gist 的节点名称。本地文件请使用下列名称。'
+      : '先在 Shadowrocket 导入以下原节点，并按对应名称保存。', 'warn') : null,
     manual.length ? ui.el('ul', {class: 'check-list'}, manual.map(({name, alias}) =>
       ui.el('li', {text: name + ' → ' + alias}))) : null,
-    mobileExport?.omitted_geo_regex ? ui.note('iOS 配置略过 ' + mobileExport.omitted_geo_regex + ' 条 GeoSite 正则；设备导入与实际分流未验证。', 'warn') : null);
-  card.id = 'mobile-export-card';
-  return card;
+    distinctAliases ? ui.el('ul', {class: 'check-list', 'aria-label': '订阅需要的节点名称'}, subscriptionAliases.map(({name, alias}) =>
+      ui.el('li', {text: '订阅 ' + name + ' → ' + alias}))) : null,
+    omitted ? ui.el('p', {class: 'muted small', text: '此配置略过 ' + omitted + ' 条 GeoSite 正则。'}) : null,
+    link ? ui.field(name + ' 订阅链接', ui.input(link, {readonly: true, spellcheck: 'false'})) : null,
+    ui.el('div', {class: 'mobile-export-buttons'},
+      ui.el('a', {class: 'btn btn-secondary', href, text: '下载 ' + name + ' ' + format}),
+      link ? ui.button('复制 ' + name + ' 订阅链接', {variant: 'secondary',
+        onClick: () => copyGistText(link, '已复制 ' + name + ' 订阅链接')}) : null));
+}
+
+function secretGistGuide(files, api, refresh) {
+  const validation = ui.el('div', {'aria-live': 'polite'});
+  const input = ui.input(gistDraft, {type: 'url', autocomplete: 'off', spellcheck: 'false',
+    placeholder: 'https://gist.github.com/用户名/Gist-ID',
+    oninput: event => {
+      gistDraft = event.target.value;
+      validation.replaceChildren();
+    }});
+  const platform = files.length > 1 ? ui.select([
+    {value: 'all', label: 'Android 和 iOS'},
+    ...files.map(file => ({value: file.platform, label: file.name})),
+  ], 'all', () => {}) : null;
+  const copyButtons = files.map(({href, name, format}) => ui.button('复制 ' + name + ' ' + format + ' 内容', {
+    variant: 'secondary', size: 'small',
+    onClick: async () => {
+      try {
+        const response = await fetch(href, {mode: 'same-origin', credentials: 'same-origin', cache: 'no-store'});
+        if (!response.ok) throw new Error('Export unavailable');
+        await copyGistText(await response.text(), '已复制配置内容', '剪贴板不可用，请下载文件后用文本编辑器复制。');
+      } catch {
+        ui.toast('无法读取导出的文件，请重新生成手机配置。', 'bad');
+      }
+    },
+  }));
+  return ui.disclosure({title: '手动创建 Secret Gist', key: 'mobile-secret-gist'},
+    ui.note('持有 Secret Gist 链接的人可以匿名下载配置，请妥善保管。', 'warn'),
+    ui.el('ol', {class: 'mobile-gist-steps'},
+      ui.el('li', {text: '在上方生成手机配置，再复制所需文件的内容。'}),
+      ui.el('li', {text: '在 GitHub 中添加所需文件。Android 文件名为 android-clash-meta.yaml，iOS 文件名为 ios-shadowrocket.conf。'}),
+      ui.el('li', {text: '选择 Create secret gist，再把 Gist 页面地址或 Raw 地址粘贴到下方。'})),
+    ui.el('div', {class: 'mobile-export-buttons'},
+      ...copyButtons,
+      ui.button('打开 GitHub Gist', {variant: 'secondary', onClick: async () => {
+        try {
+          await api.post('/api/open-github-gist');
+        } catch (error) {
+          ui.toast(error.message || '无法在默认浏览器中打开 GitHub Gist。', 'bad');
+        }
+      }})),
+    files.length ? ui.field('Gist 地址', input) : null,
+    platform ? ui.field('Gist 中上传的文件', platform) : null,
+    files.length ? ui.button('生成订阅链接', {variant: 'secondary', disabled: Boolean(mobileProgress), onClick: () => {
+      const address = input.value.trim();
+      const included = platform && platform.value !== 'all' ? files.filter(file => file.platform === platform.value) : files;
+      const links = subscriptionsFromGist(address, included);
+      if (!links) {
+        validation.replaceChildren(ui.note('请粘贴含用户名和 Gist ID 的 GitHub Gist 页面地址或 Raw 地址。', 'warn'));
+        return;
+      }
+      gistDraft = address;
+      gistLinks = links;
+      gistError = '';
+      refresh('mobile-export-results');
+    }}) : null,
+    validation,
+    ui.el('p', {class: 'muted small', text: '更新时编辑同一个 Gist 里的同名文件，再在手机上刷新。'}));
 }
 
 // Detailed status belongs in the guide, keeping the network page focused on actions.

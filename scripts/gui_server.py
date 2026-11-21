@@ -249,6 +249,7 @@ class App:
         self.release_checker = ReleaseChecker(project=self.project, local=self.local)
         self._software_check_running = False
         self.package_results = {}
+        self.mobile_export_revisions = {}
         self.last_package = None
         self._settings_busy = False
         self._shutdown_requested = False
@@ -821,6 +822,7 @@ class App:
             'admin': is_admin(),
             'configured': configured,
             'configured_error': configured_error,
+            'mobile_gist': self.mobile_gist_status(plan),
             'plan': plan_view,
             'baseline': self.baseline_name(),
             'snapshots': self.snapshots(),
@@ -1700,9 +1702,17 @@ class App:
         return target, result['filename']
 
     def export_mobile(self):
+        from config_health import configuration_revision
         with self.settings_operation():
             try:
-                return mobile_export.export(self.plan(), self.local)
+                plan = self.plan()
+                revision = configuration_revision(self.local)
+                result = mobile_export.export(plan, self.local)
+                if not revision or revision != configuration_revision(self.local):
+                    raise mobile_export.ExportError('导出时配置已变化，请重新生成。')
+                identifier = result['android'].split('/')[3]
+                self.mobile_export_revisions = {identifier: (mobile_export.mobile_scope(plan), revision)}
+                return result
             except mobile_export.ExportError as exc:
                 raise ApiError(409, str(exc)) from None
             except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):
@@ -1717,6 +1727,43 @@ class App:
         if target.resolve() != target or not target.is_file():
             raise ApiError(404, '找不到手机配置文件。')
         return target, filename
+
+    def mobile_gist_status(self, plan):
+        try:
+            return mobile_export.gist_binding(self.local, plan)
+        except (OSError, ValueError):
+            return {'error': '无法读取本机 Secret Gist 绑定记录。'}
+
+    def sync_mobile_gist(self, payload):
+        from config_health import configuration_revision
+        identifier = payload.get('id')
+        platforms = payload.get('platforms')
+        destination = payload.get('gist_url', '')
+        if (payload.get('confirm') is not True or not isinstance(identifier, str)
+                or not JOB_ID_RE.fullmatch(identifier) or not isinstance(platforms, list)
+                or not 1 <= len(platforms) <= len(mobile_export.FILES)
+                or any(not isinstance(platform, str) or platform not in mobile_export.FILES for platform in platforms)
+                or len(set(platforms)) != len(platforms) or not isinstance(destination, str)
+                or (destination and not mobile_export.GIST_URL.fullmatch(destination))):
+            raise ApiError(400, '请先选择已导出的手机配置并确认上传。')
+        with self.settings_operation():
+            plan = self.plan()
+            revision = configuration_revision(self.local)
+            expected = (mobile_export.mobile_scope(plan), revision)
+            if not all(expected) or self.mobile_export_revisions.get(identifier) != expected:
+                raise ApiError(409, '待同步的文件已过期，请按当前配置重新生成。')
+            try:
+                bound = mobile_export.gist_binding(self.local, plan).get('url')
+                if bound and bound.casefold() != destination.casefold():
+                    raise ApiError(409, '该配置已经绑定 Secret Gist，请刷新界面并同步到原地址。')
+                files = {platform: self.mobile_download(identifier, platform)[0] for platform in platforms}
+                binding = mobile_export.sync_secret_gist(files, bound or destination)
+                mobile_export.save_gist_binding(self.local, plan, binding)
+            except mobile_export.ExportError as exc:
+                raise ApiError(502, str(exc)) from None
+            except (OSError, ValueError):
+                raise ApiError(500, '无法读写本机 Secret Gist 绑定记录，请在 GitHub 核对同步结果。') from None
+            return {'gist_url': binding['url'], 'binding': binding}
 
     def reveal_local(self, recovery=None):
         target = self.local.resolve()
@@ -2170,6 +2217,14 @@ def make_handler(app):
                     self._json(app.export_package())
                 elif parsed.path == '/api/mobile-export':
                     self._json(app.export_mobile())
+                elif parsed.path == '/api/mobile-gist':
+                    self._json(app.sync_mobile_gist(payload))
+                elif parsed.path == '/api/open-github-gist':
+                    try:
+                        os.startfile('https://gist.github.com/')
+                    except OSError:
+                        raise ApiError(500, '无法在默认浏览器中打开 GitHub Gist。') from None
+                    self._json({'opened': True})
                 elif parsed.path == '/api/snapshot-delete':
                     self._json(app.delete_snapshot(payload))
                 elif parsed.path == '/api/reveal':

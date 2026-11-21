@@ -264,7 +264,7 @@ class GuiServer(unittest.TestCase):
         status, _, raw = self.request('GET', exported['ios'], {'Cookie': cookie})
         self.assertEqual(status, 200)
         conf = raw.decode('utf-8').splitlines()
-        alias = 'CCN-' + exported['ios'].split('/')[-2][:12]
+        alias = 'CCN-' + gui_server.mobile_export.mobile_scope(self.app.plan())[:12]
         self.assertIn(f'{GROUP} = relay,{alias}-1,{alias}-2', conf)
         self.assertIn('AND,((PROTOCOL,UDP),(DOMAIN-SUFFIX,overseas.invalid)),REJECT', conf)
         self.assertLess(conf.index('DOMAIN,protected.invalid,' + GROUP), conf.index('DOMAIN-SUFFIX,overseas.invalid,' + GROUP))
@@ -278,7 +278,6 @@ class GuiServer(unittest.TestCase):
         status, _, raw = self.request('POST', '/api/mobile-export', headers, '{}')
         self.assertEqual(status, 200)
         manual = json.loads(raw)
-        alias = 'CCN-' + manual['ios'].split('/')[-2][:12]
         self.assertEqual(manual['ios_manual'], [{'name': 'Front', 'alias': alias + '-1'},
                                                {'name': 'Pinned', 'alias': alias + '-2'}])
         self.assertNotIn(b'[Proxy]', self.request('GET', manual['ios'], {'Cookie': cookie})[2])
@@ -300,6 +299,108 @@ class GuiServer(unittest.TestCase):
         index['current'] = 'different-profile'
         index_path.write_text(dumps(index), encoding='utf-8')
         self.assertEqual(self.request('POST', '/api/mobile-export', headers, '{}')[0], 409)
+
+    def test_open_github_gist_checks_auth_and_uses_fixed_windows_url(self):
+        endpoint = '/api/open-github-gist'
+        cookie = self.session_cookie()
+        headers = {'Cookie': cookie, **self.token_headers(self.app.base_url)}
+        with patch.object(gui_server.os, 'startfile') as open_url:
+            self.assertEqual(self.request('POST', endpoint, {'Cookie': cookie}, '{}')[0], 403)
+            bad_origin = dict(headers, Origin='https://example.invalid')
+            self.assertEqual(self.request('POST', endpoint, bad_origin, '{}')[0], 403)
+            open_url.assert_not_called()
+            status, _, body = self.request('POST', endpoint, headers, '{"url":"https://example.invalid/"}')
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(body)['opened'])
+            open_url.assert_called_once_with('https://gist.github.com/')
+            open_url.side_effect = OSError('offline fixture')
+            self.assertEqual(self.request('POST', endpoint, headers, '{}')[0], 500)
+
+    def test_mobile_gist_binds_then_patches_only_named_files_with_mock_cli(self):
+        from subprocess import CompletedProcess
+        from config_health import configuration_revision
+        from mobile_export import FILES
+
+        endpoint = '/api/mobile-gist'
+        identifier = 'a' * 32
+        plan = {'root': str(self.local), 'subscription_uid': 'synthetic', 'node': 'synthetic-node'}
+        client.write(self.local / 'plan.json', plan)
+        client.write(self.local / 'profiles.yaml', {'current': 'synthetic'})
+        client.write(self.local / 'clash-verge.yaml', {'rules': ['synthetic']})
+        self.app.mobile_export_revisions[identifier] = (gui_server.mobile_export.mobile_scope(plan), configuration_revision(self.local))
+        folder = self.local / 'mobile-exports' / identifier
+        folder.mkdir(parents=True)
+        for name in FILES.values():
+            (folder / name).write_text('offline fixture for ' + name, encoding='utf-8')
+        cookie = self.session_cookie()
+        headers = {'Cookie': cookie, **self.token_headers()}
+        payload = {'id': identifier, 'platforms': ['android'], 'confirm': True}
+        gist_id = 'b' * 32
+        gist_url = 'https://gist.github.com/fixture-user/' + gist_id
+        gist = {'id': gist_id, 'owner': {'login': 'fixture-user'}, 'public': False,
+                'files': {FILES['android']: {'content': 'ignored fixture'}, 'notes.txt': {'content': 'unrelated fixture'}}}
+
+        def respond(body):
+            return CompletedProcess([], 0, json.dumps(body).encode(), b'')
+
+        with (patch.object(gui_server.mobile_export.shutil, 'which', return_value='fixture-gh.exe'),
+              patch.object(gui_server.mobile_export.subprocess, 'run', side_effect=[
+                  respond(gist), respond({'login': 'fixture-user'}), respond(gist), respond(gist),
+              ]) as execute):
+            self.assertEqual(self.request('POST', endpoint, {'Cookie': cookie}, json.dumps(payload))[0], 403)
+            self.assertEqual(self.request('POST', endpoint, headers, json.dumps(dict(payload, confirm=False)))[0], 400)
+            self.assertEqual(self.request('POST', endpoint, headers, json.dumps(dict(payload, platforms=['../plan.json'])))[0], 400)
+            execute.assert_not_called()
+            status, _, raw = self.request('POST', endpoint, headers, json.dumps(payload))
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(raw)['gist_url'], gist_url)
+            self.assertEqual(gui_server.mobile_export.gist_binding(self.local, plan)['url'], gist_url)
+            self.assertEqual(self.request('POST', endpoint, headers, json.dumps(payload))[0], 409)
+            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(execute.call_args.args[0][1:], [
+                'api', '--hostname', 'github.com', '--method', 'POST', 'gists', '--input', '-'])
+            sent = json.loads(execute.call_args.kwargs['input'])
+            self.assertIs(sent['public'], False)
+            self.assertEqual(sent['files'], {FILES['android']: {'content': 'offline fixture for ' + FILES['android']}})
+            self.assertNotIn('GH_TOKEN', execute.call_args.kwargs['env'])
+            (folder / FILES['android']).write_text('fresh fixture', encoding='utf-8')
+            status, _, raw = self.request('POST', endpoint, headers, json.dumps(dict(payload, gist_url=gist_url)))
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(raw)['gist_url'], gist_url)
+            self.assertEqual(execute.call_args.args[0][5:7], ['PATCH', 'gists/' + gist_id])
+            self.assertEqual(json.loads(execute.call_args.kwargs['input']),
+                             {'files': {FILES['android']: {'content': 'fresh fixture'}}})
+            client.write(self.local / 'clash-verge.yaml', {'rules': ['updated-during-confirmation']})
+            self.assertEqual(self.request('POST', endpoint, headers, json.dumps(dict(payload, gist_url=gist_url)))[0], 409)
+            self.assertEqual(execute.call_count, 4)
+
+    def test_sync_old_gist_preserves_shadowrocket_alias_and_rejects_public_target(self):
+        from config_health import GROUP
+        from mobile_export import FILES, ExportError, sync_secret_gist
+
+        prefix = '1' * 12
+        previous = '2' * 12
+        gist_id = '3' * 32
+        url = 'https://gist.github.com/fixture-user/' + gist_id
+        path = self.local / FILES['ios']
+        path.write_text(f'# Before using, import the exact corresponding servers as CCN-{prefix}-1, CCN-{prefix}-2\n'
+                        f'[Proxy Group]\n{GROUP} = relay,CCN-{prefix}-1,CCN-{prefix}-2\n'
+                        f'[Rule]\nFINAL,{GROUP}\n', encoding='utf-8')
+        previous_content = f'[Proxy Group]\n{GROUP} = relay,CCN-{previous}-1,CCN-{previous}-2\n'
+        gist = {'id': gist_id, 'owner': {'login': 'fixture-user'}, 'public': False,
+                'files': {FILES['ios']: {'content': previous_content}}}
+        with patch.object(gui_server.mobile_export, '_gist_api') as api:
+            api.return_value.side_effect = [{'login': 'fixture-user'}, gist, gist]
+            self.assertEqual(sync_secret_gist({'ios': path}, url)['ios_alias'], previous)
+            body = api.return_value.call_args.args[2]
+            content = body['files'][FILES['ios']]['content']
+            self.assertIn(f'relay,CCN-{previous}-1,CCN-{previous}-2', content)
+            self.assertIn(f'import the exact corresponding servers as CCN-{previous}-1, CCN-{previous}-2', content)
+            api.return_value.reset_mock()
+            api.return_value.side_effect = [{'login': 'fixture-user'}, dict(gist, public=True)]
+            with self.assertRaises(ExportError):
+                sync_secret_gist({'ios': path}, url)
+            self.assertEqual(api.return_value.call_count, 2)
 
     def test_token_sets_session_and_serves_html(self):
         cookie = self.session_cookie()

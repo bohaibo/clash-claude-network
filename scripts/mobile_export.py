@@ -1,6 +1,11 @@
 """Export the pinned routing profile from local Clash files."""
+import hashlib
 import ipaddress
+import json
+import os
 import re
+import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -12,10 +17,135 @@ FILES = {'android': 'android-clash-meta.yaml', 'ios': 'ios-shadowrocket.conf'}
 POLICIES = {'DIRECT', 'REJECT', GROUP}
 RULE_TYPES = {'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'IP-CIDR', 'IP-CIDR6', 'GEOIP', 'GEOSITE'}
 UDP_GUARD = re.compile(r'AND,\(\(NETWORK,udp\),\(([^()]+)\)\),REJECT')
+GIST_URL = re.compile(r'https://gist\.github\.com/([A-Za-z0-9-]{1,39})/([a-f0-9]{32}|[a-f0-9]{20}|[0-9]{1,20})')
+IOS_ALIAS = re.compile(r'^' + re.escape(GROUP) + r' = (?:select|relay),CCN-([a-f0-9]{12})-1(?:,CCN-\1-2)?$', re.MULTILINE)
 
 
 class ExportError(ValueError):
     pass
+
+
+def mobile_scope(plan):
+    fields = [plan.get('root'), plan.get('subscription_uid'), plan.get('node')]
+    if not all(isinstance(value, str) and value for value in fields):
+        return None
+    return hashlib.sha256(json.dumps(fields).encode('utf-8')).hexdigest()
+
+
+def gist_bindings(local):
+    try:
+        bindings = json.loads((Path(local) / 'mobile-gists.json').read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(bindings, dict):
+        raise ExportError('本机 Secret Gist 绑定记录无效。')
+    return bindings
+
+
+def gist_binding(local, plan):
+    binding = gist_bindings(local).get(mobile_scope(plan), {})
+    if (not isinstance(binding, dict) or (binding and
+            (not isinstance(binding.get('url'), str) or not GIST_URL.fullmatch(binding['url'])))):
+        raise ExportError('本机 Secret Gist 绑定记录无效。')
+    return binding
+
+
+def save_gist_binding(local, plan, binding):
+    from client import write
+    bindings = gist_bindings(local)
+    bindings[mobile_scope(plan)] = binding
+    write(Path(local) / 'mobile-gists.json', bindings)
+
+
+def _gist_api():
+    gh = shutil.which('gh.exe')
+    if not gh:
+        raise ExportError('找不到 GitHub CLI。请先安装 gh 并登录 github.com，或使用手动教程。')
+    env = dict(os.environ, GH_PROMPT_DISABLED='1')
+    for key in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_DEBUG', 'DEBUG', 'GH_FORCE_TTY'):
+        env.pop(key, None)
+    def request(method, route, body=None):
+        args = [gh, 'api', '--hostname', 'github.com', '--method', method, route]
+        payload = None
+        if body is not None:
+            args += ['--input', '-']
+            payload = json.dumps(body).encode('utf-8')
+        try:
+            response = subprocess.run(args, input=payload, capture_output=True, timeout=25, env=env,
+                                      creationflags=subprocess.CREATE_NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            raise ExportError('GitHub 请求超时，请先到 GitHub Gist 核对同步结果。') from None
+        except OSError:
+            raise ExportError('无法启动 GitHub CLI。') from None
+        if response.returncode:
+            raise ExportError('GitHub CLI 未确认同步。请核对 Gist 地址、登录账号和 gist 权限。')
+        try:
+            return json.loads(response.stdout)
+        except ValueError:
+            raise ExportError('GitHub 返回的数据无法确认，请先到 GitHub Gist 核对。') from None
+
+    return request
+
+
+def _gist_url(gist):
+    try:
+        url = f"https://gist.github.com/{gist['owner']['login']}/{gist['id']}"
+        if gist['public'] is False and GIST_URL.fullmatch(url) and isinstance(gist['files'], dict):
+            return url
+    except (TypeError, KeyError):
+        pass
+    raise ExportError('目标必须是当前 GitHub CLI 账号下的 Secret Gist。')
+
+
+def _ios_alias(content):
+    match = IOS_ALIAS.search(content or '')
+    return match[1] if match else None
+
+
+def sync_secret_gist(files, target):
+    request = _gist_api()
+    try:
+        contents = {FILES[platform]: path.read_text(encoding='utf-8') for platform, path in files.items()}
+    except (OSError, UnicodeError):
+        raise ExportError('无法读取本次导出的配置，请重新生成。') from None
+
+    ios_name = FILES['ios']
+    alias = _ios_alias(contents.get(ios_name))
+    if target:
+        match = GIST_URL.fullmatch(target)
+        if not match:
+            raise ExportError('请输入有效的 GitHub Gist 地址。')
+        owner, identifier = match.groups()
+        route = 'gists/' + identifier
+        account = request('GET', 'user')
+        if not isinstance(account, dict) or str(account.get('login', '')).casefold() != owner.casefold():
+            raise ExportError('目标必须是当前 GitHub CLI 账号下的 Secret Gist。')
+        current = request('GET', route)
+        if _gist_url(current).casefold() != target.casefold():
+            raise ExportError('目标必须是当前 GitHub CLI 账号下的 Secret Gist。')
+        if not current['files'].keys() & set(FILES.values()):
+            raise ExportError('该 Gist 没有原有的手机配置文件，请核对地址和文件名。')
+        previous = current['files'].get(ios_name, {})
+        previous_alias = _ios_alias(previous.get('content'))
+        if alias and previous.get('truncated') and not previous_alias:
+            raise ExportError('无法确认 Gist 中现有 iOS 配置的节点名称，未覆盖原文件。')
+        if alias and previous_alias and alias != previous_alias:
+            # Keep aliases already used by manually imported Shadowrocket nodes.
+            contents[ios_name] = re.sub(rf'(?m)(^CCN-|,CCN-|^# Before using, import the exact corresponding servers as CCN-|, CCN-){alias}(?=-[12]\b)',
+                                        lambda match: match[1] + previous_alias, contents[ios_name])
+            alias = previous_alias
+        if ios_name not in contents:
+            alias = previous_alias
+        body = {'files': {name: {'content': content} for name, content in contents.items()}}
+        gist = request('PATCH', route, body)
+    else:
+        body = {'description': 'Mobile routing profiles', 'public': False,
+                'files': {name: {'content': content} for name, content in contents.items()}}
+        gist = request('POST', 'gists', body)
+    url = _gist_url(gist)
+    if (target and url.casefold() != target.casefold()) or not contents.keys() <= gist['files'].keys():
+        raise ExportError('GitHub 返回的 Gist 文件无法确认，请先在 GitHub 核对。')
+    return {'url': url, 'ios_alias': alias, 'platforms': [platform for platform in FILES if FILES[platform] in gist['files']]}
 
 
 def pinned_profile(config, selected):
@@ -291,7 +421,12 @@ def export(plan, local):
     files = {'android': dumps(profile, allow_unicode=True, sort_keys=False)}
     result = {}
     try:
-        files['ios'], result['omitted_geo_regex'], result['ios_manual'] = shadowrocket(profile, root, identifier)
+        alias = gist_binding(local, plan).get('ios_alias')
+    except (OSError, ValueError):
+        alias = None
+    alias_seed = alias if isinstance(alias, str) and re.fullmatch(r'[a-f0-9]{12}', alias) else mobile_scope(plan)
+    try:
+        files['ios'], result['omitted_geo_regex'], result['ios_manual'] = shadowrocket(profile, root, alias_seed)
     except ExportError as exc:
         result['ios_error'] = str(exc)
     except (OSError, ValueError, TypeError, KeyError, IndexError, OverflowError):
