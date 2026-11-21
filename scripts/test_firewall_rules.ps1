@@ -11,7 +11,12 @@ function Get-NetFirewallProfile {
  @('Domain','Private','Public') | ForEach-Object {[pscustomobject]@{Name=$_;Enabled=($script:change -ne 'disabled');DefaultOutboundAction='Block'}}
 }
 function Get-CimInstance { [pscustomobject]@{ExecutablePath=$core} }
-function Get-NetAdapter { [pscustomobject]@{Name='Meta';Status='Up'} }
+function Get-NetAdapter {
+ $script:tunQueries++
+ if($script:change -eq 'tun-missing' -or ($script:change -eq 'tun-starting' -and $script:tunQueries -eq 1)){return}
+ $status=if($script:change -eq 'tun-starting' -and $script:tunQueries -eq 2){'Disconnected'}else{'Up'}
+ [pscustomobject]@{Name='Meta';Status=$status}
+}
 function Get-NetFirewallRule {
  param($PolicyStore)
  foreach($role in @('Core','TUN','LAN','DHCP','SharedAccess-Block')){
@@ -96,6 +101,17 @@ function Get-NetFirewallInterfaceTypeFilter {
  process {$type=if($script:change -eq 'block-interface-type'){'Wireless'}else{'Any'};[pscustomobject]@{InterfaceType=$type}}
 }
 Assert-StrictFirewall -coreProgram $core
+$script:cases++
+$script:tunQueries=0
+$script:change='tun-starting'
+Assert-StrictFirewall -coreProgram $core -WaitForTun
+if($script:tunQueries -ne 3){throw 'Audit should wait until the Meta adapter is up.'}
+$script:cases++
+$script:tunQueries=0
+$script:change='tun-missing'
+$reported=$false
+try{Assert-StrictFirewall -coreProgram $core}catch{$reported=$_.Exception.Data['ccn_failed_check'] -eq 'meta_tun'}
+if(!$reported -or $script:tunQueries -ne 1){throw 'Strict audit must reject a missing Meta adapter with its specific reason.'}
 $script:cases++
 foreach($case in @('windows-mask','windows-range','split','dynamic-covered')){
  $script:change=$case

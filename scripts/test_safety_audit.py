@@ -13,6 +13,8 @@ class SafetyAudit(unittest.TestCase):
   self.enterContext(patch.dict(os.environ));os.environ['CCN_VERIFY_RUN']='f'*32
   for module in (tun,firewall,audit,reports):self.enterContext(patch.object(module,'LOCAL',self.local))
   client.write(self.local/'plan.json',{'root':str(self.local)})
+  client.write(self.local/'profiles.yaml',{'current':'fixture'})
+  client.write(self.local/'clash-verge.yaml',{'rules':['fixture-before-startup']})
   self.enterContext(patch.object(tun,'root_path',return_value=self.local))
   self.enterContext(contextlib.redirect_stdout(io.StringIO()))
   self.enabled=True
@@ -95,6 +97,13 @@ class SafetyAudit(unittest.TestCase):
    completed=Mock(returncode=0,stdout=json.dumps({'success':True,'full_verified':full,'status':'passed','administrator':admin}).encode())
    with patch.object(firewall.subprocess,'run',return_value=completed):result=firewall.verify_firewall()
    self.assertFalse(result['success']);self.assertEqual(result['status'],'unverified')
+ def test_only_initial_firewall_audit_waits_for_tun(self):
+  completed=Mock(returncode=0,stdout=b'{"success":true,"full_verified":true,"administrator":true}')
+  with patch.object(firewall.subprocess,'run',return_value=completed) as run:
+   self.assertTrue(firewall.verify_firewall('firewall-before')['success'])
+   self.assertIn('-WaitForTun',run.call_args.args[0])
+   self.assertTrue(firewall.verify_firewall('firewall-after')['success'])
+   self.assertNotIn('-WaitForTun',run.call_args.args[0])
  def test_firewall_preflight_failure_stops_all_drills(self):
   with patch.object(audit,'verify_firewall',return_value={'success':False}),patch.object(audit,'verify') as network,patch.object(audit,'verify_tun') as drill,patch.object(audit,'verify_core_exit') as core:
    self.assertFalse(audit.run_audit()['success'])
@@ -116,6 +125,38 @@ class SafetyAudit(unittest.TestCase):
   self.assertEqual([row['index'] for row in stages if row['status']=='running'],list(range(1,8)))
   self.assertEqual([row['completed'] for row in stages if row['status']=='passed'],list(range(1,8)))
   self.assertIn('复测恢复后的网络已完成',sys.stdout.getvalue())
+ def test_audit_uses_ready_preflight_revision_and_rejects_later_changes(self):
+  runtime=self.local/'clash-verge.yaml'
+  for change_during_audit in (False,True):
+   with self.subTest(change_during_audit=change_during_audit):
+    client.write(runtime,{'rules':['fixture-before-startup']})
+    def firewall_stage(stage):
+     if stage=='firewall-before':
+      client.write(runtime,{'rules':['fixture-ready']})
+     return reports.save_report({'success':True,'full_verified':True},stage)
+    def network_stage(outage=False,stage='node-outage'):
+     if stage=='post-recovery' and change_during_audit:
+      client.write(runtime,{'rules':['fixture-changed-during-audit']})
+     return reports.save_report({'success':True},stage)
+    with (patch.object(audit,'verify_firewall',side_effect=firewall_stage) as firewall_check,
+          patch.object(audit,'verify',side_effect=network_stage),
+          patch.object(audit,'verify_tun',side_effect=lambda:reports.save_report({'success':True},'tun-off')),
+          patch.object(audit,'verify_core_exit',side_effect=lambda:reports.save_report({'success':True},'core-exit')),
+          patch.object(audit,'recheck_ipv6')):
+     self.assertEqual(audit.run_audit()['success'],not change_during_audit)
+    report=client.load(self.local/'verification.json')
+    self.assertEqual(report['success'],not change_during_audit)
+    if change_during_audit:
+     self.assertEqual(report['stages']['post-recovery']['failed_check'],'configuration_changed')
+     self.assertEqual(firewall_check.call_count,1)
+    else:
+     self.assertEqual(report['coverage'],'full-network')
+ def test_initial_firewall_report_requires_a_configuration_revision(self):
+  (self.local/'profiles.yaml').unlink()
+  report=reports.save_report({'success':True,'full_verified':True},'firewall-before')
+  self.assertFalse(report['success'])
+  self.assertFalse(report['full_verified'])
+  self.assertEqual(report['failed_check'],'configuration_unavailable')
  def test_ipv6_recovery_failure_marks_current_verification_failed(self):
   with patch.object(audit,'verify_firewall',return_value={'success':True}),patch.object(audit,'verify',return_value={'success':True}),patch.object(audit,'verify_tun',return_value={'success':True}),patch.object(audit,'verify_core_exit',return_value={'success':True}),patch.object(audit,'recheck_ipv6',side_effect=OSError('fixture')):
    self.assertFalse(audit.run_audit()['success'])

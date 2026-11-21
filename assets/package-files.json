@@ -53,6 +53,7 @@
   "scripts/gui_settings.py",
   "scripts/gui_window.py",
   "scripts/managed_chain.py",
+  "scripts/mobile_export.py",
   "scripts/node_region.py",
   "scripts/operation_guard.ps1",
   "scripts/operation_lock.py",

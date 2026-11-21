@@ -198,6 +198,109 @@ class GuiServer(unittest.TestCase):
             self.assertIsNone(archive.testzip())
             self.assertFalse(any('/.local/' in name or '/.runtime/' in name for name in archive.namelist()))
 
+    def test_mobile_export_keeps_fixed_route_and_requires_local_session(self):
+        from config_health import GROUP
+        from safe_yaml import dumps, loads
+
+        def field(number, value):
+            return bytes([(number << 3) | 2, len(value)]) + value
+
+        def geo(code, *entries):
+            return field(1, field(1, code) + b''.join(field(2, entry) for entry in entries))
+
+        root = self.local / 'synthetic-client'
+        root.mkdir()
+        config_path = root / 'clash-verge.yaml'
+        index_path = root / 'profiles.yaml'
+        index = {'current': 'my-profile', 'items': [{'uid': 'my-profile', 'option': {'script': 'managed'}}]}
+        index_path.write_text(dumps(index), encoding='utf-8')
+        client.write(self.local / 'plan.json', {'root': str(root), 'node': 'Pinned',
+                     'subscription_uid': 'my-profile', 'script_uid': 'managed'})
+        (root / 'geosite.dat').write_bytes(geo(b'geolocation-!cn',
+            b'\x08\x02' + field(2, b'overseas.invalid'), b'\x08\x01' + field(2, b'^regex$')))
+        (root / 'geoip.dat').write_bytes(geo(b'CN', field(1, bytes([203, 0, 113, 0])) + bytes([16, 24])))
+        front = {'name': 'Front', 'type': 'ss', 'server': 'front.invalid', 'port': 443,
+                 'cipher': 'aes-128-gcm', 'password': 'fixture-only'}
+        exit_node = {'name': 'Pinned', 'type': 'socks5', 'server': 'exit.invalid', 'port': 1080,
+                     'dialer-proxy': 'Front', 'udp': False}
+        rules = [
+            'DOMAIN-SUFFIX,local.invalid,DIRECT',
+            'PROCESS-NAME,Fixture.exe,' + GROUP,
+            'DOMAIN,protected.invalid,' + GROUP,
+            'AND,((NETWORK,udp),(GEOSITE,geolocation-!cn)),REJECT',
+            'GEOSITE,geolocation-!cn,' + GROUP,
+            'RULE-SET,strict-cn-domain,DIRECT',
+            'GEOIP,CN,DIRECT,no-resolve',
+            'NETWORK,udp,REJECT',
+            'MATCH,' + GROUP,
+        ]
+        config = {'mode': 'rule', 'secret': 'controller-fixture', 'external-controller': '127.0.0.1:1111',
+                  'dns': {'enable': True, 'listen': '127.0.0.1:5334'},
+                  'proxies': [exit_node, front, dict(front, name='Unrelated', password='unrelated-fixture')],
+                  'proxy-groups': [{'type': 'select', 'name': GROUP, 'proxies': ['Pinned']}],
+                  'rule-providers': {'strict-cn-domain': {'type': 'inline', 'behavior': 'domain',
+                                                         'payload': ['exact.invalid', '+.suffix.invalid']}},
+                  'rules': rules}
+        config_path.write_text(dumps(config), encoding='utf-8')
+        cookie = self.session_cookie()
+        headers = {'Cookie': cookie, **self.token_headers()}
+        self.assertEqual(self.request('POST', '/api/mobile-export', {'Cookie': cookie}, '{}')[0], 403)
+        status, _, raw = self.request('POST', '/api/mobile-export', headers, '{}')
+        self.assertEqual(status, 200)
+        exported = json.loads(raw)
+        self.assertEqual(exported['omitted_geo_regex'], 1)
+        self.assertEqual(exported['ios_manual'], [])
+        self.assertNotIn(b'fixture-only', raw)
+        self.assertEqual(self.request('GET', exported['android'])[0], 403)
+        status, response_headers, raw = self.request('GET', exported['android'], {'Cookie': cookie})
+        self.assertEqual(status, 200)
+        self.assertIn('attachment', response_headers['Content-Disposition'])
+        android = loads(raw)
+        self.assertEqual(android['proxies'], [front, exit_node])
+        self.assertEqual(android['rules'], [rules[0], *rules[2:]])
+        self.assertNotIn('secret', android)
+        self.assertNotIn('external-controller', android)
+        self.assertNotIn('listen', android['dns'])
+        status, _, raw = self.request('GET', exported['ios'], {'Cookie': cookie})
+        self.assertEqual(status, 200)
+        conf = raw.decode('utf-8').splitlines()
+        alias = 'CCN-' + exported['ios'].split('/')[-2][:12]
+        self.assertIn(f'{GROUP} = relay,{alias}-1,{alias}-2', conf)
+        self.assertIn('AND,((PROTOCOL,UDP),(DOMAIN-SUFFIX,overseas.invalid)),REJECT', conf)
+        self.assertLess(conf.index('DOMAIN,protected.invalid,' + GROUP), conf.index('DOMAIN-SUFFIX,overseas.invalid,' + GROUP))
+        self.assertLess(conf.index('DOMAIN-SUFFIX,overseas.invalid,' + GROUP), conf.index('DOMAIN,exact.invalid,DIRECT'))
+        self.assertIn('DOMAIN-SUFFIX,suffix.invalid,DIRECT', conf)
+        self.assertIn('IP-CIDR,203.0.113.0/24,DIRECT,no-resolve', conf)
+        self.assertEqual(conf[-2:], ['PROTOCOL,UDP,REJECT', 'FINAL,' + GROUP])
+
+        front['type'] = 'unsupported-fixture'
+        config_path.write_text(dumps(config), encoding='utf-8')
+        status, _, raw = self.request('POST', '/api/mobile-export', headers, '{}')
+        self.assertEqual(status, 200)
+        manual = json.loads(raw)
+        alias = 'CCN-' + manual['ios'].split('/')[-2][:12]
+        self.assertEqual(manual['ios_manual'], [{'name': 'Front', 'alias': alias + '-1'},
+                                               {'name': 'Pinned', 'alias': alias + '-2'}])
+        self.assertNotIn(b'[Proxy]', self.request('GET', manual['ios'], {'Cookie': cookie})[2])
+
+        exit_node['dialer-proxy'] = 'Automatic'
+        automatic = {'name': 'Automatic', 'type': 'url-test', 'proxies': ['Front'],
+                     'url': 'https://example.invalid/generate_204', 'empty-fallback': 'REJECT'}
+        config['proxy-groups'].append(automatic)
+        config_path.write_text(dumps(config), encoding='utf-8')
+        status, _, raw = self.request('POST', '/api/mobile-export', headers, '{}')
+        self.assertEqual(status, 200)
+        exported = json.loads(raw)
+        self.assertIn('ios_error', exported)
+        self.assertNotIn('ios', exported)
+        android = loads(self.request('GET', exported['android'], {'Cookie': cookie})[2])
+        self.assertEqual(android['proxy-groups'][0], automatic)
+        self.assertEqual(android['proxies'][-1]['dialer-proxy'], 'Automatic')
+
+        index['current'] = 'different-profile'
+        index_path.write_text(dumps(index), encoding='utf-8')
+        self.assertEqual(self.request('POST', '/api/mobile-export', headers, '{}')[0], 409)
+
     def test_token_sets_session_and_serves_html(self):
         cookie = self.session_cookie()
         status, headers, data = self.request('GET', '/', {'Cookie': cookie})

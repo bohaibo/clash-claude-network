@@ -23,7 +23,51 @@ export function render(ctx) {
   root.append(verificationCard(ctx));
   root.append(diagnosticsCard(ctx));
   root.append(actionsCard(ctx));
+  root.append(mobileExportCard(ctx));
   return root;
+}
+
+let mobileExport = null;
+let exportingMobile = false;
+
+function mobileExportCard(ctx) {
+  const downloads = [['android', '下载 Android YAML'], ['ios', '下载 iOS CONF']]
+    .map(([platform, label]) => {
+      const href = mobileExport?.[platform];
+      return href && new RegExp('^/api/mobile-exports/[a-f0-9]{32}/' + platform + '$').test(href)
+        ? ui.el('a', {class: 'btn btn-secondary', href, text: label}) : null;
+    });
+  const button = ui.button(exportingMobile ? '正在生成…' : '生成手机配置', {
+    variant: 'secondary', icon: 'download',
+    disabled: exportingMobile || !ctx.state.configured || operationsBlocked(ctx),
+    onClick: async () => {
+      if (exportingMobile || operationsBlocked(ctx)) return;
+      exportingMobile = true;
+      mobileExport = null;
+      button.disabled = true;
+      button.textContent = '正在生成…';
+      try {
+        mobileExport = await ctx.api.post('/api/mobile-export');
+      } catch (error) {
+        mobileExport = {error: error.message || '手机配置生成失败。'};
+      } finally {
+        exportingMobile = false;
+        document.getElementById('mobile-export-card')?.replaceWith(mobileExportCard(ctx));
+      }
+    },
+  });
+  const message = mobileExport?.error || mobileExport?.ios_error;
+  const manual = mobileExport?.ios_manual || [];
+  const card = ui.card({title: '导出手机配置'},
+    ui.el('p', {class: 'muted small', text: '使用当前启用的固定节点与分流规则。Android 导入支持 Mihomo 的 Clash 客户端；iOS 导入 Shadowrocket 并选择「配置」路由。文件含节点凭据，请私下传输。'}),
+    ui.el('div', {class: 'form-foot'}, button, ...downloads),
+    message ? ui.note(message, 'warn') : null,
+    manual.length ? ui.note('iOS 需先在 Shadowrocket 中导入以下原节点，并设为对应名称，再启用 CONF。', 'warn') : null,
+    manual.length ? ui.el('ul', {class: 'check-list'}, manual.map(({name, alias}) =>
+      ui.el('li', {text: name + ' → ' + alias}))) : null,
+    mobileExport?.omitted_geo_regex ? ui.note('iOS 配置略过 ' + mobileExport.omitted_geo_regex + ' 条 GeoSite 正则；设备导入与实际分流未验证。', 'warn') : null);
+  card.id = 'mobile-export-card';
+  return card;
 }
 
 // Detailed status belongs in the guide, keeping the network page focused on actions.

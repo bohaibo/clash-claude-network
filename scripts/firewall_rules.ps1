@@ -139,11 +139,22 @@ function Test-BlockedSharedAccessRule($rule) {
     (ConvertTo-FirewallProgram ([string]$app[0].Program)) -ieq (Join-Path $env:SystemRoot 'System32\svchost.exe') -and
     [string]$security[0].OverrideBlockRules -eq 'False' -and [string]$security[0].Authentication -eq 'NotRequired')
 }
-function Assert-StrictFirewall([string]$coreProgram,[switch]$AllowAdditionalLocalRules) {
+function Assert-StrictFirewall([string]$coreProgram,[switch]$AllowAdditionalLocalRules,[switch]$WaitForTun) {
   # Read effective policy as well as persistent rules; names alone prove nothing.
   $profiles=@(Assert-FirewallAvailable)
   if(@($profiles | Where-Object {$_.DefaultOutboundAction.ToString() -ne 'Block'}).Count){
     throw '实际默认出站动作不是 Block，无法确认严格防火墙生效。'
+  }
+  $timer=[Diagnostics.Stopwatch]::StartNew()
+  while($true){
+    $tun=@(Get-NetAdapter -ErrorAction Stop | Where-Object {$_.Name -ceq 'Meta'})
+    if($tun.Count -eq 1 -and [string]$tun[0].Status -eq 'Up'){break}
+    if(!$WaitForTun -or $timer.Elapsed.TotalSeconds -ge 10){
+      $failure=[InvalidOperationException]::new('Meta TUN 网卡不存在、不唯一或未启用。')
+      $failure.Data['ccn_failed_check']='meta_tun'
+      throw $failure
+    }
+    Start-Sleep -Milliseconds 250
   }
   $core=ConvertTo-FirewallProgram $coreProgram
   if(!(Test-Path -LiteralPath $core -PathType Leaf)){throw '配置记录中的核心程序不存在。'}
@@ -154,8 +165,6 @@ function Assert-StrictFirewall([string]$coreProgram,[switch]$AllowAdditionalLoca
   if($running.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$running[0]) -or (ConvertTo-FirewallProgram ([string]$running[0])) -ine $core){
     throw '运行中的核心路径与配置记录不一致或无法唯一确认。'
   }
-  $tun=@(Get-NetAdapter -ErrorAction Stop | Where-Object {$_.Name -ceq 'Meta'})
-  if($tun.Count -ne 1 -or $tun[0].Status.ToString() -ne 'Up'){throw 'Meta TUN 网卡不存在、不唯一或未启用。'}
   $lan=@('10.0.0.0/8','100.64.0.0/10','127.0.0.0/8','169.254.0.0/16','172.16.0.0/12','192.168.0.0/16','224.0.0.0/4')
   foreach($store in @('PersistentStore','ActiveStore')){
     $all=@(Get-NetFirewallRule -PolicyStore $store -ErrorAction Stop)

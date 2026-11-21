@@ -35,6 +35,8 @@ import gui_settings
 import node_region
 import region_profile
 import gui_window
+import mobile_export
+import yaml
 from app_release import VERSION, ReleaseChecker
 from package_app import build_package
 from operation_lock import operation_lock, pending_settings, pending_tun, operation_in_use
@@ -1697,6 +1699,25 @@ class App:
             raise ApiError(404, '安装包不存在，请重新导出。')
         return target, result['filename']
 
+    def export_mobile(self):
+        with self.settings_operation():
+            try:
+                return mobile_export.export(self.plan(), self.local)
+            except mobile_export.ExportError as exc:
+                raise ApiError(409, str(exc)) from None
+            except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):
+                raise ApiError(409, '无法读取当前 Clash 配置或写入本地导出文件。') from None
+
+    def mobile_download(self, identifier, platform):
+        filename = mobile_export.FILES.get(platform)
+        if not JOB_ID_RE.fullmatch(identifier) or filename is None:
+            raise ApiError(404, '找不到手机配置文件。')
+        folder = self.local.resolve() / 'mobile-exports' / identifier
+        target = folder / filename
+        if target.resolve() != target or not target.is_file():
+            raise ApiError(404, '找不到手机配置文件。')
+        return target, filename
+
     def reveal_local(self, recovery=None):
         target = self.local.resolve()
         if recovery is not None:
@@ -2087,6 +2108,18 @@ def make_handler(app):
                     self._send(200, target.read_bytes(), 'application/zip',
                                {'Content-Disposition': 'attachment; filename="' + filename + '"'})
                     return
+                if path.startswith('/api/mobile-exports/'):
+                    parts = path.split('/')
+                    if len(parts) != 5:
+                        raise ApiError(404, '找不到手机配置文件。')
+                    target, filename = app.mobile_download(parts[3], parts[4])
+                    try:
+                        body = target.read_bytes()
+                    except OSError:
+                        raise ApiError(404, '找不到手机配置文件。') from None
+                    self._send(200, body, 'application/octet-stream',
+                               {'Content-Disposition': 'attachment; filename="' + filename + '"'})
+                    return
                 if path.startswith('/api/job/'):
                     self._json(app.job_view(path.rsplit('/', 1)[-1]))
                     return
@@ -2135,6 +2168,8 @@ def make_handler(app):
                         self._json(app.request_software_check(), 202)
                 elif parsed.path == '/api/package':
                     self._json(app.export_package())
+                elif parsed.path == '/api/mobile-export':
+                    self._json(app.export_mobile())
                 elif parsed.path == '/api/snapshot-delete':
                     self._json(app.delete_snapshot(payload))
                 elif parsed.path == '/api/reveal':

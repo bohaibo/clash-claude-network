@@ -61,8 +61,8 @@ def run_audit():
   progress('passed')
  try:
   check_pending_tun(LOCAL)
-  from config_health import configuration_revision
-  initial_revision=configuration_revision(LOCAL)
+  # The first firewall report records the revision after the TUN is ready.
+  # Subsequent reports verify their revision against that evidence.
   stage(1,lambda:require(verify_firewall('firewall-before')['success'],'Full firewall preflight not verified; drills stopped'))
   try:
    stage(2,lambda:require(verify(outage=True)['success'],'Node outage verification did not pass'))
@@ -74,7 +74,6 @@ def run_audit():
     save_report({'success':False,'failed_check':'ipv6_bindings'},'post-recovery');raise
   stage(6,lambda:require(verify(stage='post-recovery')['success'],'Post-recovery verification did not pass'))
   stage(7,lambda:require(verify_firewall('firewall-after')['success'],'Final firewall audit not verified'))
-  require(configuration_revision(LOCAL)==initial_revision,'Configuration changed during the audit')
   result['success']=True
  except Exception as exc:result['error']=type(exc).__name__
  write(LOCAL/'safety-audit-result.json',result)

@@ -13,14 +13,27 @@ def save_report(report,stage):
     run_id=os.environ.get('CCN_VERIFY_RUN') or uuid.uuid4().hex
     if not re.fullmatch(r'[a-f0-9]{32}',run_id):raise ValueError('Invalid verification run ID')
     from config_health import source_digest,configuration_revision
+    folder=LOCAL/'verification-runs'/run_id
+    preflight=folder/'firewall-before.json'
     revision = configuration_revision(LOCAL)
     expected_revision = report.get('configuration_revision', revision)
+    # Native startup can rewrite the runtime YAML before TUN and firewall
+    # readiness have been proven. Only compare to the completed preflight of
+    # this run, while still honoring the revision captured by each network test.
+    if stage != 'firewall-before' and preflight.is_file():
+        first=json.loads(preflight.read_text(encoding='utf-8'))
+        if first.get('success') is True and revision != first.get('configuration_revision'):
+            expected_revision=first.get('configuration_revision')
     if revision != expected_revision:
         report = dict(report, success=False, failed_check='configuration_changed',
                       error='验收期间配置或规则已变化，请重新验收。')
         revision = None
+    elif stage == 'firewall-before' and report.get('success') is True and not revision:
+        report = dict(report, success=False, failed_check='configuration_unavailable',
+                      error='无法确认当前配置版本，未开始故障演练。')
+    if stage.startswith('firewall-') and report.get('failed_check') in {'configuration_changed','configuration_unavailable'}:
+        report = dict(report, full_verified=False, status='unverified')
     report=dict(report,configuration_revision=revision,evidence_kind=report.get('evidence_kind','network-test'),source_digest=source_digest(),run_id=run_id,stage=stage,time=datetime.datetime.now().astimezone().isoformat())
-    folder=LOCAL/'verification-runs'/run_id
     write(folder/(stage+'.json'),report)
     # Read this run's stage files, never combine evidence from an earlier run.
     stages={path.stem:json.loads(path.read_text(encoding='utf-8')) for path in folder.glob('*.json')}
