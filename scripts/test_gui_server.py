@@ -80,6 +80,33 @@ class GuiServer(unittest.TestCase):
         self.assertIsNone(another.httpd)
         self.assertEqual(json.loads(self.app.session_file.read_text())['port'], self.port)
 
+    def test_open_after_last_window_closes_starts_a_fresh_server(self):
+        self.app.frontend_ready = True
+        another = gui_server.App(local=self.local, gui_dir=self.gui, open_browser=True, idle_exit=False)
+        thread = threading.Thread(target=another.run, daemon=True)
+        with patch.object(gui_window, 'browser_window_count', return_value=0), \
+             patch.object(gui_window, 'launch') as launch:
+            thread.start()
+            try:
+                deadline = time.monotonic() + 8
+                while not another.browser_opened and thread.is_alive() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                self.assertTrue(another.browser_opened)
+                self.assertTrue(self.app.stopping)
+                launch.assert_called_once_with(another.session_url(), local=self.local, gui=True, app=True)
+            finally:
+                another.stop()
+                thread.join(8)
+
+    def test_open_with_active_operation_reuses_server_even_without_a_window(self):
+        self.app.frontend_ready = True
+        another = gui_server.App(local=self.local, gui_dir=self.gui, open_browser=True, idle_exit=False)
+        with self.app.settings_operation(), patch.object(gui_window, 'browser_window_count', return_value=0), \
+             patch.object(gui_window, 'launch') as launch:
+            self.assertEqual(another.run(), 0)
+        self.assertFalse(self.app.stopping)
+        launch.assert_called_once_with(self.app.session_url(), local=self.local, gui=True, app=True)
+
     def request(self, method, path, headers=None, body=None):
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=6)
         values = dict(headers or {})

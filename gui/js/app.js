@@ -101,10 +101,7 @@ function bootShell() {
     nav,
     h('div', { class: 'sidebar-foot' },
       h('div', { class: 'side-status', id: 'side-status' }),
-      h('div', { class: 'side-links' },
-        h('button', { class: 'link-btn', type: 'button', onclick: () => showLog('gui/server.log') }, icon('terminal', 15), '界面日志'),
-        h('button', { class: 'link-btn', type: 'button', onclick: shutdown }, icon('close', 15), '退出界面')),
-      h('p', { class: 'side-note', text: '仅 Windows · 不安装或登录 Claude' })));
+      h('button', { class: 'link-btn', type: 'button', onclick: () => showLog('gui/server.log') }, icon('terminal', 15), '界面日志')));
 
   const topbar = h('header', { class: 'topbar' },
     h('div', { class: 'topbar-title' },
@@ -698,28 +695,6 @@ async function openLogInline(name) {
   } catch (error) {
     if (requestRevision !== logRequestRevision || !host.isConnected) return;
     host.replaceChildren(ui.note(error.message || '读取日志失败。', 'bad'));
-  }
-}
-
-async function shutdown() {
-  if (ctx.busy) {
-    ui.toast('操作仍在进行，完成后再退出界面。', 'warn');
-    return;
-  }
-  const ok = await ui.confirmDialog({
-    title: '退出界面？',
-    description: '只会关闭界面和隔离的界面浏览器资料进程；不会修改、恢复或停止网络配置，也不会关闭外部浏览器。',
-    confirmText: '退出界面',
-    danger: true,
-  });
-  if (!ok) return;
-  try {
-    await api.post('/api/shutdown');
-    document.body.classList.add('shutting-down');
-    ui.toast('界面服务正在退出，可以关闭此窗口。', 'ok');
-    setTimeout(() => window.close(), 1200);
-  } catch (error) {
-    ui.toast(error.message || '退出失败。', 'bad');
   }
 }
 

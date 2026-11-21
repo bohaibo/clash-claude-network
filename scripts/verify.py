@@ -308,21 +308,25 @@ def verify(outage=False,stage=None):
    from verify_tun import api as outage_api
    check='node_outage'
    current=(root/'clash-verge.yaml').read_text(encoding='utf-8')
-   targets=([managed_chain.FRONT,node] if managed_profile and not managed_profile.get('direct') else [node])
-   for failed_node in targets:
-    check='chain_front_outage' if failed_node!=node else 'node_outage'
+   targets=[(False,{node})]
+   if managed_profile and not managed_profile.get('direct'):
+    front_members=managed_profile['front_policy']['proxies'] if managed_profile.get('front_group') else [managed_chain.FRONT]
+    targets.insert(0,(True,set(front_members)))
+   for front_outage,failed_nodes in targets:
+    check='chain_front_outage' if front_outage else 'node_outage'
     broken=__import__('yaml').safe_load(current)
+    require(failed_nodes <= {value['name'] for value in broken['proxies']}, 'Configured outage targets missing')
     for value in broken['proxies']:
-     if value['name']==failed_node:value['port']=1
+     if value['name'] in failed_nodes:value['port']=1
     candidate=__import__('yaml').safe_dump(broken,allow_unicode=True,sort_keys=False)
     with guarded_outage(root,'node-outage',current,candidate):
      for connection in outage_api(root,'GET','/connections').get('connections',[]):
-      if node in connection.get('chains',[]) or failed_node in connection.get('chains',[]):
+      if ({node} | failed_nodes).intersection(connection.get('chains',[])):
        try:outage_api(root,'DELETE','/connections/'+connection['id'])
        except Exception:pass
      require(curl('https://ipinfo.io/json')['exit']!=0,'Foreign traffic remained reachable during node outage')
      require(curl('https://www.baidu.com',True)['http']==200,'配置检查未通过，请查看本地记录。')
-     key='chain_front_failure_blocks_foreign_preserves_domestic' if failed_node!=node else 'node_failure_blocks_foreign_preserves_domestic'
+     key='chain_front_failure_blocks_foreign_preserves_domestic' if front_outage else 'node_failure_blocks_foreign_preserves_domestic'
      report[key]=True
    check='recovery'
    report['recovery_attempts']=[];recovery_ok=False

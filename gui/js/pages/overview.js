@@ -32,6 +32,7 @@ const form = {
   mode: '',
   frontSubscription: '',
   frontNode: '',
+  frontGroup: false,
   chainName: '',
   staticProtocol: 'socks5',
   staticIp: '',
@@ -52,7 +53,7 @@ const form = {
 };
 const modeDrafts = { single: null, chain: null, static: null, staticDirect: null };
 const draftFields = ['node','subscription','region','regionAuto','regionManual','search',
-  'frontSubscription','frontNode','chainName','frontSearch','exitSearch',
+  'frontSubscription','frontNode','frontGroup','chainName','frontSearch','exitSearch',
   'staticProtocol','staticIp','staticPort','staticUser','staticPassword','staticSaved'];
 const captureDraft = () => Object.fromEntries(draftFields.map(key => [key,form[key]]));
 const emptyDraft = captureDraft();
@@ -306,7 +307,7 @@ async function loadChoices(ctx) {
     nodesState.selectionNotice = reconcileSubscriptions(form, rows) ? '原订阅已不可用，请重新选择订阅和节点。' : '';
     const hasNode = (uid, node) => rows.some(row => row.uid === uid && row.nodes.includes(node));
     if ((form.node && !hasNode(form.subscription, form.node)) ||
-        (form.mode !== 'single' && form.frontNode && !hasNode(form.frontSubscription, form.frontNode))) {
+        (form.mode !== 'single' && form.frontNode && !hasFrontChoice(rows))) {
       form.acknowledged = false;
     }
     if (form.mode==='single') {
@@ -344,6 +345,10 @@ function reconcileSubscriptions(draft, rows) {
   return changed;
 }
 
+function hasFrontChoice(rows) {
+  const row = rows.find(r => r.uid === form.frontSubscription);
+  return (form.frontGroup ? row?.front_groups : row?.nodes)?.includes(form.frontNode);
+}
 function regionOptions() {
   return [{value:'',label:'请选择出口地区'}, ...REGIONS.map(([value,label])=>({value,label}))];
 }
@@ -356,6 +361,7 @@ function currentSubscription(ctx) {
 function loadChainSelection(ctx, saved, uid) {
   form.subscription=saved.exit_subscription || '';form.node=saved.exit_node || '';
   form.frontSubscription=saved.front_subscription || '';form.frontNode=saved.front_node || '';form.chainName=saved.name;
+  form.frontGroup=saved.front_group === true;
   form.staticSaved=saved.static_exit ? uid : '';
   form.regionManual=false;form.regionAuto=null;form.acknowledged=false;
   if (saved.static_exit) {
@@ -398,7 +404,7 @@ function renderChoices(ctx) {
   if (reconcileSubscriptions(form, subscriptions)) nodesState.selectionNotice='原订阅已不可用，请重新选择订阅和节点。';
   if (form.mode!=='single') {
     if (!supportsMode(ctx)) {
-      choicesHost.replaceChildren(ui.note('软件后台仍是旧版本。请退出界面后，重新运行「一键网络.cmd」。','warn'));
+      choicesHost.replaceChildren(ui.note('软件后台仍是旧版本。请关闭所有管理窗口后，重新运行「一键网络.cmd」。','warn'));
       return;
     }
     renderChainChoices(ctx);return;
@@ -628,7 +634,10 @@ async function beginApply(ctx) {
     chain = {name:form.chainName.trim()};
     const direct = form.mode === 'staticDirect';
     if (direct) chain.direct = true;
-    else Object.assign(chain,{front_subscription:form.frontSubscription,front_node:form.frontNode});
+    else {
+      Object.assign(chain,{front_subscription:form.frontSubscription,front_node:form.frontNode});
+      if (form.frontGroup) chain.front_group = true;
+    }
     if (staticMode) {
       if (saved) [subscription,node] = [saved.uid,saved.chain.name];
       else if (direct) [subscription,node] = ['',chain.name];
@@ -660,7 +669,7 @@ async function beginApply(ctx) {
 function chainReady() {
   const rows=(nodesState.data?.subscriptions || []).filter(r=>!r.chain);
   if (!form.chainName.trim()) return false;
-  if (form.mode !== 'staticDirect' && !rows.some(r=>r.uid===form.frontSubscription && r.nodes.includes(form.frontNode))) return false;
+  if (form.mode !== 'staticDirect' && !hasFrontChoice(rows)) return false;
   if (isStaticMode()) {
     if (form.staticSaved) return Boolean(savedStatic());
     const endpoint = staticEndpoint();
@@ -683,21 +692,24 @@ function renderChainChoices(ctx) {
     const front=side==='front';const uid=front?form.frontSubscription:form.subscription;
     const node=front?form.frontNode:form.node;
     const searchKey=front?'frontSearch':'exitSearch';
-    const all=getSub(uid)?.nodes || [];
+    const row=getSub(uid);
+    const groups=front ? row?.front_groups || [] : [];
+    const all=[...(row?.nodes || []),...groups];
+    const available=front && node ? hasFrontChoice(rows) : all.includes(node);
     const count=ui.el('span',{class:'muted small','aria-live':'polite'});
     const control=ui.select([],node,value=>{
-      if(front)form.frontNode=value;else{form.node=value;applyRegionHint(ctx,value);}
+      if(front){form.frontNode=value;form.frontGroup=groups.includes(value);}else{form.node=value;applyRegionHint(ctx,value);}
       form.acknowledged=false;renderChoices(ctx);
     }, {'aria-label':label+'节点'});
     function updateChoices() {
       const results=matchNodes(all,form[searchKey]);
-      count.textContent=results.length+' / '+all.length+' 个节点';
+      count.textContent=results.length+' / '+all.length+' 项';
       const names=results.slice(0,800);
       if(all.includes(node) && !names.includes(node)) names.unshift(node);
       control.replaceChildren(
-        ui.el('option',{value:'',text:!uid?'先选择订阅':results.length?'请选择精确节点':'没有匹配的节点'}),
-        ...names.map(name=>ui.el('option',{value:name,text:name})));
-      control.value=all.includes(node)?node:'';
+        ui.el('option',{value:'',text:!uid?'先选择订阅':results.length?(groups.length?'请选择节点或自动组':'请选择精确节点'):'没有匹配项'}),
+        ...names.map(name=>ui.el('option',{value:name,text:groups.includes(name)?name+'（自动组）':name})));
+      control.value=available?node:'';
       control.disabled=!names.length;
       if(results.length>800)count.textContent+=' · 请进一步缩小搜索范围';
     }
@@ -707,12 +719,12 @@ function renderChainChoices(ctx) {
     updateChoices();
     return ui.el('div',{class:'choice-grid'},
       ui.field(label+'订阅',ui.select(subOptions,uid,value=>{
-        if(front){form.frontSubscription=value;form.frontNode='';}else{form.subscription=value;form.node='';}
+        if(front){form.frontSubscription=value;form.frontNode='';form.frontGroup=false;}else{form.subscription=value;form.node='';}
         form[searchKey]='';
         form.acknowledged=false;renderChoices(ctx);
       })),
       ui.el('div',{class:'field'},search,ui.field(label+'节点',control),count,
-        node && !all.includes(node) ? ui.note('原选节点已不可用，请重新选择。','warn') : null));
+        node && !available ? ui.note('原选项已不可用，请重新选择。','warn') : null));
   };
   let acknowledgement;
   const setField = (key,value) => {
@@ -731,12 +743,13 @@ function renderChainChoices(ctx) {
     Boolean(row.chain.static_exit) === staticMode && Boolean(row.chain.direct) === direct);
   const selected=staticMode ? savedStatic() : saved.find(row=>row.chain.name===form.chainName &&
     row.chain.front_subscription===form.frontSubscription && row.chain.front_node===form.frontNode &&
+    Boolean(row.chain.front_group)===form.frontGroup &&
     row.chain.exit_subscription===form.subscription && row.chain.exit_node===form.node);
   const savedPicker=ui.field('已保存配置',ui.select([{value:'',label:'新建配置'},...saved.map(row=>({value:row.uid,label:row.chain.name}))],selected?.uid || '',value=>{
     const row=saved.find(row=>row.uid===value);
     if(row)loadChainSelection(ctx,row.chain,row.uid);
     else {
-      form.chainName='';form.frontSubscription='';form.frontNode='';form.acknowledged=false;
+      form.chainName='';form.frontSubscription='';form.frontNode='';form.frontGroup=false;form.acknowledged=false;
       form.staticSaved='';form.staticIp='';form.staticPort='';form.staticUser='';form.staticPassword='';
     }
     renderChoices(ctx);

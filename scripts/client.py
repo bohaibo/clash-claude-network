@@ -87,7 +87,9 @@ def discover(root):
   source=safe_file(root,'profiles/'+item['file'])
   if not source.is_file():continue
   value=load(source) or {}
-  rows.append({'uid':item['uid'],'name':item.get('name'),'nodes':[n['name'] for n in value.get('proxies',[])]})
+  row={'uid':item['uid'],'name':item.get('name'),'nodes':[n['name'] for n in value.get('proxies',[])]}
+  if groups:=managed_chain.automatic_front_names(value):row['front_groups']=groups
+  rows.append(row)
  for uid,record in managed_chain.records(root,LOCAL).items():
   if any(i.get('uid')==uid and i.get('type')=='local' and i.get('file')==record['file'] for i in items):
    rows.append({'uid':uid,'name':record['name'],'nodes':[record['node']],'chain':managed_chain.selection(record)})
@@ -246,6 +248,8 @@ def build(root,item,node,data=None,*,runtime=None,profiles=None,original=None):
  if original.get('x-portable-chain'):
   data['chainNodeDns']=original['dns'].get('proxy-server-nameserver-policy',{})
   data['chainPin']={'node':node,'front':None if original['x-portable-chain'].get('direct') else managed_chain.FRONT}
+  if original['x-portable-chain'].get('front_group'):
+   data['chainPin']['frontGroup']=next(g for g in original['proxy-groups'] if g['name']==managed_chain.FRONT)
  static_exit=bool(original.get('x-portable-chain',{}).get('static_exit'))
  if static_exit:
   endpoint=next(n for n in original['proxies'] if n['name']==node)
@@ -448,6 +452,8 @@ def setup_record(root,profiles,request,node,subscription):
  anchor=managed_chain.anchor(record)
  if anchor is None:
   require(node==record['node'] and not subscription,'Single static proxy selection changed')
+ elif record.get('front_group') and 'static_exit' in record:
+  require((subscription,node)==anchor,'Chain source selection changed')
  else:
   item=select(root,node,subscription or None,profiles)
   require((item['uid'],node)==anchor,'Chain source selection changed')

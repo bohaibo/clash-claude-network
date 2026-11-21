@@ -73,7 +73,7 @@ def build_arguments(exe, profile, language, url, app=True, gui=True):
     return ['--user-data-dir=' + str(profile), '--profile-directory=Default',
             '--no-first-run', '--no-default-browser-check', '--disable-sync',
             '--disable-background-mode', '--disable-background-networking',
-            '--disable-extensions', '--app=' + url, '--window-size=1280,880',
+            '--disable-extensions', '--app=' + url, '--window-size=1360,900',
             '--disable-features=msEdgeIdentity,msEdgeSync,msImplicitSignin,SigninInterception,RendererAppContainer']
 
 
@@ -82,13 +82,13 @@ def _pid_script():
         "$ErrorActionPreference='Stop';"
         "if(!$env:CCN_BROWSER_PROFILE){exit 0};"
         "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR Name='msedge.exe'\" "
-        "-ErrorAction SilentlyContinue | "
+        "-ErrorAction Stop | "
         "Where-Object { $_.CommandLine -and "
         "$_.CommandLine.IndexOf($env:CCN_BROWSER_PROFILE,[StringComparison]::OrdinalIgnoreCase) -ge 0 } | "
         "ForEach-Object { [int]$_.ProcessId }"
     )
 
-def running_pids(profile, use_cache=True, timeout=8):
+def running_pids(profile, use_cache=True, timeout=8, *, strict=False):
     profile = Path(profile)
     key = str(profile).lower()
     now = time.monotonic()
@@ -106,13 +106,16 @@ def running_pids(profile, use_cache=True, timeout=8):
             timeout=timeout, env=environment,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line.isdigit():
-                    pids.append(int(line))
+        if result.returncode != 0:
+            raise OSError('Unable to inspect the isolated browser processes')
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                pids.append(int(line))
     except (OSError, subprocess.SubprocessError):
-        pids = []
+        if strict:
+            raise
+        return []
     pids = sorted(set(pids))
     with _CACHE_LOCK:
         _PID_CACHE[key] = (now, pids)
@@ -220,6 +223,12 @@ def visible_window_count(pids):
     if not user32.EnumWindows(callback, 0):
         raise OSError('无法核实浏览器窗口是否可见。')
     return len(matches)
+
+
+def browser_window_count(local=None, *, use_cache=True):
+    pids = running_pids(gui_profile_path(local), use_cache=use_cache, strict=True)
+    return visible_window_count(pids)
+
 
 def _engine_attempt(found, profile, language, target, app, gui, wait, already, log_path, requested=None):
     previous_windows = visible_window_count(already) if already and not (gui or app) else 0

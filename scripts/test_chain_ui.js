@@ -6,7 +6,7 @@ const context=vm.createContext({ui:{toast:message=>warnings.push(message),el:()=
 vm.runInContext(source+'\nglobalThis.probe={form,beginApply,applyRegionHint,chainReady,switchMode,loadChoices,testHost:()=>{choicesHost={replaceChildren(){}};renderChoices=()=>{};},resetDrafts:()=>{modeDrafts.single=null;modeDrafts.chain=null;},setData:d=>nodesState.data=d};',context);
 const p=context.probe,jobs=[],confirmations=[];
 const saved={name:'Saved chain',front_subscription:'front',front_node:'Entry HK',exit_subscription:'exit',exit_node:'Exit SG'};
-p.setData({subscriptions:[{uid:'front',nodes:['Entry HK']},{uid:'exit',nodes:['Exit SG']},
+p.setData({subscriptions:[{uid:'front',nodes:['Entry HK'],front_groups:['Automatic']},{uid:'exit',nodes:['Exit SG']},
  {uid:'saved',nodes:['Saved chain'],chain:saved}],chain_defaults:saved,
  regions:{exit:{'Exit SG':{code:'SG'}},front:{'Entry HK':{code:'HK'}}}});
 Object.assign(p.form,{mode:'chain',node:'Exit SG',subscription:'exit',frontNode:'Entry HK',frontSubscription:'front',chainName:'My chain',acknowledged:true});
@@ -16,6 +16,13 @@ const ctx={state:{configured:true,capabilities:{managed_chain:true}},confirm:asy
  await p.beginApply(ctx);assert.equal(jobs[0].node,'Exit SG');assert.equal(jobs[0].region,'SG');
  assert.equal(jobs[0].chain.name,'My chain');assert.equal(jobs[0].chain.front_node,'Entry HK');
  assert(confirmations[0].subtitle.includes('Entry HK → Exit SG'));
+ Object.assign(p.form,{frontNode:'Automatic',frontGroup:true,acknowledged:true});
+ assert(p.chainReady());
+ await p.beginApply(ctx);
+ assert.equal(jobs.pop().chain.front_group,true);
+ assert(confirmations.pop().subtitle.includes('Automatic → Exit SG'));
+ p.form.frontGroup=false;
+ assert(!p.chainReady());
  p.form.frontNode='Missing';await p.beginApply(ctx);assert.equal(jobs.length,1);
  p.form.mode='single';await p.beginApply(ctx);assert.equal(jobs.length,2);assert(!('chain' in jobs[1]));
  p.resetDrafts();Object.assign(p.form,{mode:'single',node:'Entry HK',subscription:'front',region:'HK',regionManual:true,acknowledged:true,search:'my filter'});

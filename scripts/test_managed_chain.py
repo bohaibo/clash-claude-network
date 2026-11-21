@@ -181,6 +181,70 @@ class ManagedChain(unittest.TestCase):
         self.request.update(front_subscription='exit',front_node='Exit')
         with self.assertRaises(AssertionError):self.prepare()
 
+    def automatic_front(self):
+        self.front['proxies'].append(dict(self.front['proxies'][0], name='Backup', server='backup.example.invalid'))
+        self.front['proxy-groups'] = [{'name':'Automatic', 'type':'url-test', 'proxies':['Entry','Backup'],
+                                       'url':'https://cp.cloudflare.com/generate_204', 'interval':300,
+                                       'exclude-filter':'^Expired', 'tolerance':50}]
+        self.put('profiles/front.yaml',self.front)
+
+    def test_automatic_front_is_discovered_applied_and_refreshed(self):
+        self.automatic_front()
+        self.request.update(front_node='Automatic',front_group=True)
+        rows=client.discover(self.root)['subscriptions']
+        front=next(row for row in rows if row['uid']=='front')
+        self.assertEqual(front['front_groups'],['Automatic'])
+        self.assertEqual(front['nodes'],['Entry','Backup'])
+        plan=self.apply()
+        runtime=client.load(self.root/'clash-verge.yaml')
+        policy=plan['chain']['front_policy']
+        self.assertEqual(policy['proxies'],['Entry','Backup'])
+        self.assertEqual(policy['empty-fallback'],'REJECT')
+        self.assertEqual(policy['tolerance'],50)
+        self.assertEqual(policy['exclude-filter'],'^Expired')
+        self.assertIn(policy,runtime['proxy-groups'])
+        self.assertEqual(runtime['proxy-groups'][-1]['proxies'],[plan['node']])
+        self.assertEqual(runtime['proxies'][0]['dialer-proxy'],managed_chain.FRONT)
+        self.assertEqual(set(runtime['dns']['proxy-server-nameserver-policy']),
+                         {'entry.example.invalid','backup.example.invalid'})
+        live=self.update_api(self.root,'GET','/proxies')
+        managed_chain.assert_live(plan,live)
+        live['proxies'][managed_chain.FRONT]['all'].append('DIRECT')
+        with self.assertRaises(AssertionError):managed_chain.assert_live(plan,live)
+        self.front['proxy-groups'][0]['type']='fallback'
+        self.front['proxy-groups'][0]['proxies'].reverse()
+        self.put('profiles/front.yaml',self.front)
+        self.assertTrue(self.run_update()['active_profile_reloaded'])
+        updated=client.load(self.local/'plan.json')['chain']['front_policy']
+        self.assertEqual((updated['type'],updated['proxies']),('fallback',['Backup','Entry']))
+        self.assertTrue(self.run_update()['unchanged'])
+
+    def test_automatic_front_rejects_direct_nested_and_missing_members(self):
+        self.automatic_front()
+        self.request.update(front_node='Automatic',front_group=True)
+        group=self.front['proxy-groups'][0]
+        for name in ('DIRECT','Missing','Automatic'):
+            with self.subTest(name=name):
+                group['proxies']=['Entry',name]
+                self.put('profiles/front.yaml',self.front)
+                self.assertNotIn('front_groups',client.discover(self.root)['subscriptions'][1])
+                with self.assertRaises(AssertionError):self.prepare()
+        self.assertEqual(client.load(self.root/'profiles.yaml'),self.index)
+
+    def test_automatic_front_excludes_the_fixed_exit_from_same_subscription(self):
+        self.automatic_front()
+        self.request.update(front_node='Automatic',front_group=True,exit_subscription='front',exit_node='Entry')
+        client.prepare(self.root,'Entry','front','SG',chain_spec=self.request)
+        plan=client.load(self.local/'plan.json')
+        self.assertEqual(plan['chain']['front_policy']['proxies'],['Backup'])
+
+    def test_automatic_front_accepts_a_static_exit(self):
+        self.automatic_front()
+        request=dict(self.static_request(),front_node='Automatic',front_group=True)
+        client.prepare(self.root,'Automatic','front','US',chain_spec=request)
+        plan=client.load(self.local/'plan.json')
+        self.assertEqual(plan['chain']['front_policy']['proxies'],['Entry','Backup'])
+
     def account_traffic(self):
         index=client.load(self.root/'profiles.yaml')
         for item in index['items']:
@@ -317,12 +381,19 @@ class ManagedChain(unittest.TestCase):
                                           {'type':'RuleSet','payload':'strict-cn-domain','proxy':'DIRECT'}]}
         if path=='/providers/rules':return {'providers':{k:{'ruleCount':len(v['payload'])} for k,v in client.load(self.root/'clash-verge.yaml')['rule-providers'].items()}}
         if path=='/proxies':
-            marker=client.load(self.root/'clash-verge.yaml')['x-portable-chain']
+            runtime=client.load(self.root/'clash-verge.yaml')
+            marker=runtime['x-portable-chain']
             node=marker['name']
             proxies={client.GROUP:{'all':[node],'now':node},node:{'udp':False}}
             if not marker.get('direct'):
                 proxies[node]['dialer-proxy']=managed_chain.FRONT
                 proxies[managed_chain.FRONT]={'dialer-proxy':''}
+                if marker.get('front_group'):
+                    policy=next(g for g in runtime['proxy-groups'] if g['name']==managed_chain.FRONT)
+                    members=policy['proxies']
+                    proxies.update({member:{} for member in members})
+                    proxies[managed_chain.FRONT].update(type=managed_chain.AUTO_TYPES[policy['type']],
+                        all=members,now=members[0],emptyFallback='REJECT',testUrl=policy['url'],fixed='')
             return {'proxies':proxies}
         raise AssertionError('Unexpected offline controller request')
 
@@ -355,6 +426,8 @@ class ManagedChain(unittest.TestCase):
         self.assertFalse((self.local/'rule-update-pending.json').exists())
 
     def test_gui_passes_only_the_exact_chain_selection_under_local_job_folder(self):
+        self.automatic_front()
+        self.request.update(front_node='Automatic',front_group=True)
         app=gui_server.App(local=self.local,open_browser=False,idle_exit=False)
         with patch.object(app,'configured',return_value=(False,None)),patch.object(app,'plan',return_value={}):
             action,params=app._validate_job({'action':'apply','confirm':'APPLY','node':'Exit','subscription':'exit','region':'SG','chain':self.request})

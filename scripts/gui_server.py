@@ -11,6 +11,7 @@ import argparse
 import ctypes
 import datetime
 import hashlib
+import http.client
 import json
 import msvcrt
 import os
@@ -233,7 +234,6 @@ class App:
         self.base_url = ''
         self.started = time.monotonic()
         self.last_heartbeat = time.monotonic()
-        self.last_browser_seen = 0.0
         self.browser_opened = False
         self.frontend_ready = False
         self.browser_error = ''
@@ -921,6 +921,8 @@ class App:
             nodes = [str(x) for x in row.get('nodes', []) if isinstance(x, str)]
             name = str(row.get('name') or '')
             clean_row={'uid': uid, 'name': name, 'nodes': nodes}
+            if isinstance(row.get('front_groups'), list):
+                clean_row['front_groups']=[group for group in row['front_groups'] if isinstance(group,str)]
             if isinstance(row.get('chain'), dict):
                 chain=row['chain']
                 fields=('name',) if chain.get('direct') else ('name','front_subscription','front_node')
@@ -931,6 +933,8 @@ class App:
                     if chain.get('direct') is True:clean_row['chain']['direct']=True
                 else:
                     clean_row['chain']={k:str(chain.get(k) or '') for k in (*fields,'exit_subscription','exit_node')}
+                if 'front_node' in fields and chain.get('front_group') is True:
+                    clean_row['chain']['front_group']=True
             subscriptions.append(clean_row)
             regions[uid] = {}
             subscription_hint = node_region.infer(name)
@@ -1146,6 +1150,8 @@ class App:
                 if not direct:keys+=('front_subscription','front_node')
                 if not static:keys+=('exit_subscription','exit_node')
                 expected=set(keys) | ({'static_exit'} if static else set()) | ({'direct'} if direct else set())
+                if not direct and chain.get('front_group') is True:
+                    expected.add('front_group')
                 if set(chain)!=expected or any(not isinstance(chain[k],str) or not chain[k].strip() or len(chain[k])>200 or any(ord(c)<32 for c in chain[k]) for k in keys):
                     raise ApiError(400,'请填写有效的配置名称和所需节点。')
                 if direct:
@@ -1716,22 +1722,48 @@ class App:
             return None
         port = value.get('port')
         token = value.get('token')
-        url = value.get('url')
-        if not isinstance(port, int) or not isinstance(token, str) or not isinstance(url, str):
+        if (type(port) is not int or not 0 < port < 65536 or
+                not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', token)):
             return None
+        base = f'http://127.0.0.1:{port}'
         try:
             request = urllib.request.Request(
-                f'http://127.0.0.1:{port}/api/ping',
+                base + '/api/ping',
                 headers={'X-CCN-Token': token, 'Cache-Control': 'no-store'},
             )
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with opener.open(request, timeout=2) as response:
                 data = json.loads(response.read().decode('utf-8'))
-            if data.get('ok') is True:
-                return url
+            if data.get('ok') is True and not data.get('closing'):
+                return port, token, data.get('page_ready') is True
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def request_existing_shutdown(port, token):
+        """Use the existing authenticated close path, including for an older server."""
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+        try:
+            connection.request('GET', '/?t=' + token)
+            response = connection.getresponse()
+            cookie = SimpleCookie(response.getheader('Set-Cookie', '')).get(COOKIE)
+            response.read()
+            if response.status != 303 or not cookie:
+                return None
+            connection.request('POST', '/api/shutdown', body='{}', headers={
+                'Cookie': f'{COOKIE}={cookie.coded_value}',
+                'Origin': f'http://127.0.0.1:{port}',
+                'Content-Type': 'application/json',
+                'X-CCN-Token': token,
+            })
+            response = connection.getresponse()
+            response.read()
+            return response.status
+        except (OSError, http.client.HTTPException):
+            return None
+        finally:
+            connection.close()
 
     def run(self):
         if os.name != 'nt':
@@ -1749,13 +1781,25 @@ class App:
                         raise
                     existing = self.existing_session()
                     if existing:
-                        if self.open_browser:
+                        if not self.open_browser:
+                            return 0
+                        port, token, ready = existing
+                        try:
+                            windows = gui_window.browser_window_count(self.local, use_cache=False)
+                        except (OSError, subprocess.SubprocessError):
+                            windows = None
+                        reuse = bool(windows)
+                        if ready and windows == 0:
+                            # An active operation can keep a closed window's server alive.
+                            # Reattach so the user can still see its progress.
+                            reuse = self.request_existing_shutdown(port, token) == HTTPStatus.CONFLICT
+                        if reuse:
                             try:
-                                gui_window.launch(existing, local=self.local, gui=True, app=True)
+                                gui_window.launch(f'http://127.0.0.1:{port}/?t={token}', local=self.local, gui=True, app=True)
                             except Exception as error:
                                 self.log('existing session browser open failed: ' + repr(error))
                                 return 1
-                        return 0
+                            return 0
                     if time.monotonic() >= deadline:
                         self.log('Existing GUI server did not become ready')
                         return 1
@@ -1798,7 +1842,6 @@ class App:
         try:
             gui_window.launch(self.session_url(), local=self.local, gui=True, app=True)
             self.browser_opened = True
-            self.last_browser_seen = time.monotonic()
             self.log('GUI browser opened in isolated app window')
         except Exception as exc:
             self.browser_error = str(exc)
@@ -1820,33 +1863,24 @@ class App:
                 pass
 
     def _idle_monitor(self):
-        while True:
-            time.sleep(5)
-            if self.stopping or not self.idle_exit:
-                continue
-            with self._lock:
-                active = self.active_job is not None or self._recovered_job() is not None or self._settings_busy
-            if active:
-                continue
-            now = time.monotonic()
-            if self.browser_opened:
-                try:
-                    pids = gui_window.running_pids(gui_window.gui_profile_path(self.local))
-                except Exception:
-                    pids = []
-                if pids:
-                    self.last_browser_seen = now
-                elif (self.last_browser_seen and now - self.last_browser_seen > 25
-                      and now - self.last_heartbeat > 40):
-                    self.log('GUI browser closed; stopping server')
-                    if self.stop() is False:
-                        continue
-                    return
-            if now - self.last_heartbeat > 600:
-                self.log('GUI heartbeat expired; stopping server')
-                if self.stop() is False:
-                    continue
-                return
+        while self.idle_exit and not self.stopping:
+            time.sleep(1)
+            if self._stop_if_window_closed():
+                break
+
+    def _stop_if_window_closed(self):
+        if self.browser_opened:
+            try:
+                if gui_window.browser_window_count(self.local):
+                    return False
+            except (OSError, subprocess.SubprocessError):
+                return False
+            reason = 'Last GUI window closed'
+        elif time.monotonic() - self.last_heartbeat > 600:
+            reason = 'GUI heartbeat expired'
+        else:
+            return False
+        return self.stop(reason=reason) is not False
 
     def _cleanup_session(self):
         value = read_json(self.session_file, {})
@@ -1860,14 +1894,17 @@ class App:
         except Exception as exc:
             self.log('GUI browser close failed: ' + repr(exc))
 
-    def stop(self):
+    def stop(self, *, reason=None):
         with self._lock:
             if self.stopping:
                 return
             if self.active_job or self._recovered_job() or self._settings_busy:
-                self.log('shutdown deferred until current operation completes')
+                if reason is None:
+                    self.log('shutdown deferred until current operation completes')
                 return False
             self.stopping = True
+        if reason:
+            self.log(reason + '; stopping server')
         try:
             if self.httpd:
                 self.httpd.shutdown()
@@ -2002,7 +2039,9 @@ def make_handler(app):
                 path = parsed.path
                 if path == '/api/ping':
                     if self._token_ok():
-                        self._json({'ok': True, 'version': VERSION, 'page_ready': app.frontend_ready})
+                        closing = app._shutdown_requested or app.stopping
+                        self._json({'ok': True, 'version': VERSION, 'page_ready': app.frontend_ready and not closing,
+                                    'closing': closing})
                     else:
                         self._error(403, '未授权。')
                     return

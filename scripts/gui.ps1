@@ -51,6 +51,7 @@ import sys
 import json
 import urllib.request
 from gui_server import App
+from gui_window import browser_window_count
 app = App(open_browser=False)
 ready = False
 try:
@@ -58,7 +59,8 @@ try:
     request = urllib.request.Request('http://127.0.0.1:%s/api/ping' % state['port'], headers={'X-CCN-Token': state['token']})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(request, timeout=2) as response:
-        ready = json.load(response).get('page_ready') is True
+        page_ready = json.load(response).get('page_ready') is True
+    ready = page_ready and browser_window_count(app.local) > 0
 except Exception:
     pass
 sys.exit(0 if ready else 1)

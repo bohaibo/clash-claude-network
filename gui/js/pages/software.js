@@ -19,7 +19,7 @@ export function render(ctx, {id = 'check-software-update'} = {}) {
     ui.el('div', {class: 'form-foot'},
       check,
       releaseLink(info)),
-    ui.helpTip('每次打开软件自动检查一次。当前仅提示更新，请从正式发布页下载，退出界面后覆盖程序文件，保留 .local 和 .runtime。', '软件更新说明')));
+    ui.helpTip('每次打开软件自动检查一次。请从正式发布页下载，关闭管理窗口后覆盖程序文件，保留 .local 和 .runtime。', '软件更新说明')));
   return root;
 }
 
@@ -57,7 +57,7 @@ export function updateInstructions() {
   return ui.disclosure({title: '如何更新软件'},
     ui.el('ol', {class: 'check-list'},
       ui.el('li', {text: '从正式发布页下载安装包，并核对发布方提供的 SHA-256。'}),
-      ui.el('li', {text: '等待当前操作结束，点击「退出界面」，再解压并覆盖同一软件目录内的程序文件。'}),
+      ui.el('li', {text: '等待当前操作结束，关闭管理窗口，再解压并覆盖同一软件目录内的程序文件。'}),
       ui.el('li', {text: '保留原目录的 .local 和 .runtime；不要将本机资料复制给其他人。'}),
       ui.el('li', {text: '重新双击「一键网络.cmd」。若提示配置不一致，请在「使用说明 → 当前配置与浏览器详情」核对。'})));
 }

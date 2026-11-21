@@ -26,6 +26,30 @@ class GuiLifecycle(unittest.TestCase):
         self.app.stop()
         self.assertTrue(self.app.stopping)
 
+    def test_last_window_closing_exits_even_if_browser_process_remains(self):
+        self.app.browser_opened = True
+        with patch('gui_server.gui_window.running_pids', return_value=[123]), \
+             patch('gui_server.gui_window.visible_window_count', side_effect=[1, 0]) as count:
+            self.assertFalse(self.app._stop_if_window_closed())
+            self.assertFalse(self.app.stopping)
+            self.assertTrue(self.app._stop_if_window_closed())
+        count.assert_called_with([123])
+        self.assertTrue(self.app.stopping)
+
+    def test_last_window_closing_waits_for_active_settings_then_exits(self):
+        self.app.browser_opened = True
+        with patch('gui_server.gui_window.browser_window_count', return_value=0):
+            with self.app.settings_operation():
+                self.assertFalse(self.app._stop_if_window_closed())
+                self.assertFalse(self.app.stopping)
+            self.assertTrue(self.app._stop_if_window_closed())
+
+    def test_missing_window_evidence_does_not_stop_server(self):
+        self.app.browser_opened = True
+        with patch('gui_server.gui_window.browser_window_count', side_effect=OSError('offline fixture')):
+            self.assertFalse(self.app._stop_if_window_closed())
+        self.assertFalse(self.app.stopping)
+
     def test_shutdown_reservation_rejects_new_mutations(self):
         self.app._shutdown_requested = True
         with self.assertRaises(gui_server.ApiError):

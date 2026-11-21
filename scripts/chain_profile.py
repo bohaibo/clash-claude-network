@@ -22,10 +22,17 @@ def profile_file(root, name):
 
 
 def source_node(root, profiles, uid, filename, node):
+    return exact_node(subscription(root, profiles, uid, filename), node)
+
+
+def subscription(root, profiles, uid, filename):
     entry = next((i for i in profiles['items'] if i.get('uid') == uid), None)
     require(entry is not None and entry.get('type') == 'remote' and entry.get('file') == filename,
             'Chain source subscription changed; review required')
-    value = loads(profile_file(root, filename).read_text(encoding='utf-8-sig'))
+    return loads(profile_file(root, filename).read_text(encoding='utf-8-sig'))
+
+
+def exact_node(value, node):
     matches = [p for p in value.get('proxies', []) if p.get('name') == node]
     require(len(matches) == 1, 'Exact chain source node missing or duplicated')
     require(not matches[0].get('dialer-proxy'), 'Nested source chains require explicit review')
@@ -33,14 +40,20 @@ def source_node(root, profiles, uid, filename, node):
 
 
 def front_dns(root, profiles, record):
-    node = source_node(root, profiles, record['front_uid'], record['front_file'], record['front_node'])
-    server = node.get('server', '')
-    try:
-        ipaddress.ip_address(server)
+    source = subscription(root, profiles, record['front_uid'], record['front_file'])
+    return node_dns(source, [exact_node(source, record['front_node'])])
+
+
+def node_dns(source, nodes):
+    servers = set()
+    for node in nodes:
+        server = node.get('server', '')
+        try:
+            ipaddress.ip_address(server)
+        except ValueError:
+            servers.add(server)
+    if not servers:
         return {}
-    except ValueError:
-        pass
-    source = loads(profile_file(root, record['front_file']).read_bytes())
     resolvers = (source.get('dns') or {}).get('proxy-server-nameserver') or []
     require(isinstance(resolvers, list), 'Unsupported chain source node DNS; review required')
     values = []
@@ -48,12 +61,12 @@ def front_dns(root, profiles, record):
         require(isinstance(resolver, str) and resolver.startswith(('https://', 'tls://')),
                 'Unsupported chain source node DNS; review required')
         address, _, fragment = resolver.partition('#')
-        # Resolve only the entry node through its source subscription's resolver.
+        # Resolve only entry endpoints through their source subscription's resolver.
         # Remove source-only proxy references and retain DNS transport options.
         flags = [p for p in fragment.split('&') if '=' in p and
                  p.split('=', 1)[0] not in ('disable-qtype-64', 'disable-qtype-65')]
         values.append(address + '#DIRECT&' + '&'.join(flags + ['disable-qtype-64=true', 'disable-qtype-65=true']))
-    return {server: values} if values else {}
+    return {server: values for server in sorted(servers)} if values else {}
 
 
 def render(base, record, root, profiles):

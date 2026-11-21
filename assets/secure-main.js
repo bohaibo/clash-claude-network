@@ -4,11 +4,18 @@ function secureMain(config,data,node,group) {
   if (data.chainPin) {
     const exit = (config.proxies || []).find(p => p.name === data.chainPin.node);
     const frontName = data.chainPin.front;
+    const frontGroup = data.chainPin.frontGroup;
     if (frontName) {
-      const front = config.proxies.find(p => p.name === frontName);
-      if (config.proxies.length !== 2 || !exit || !front ||
-          exit['dialer-proxy'] !== frontName || front['dialer-proxy'])
+      const members = frontGroup ? frontGroup.proxies : [frontName];
+      const front = config.proxies.filter(p => p !== exit);
+      if (!exit || exit['dialer-proxy'] !== frontName || front.length !== members.length ||
+          new Set(front.map(p => p.name)).size !== members.length ||
+          front.some(p => !members.includes(p.name) || p['dialer-proxy']))
         throw new Error('Chain direction changed: refuse configuration');
+      if (frontGroup) {
+        config['proxy-groups'] = (config['proxy-groups'] || []).filter(g => g.name !== frontName);
+        config['proxy-groups'].push(frontGroup);
+      }
     } else if (config.proxies.length !== 1 || !exit || 'dialer-proxy' in exit) {
       throw new Error('Single static exit changed: refuse configuration');
     }
