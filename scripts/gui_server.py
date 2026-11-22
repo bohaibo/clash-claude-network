@@ -536,6 +536,7 @@ class App:
             'chain_traffic_updated': bool(last.get('chain_traffic_updated')),
             'recovery_only': bool(last.get('recovery_only')),
             'recovery_required': bool(last.get('recovery_required')),
+            'mobile_gist_sync': last.get('mobile_gist_sync') if isinstance(last.get('mobile_gist_sync'), dict) else {},
             'source': 'Loyalsoldier/clash-rules' if last.get('source') == 'Loyalsoldier/clash-rules' else '',
             'changes': {key: {field: value for field, value in row.items()
                               if field in ('before', 'after', 'added', 'removed') and type(value) is int and value >= 0}
@@ -550,6 +551,10 @@ class App:
             stale = True
         else:
             stale = True
+        try:
+            mobile_gist_auto_sync = mobile_export.gist_auto_sync(self.local)
+        except (OSError, ValueError):
+            mobile_gist_auto_sync = None
         return {
             'settings': settings,
             'task': task,
@@ -558,6 +563,7 @@ class App:
             'mode': settings.get('update', {}).get('mode', 'scheduled'),
             'time': settings.get('update', {}).get('time', '13:00'),
             'days': settings.get('update', {}).get('days', 1),
+            'mobile_gist_auto_sync': mobile_gist_auto_sync,
         }
 
     def verification_summary(self):
@@ -823,6 +829,7 @@ class App:
             'configured': configured,
             'configured_error': configured_error,
             'mobile_gist': self.mobile_gist_status(plan),
+            'mobile_export': self.mobile_export_status(plan),
             'plan': plan_view,
             'baseline': self.baseline_name(),
             'snapshots': self.snapshots(),
@@ -1702,40 +1709,98 @@ class App:
         return target, result['filename']
 
     def export_mobile(self):
-        from config_health import configuration_revision
         with self.settings_operation():
             try:
                 plan = self.plan()
-                revision = configuration_revision(self.local)
+                revisions = mobile_export.mobile_revisions(self.local, plan)
                 result = mobile_export.export(plan, self.local)
-                if not revision or revision != configuration_revision(self.local):
-                    raise mobile_export.ExportError('导出时配置已变化，请重新生成。')
                 identifier = result['android'].split('/')[3]
-                self.mobile_export_revisions = {identifier: (mobile_export.mobile_scope(plan), revision)}
-                return result
+                if not revisions or revisions != mobile_export.mobile_revisions(self.local, plan):
+                    mobile_export.prune_exports(self.local, discard=identifier)
+                    raise mobile_export.ExportError('导出时配置或规则库已变化，请重新生成。')
+                exported = {platform: revisions[platform] for platform in mobile_export.FILES if platform in result}
+                self.mobile_export_revisions = {identifier: (mobile_export.mobile_scope(plan), exported)}
+                try:
+                    mobile_export.prune_exports(self.local, current=identifier)
+                except OSError:
+                    result['cleanup_warning'] = '部分旧导出文件暂时无法清理，可稍后重试。'
+                return {**result, 'id': identifier, 'generated_at': mobile_export.timestamp(),
+                        'source': plan['node']}
             except mobile_export.ExportError as exc:
                 raise ApiError(409, str(exc)) from None
             except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):
                 raise ApiError(409, '无法读取当前 Clash 配置或写入本地导出文件。') from None
 
+    def mobile_export_status(self, plan, platforms=mobile_export.FILES):
+        exports = self.mobile_export_revisions
+        if not exports:
+            return {}
+        identifier, (scope, exported) = next(iter(exports.items()))
+        current = {}
+        if scope == mobile_export.mobile_scope(plan):
+            current = mobile_export.mobile_revisions(self.local, plan, (platform for platform in platforms if platform in exported))
+        return {'id': identifier, 'current': [platform for platform, revision in current.items()
+                                               if revision == exported.get(platform)]}
+
     def mobile_download(self, identifier, platform):
         filename = mobile_export.FILES.get(platform)
         if not JOB_ID_RE.fullmatch(identifier) or filename is None:
             raise ApiError(404, '找不到手机配置文件。')
+        status = self.mobile_export_status(self.plan(), (platform,))
+        if status.get('id') != identifier or platform not in status['current']:
+            raise ApiError(409, '手机配置已过期，请重新生成。')
         folder = self.local.resolve() / 'mobile-exports' / identifier
         target = folder / filename
         if target.resolve() != target or not target.is_file():
             raise ApiError(404, '找不到手机配置文件。')
         return target, filename
 
+    def clean_mobile_exports(self):
+        with self.settings_operation():
+            current = next(iter(self.mobile_export_revisions), None)
+            try:
+                count = mobile_export.prune_exports(self.local, current=current, keep=int(bool(current)))
+            except (OSError, mobile_export.ExportError):
+                raise ApiError(409, '部分旧导出暂时无法清理，请稍后重试。') from None
+            return {'removed': count}
+
     def mobile_gist_status(self, plan):
         try:
-            return mobile_export.gist_binding(self.local, plan)
-        except (OSError, ValueError):
+            return mobile_export.binding_status(self.local, plan, mobile_export.gist_binding(self.local, plan))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
             return {'error': '无法读取本机 Secret Gist 绑定记录。'}
 
+    def manage_mobile_gist(self, payload):
+        action = payload.get('action')
+        destination = payload.get('gist_url')
+        if (action not in ('enable', 'disable', 'unbind') or payload.get('confirm') is not True
+                or not isinstance(destination, str) or not mobile_export.GIST_URL.fullmatch(destination)):
+            raise ApiError(400, '请确认要管理的手机订阅。')
+        with self.settings_operation():
+            plan = self.plan()
+            try:
+                binding = mobile_export.gist_binding(self.local, plan)
+                if destination != binding.get('url'):
+                    raise ApiError(409, '当前绑定已变化，请刷新界面。')
+                if action == 'unbind':
+                    mobile_export.remove_gist_binding(self.local, plan)
+                    return {}
+                binding['auto_sync'] = action == 'enable'
+                mobile_export.save_gist_binding(self.local, plan, binding)
+                return mobile_export.binding_status(self.local, plan, binding)
+            except (OSError, ValueError, TypeError, KeyError):
+                raise ApiError(409, '无法更新本机 Secret Gist 绑定记录。') from None
+
+    def save_mobile_gist_auto_sync(self, payload):
+        enabled = payload.get('enabled')
+        if type(enabled) is not bool:
+            raise ApiError(400, '自动同步设置必须为开启或关闭。')
+        with self.settings_operation():
+            mobile_export.save_gist_auto_sync(self.local, enabled)
+            self.invalidate_background('update')
+        return {'enabled': enabled}
+
     def sync_mobile_gist(self, payload):
-        from config_health import configuration_revision
         identifier = payload.get('id')
         platforms = payload.get('platforms')
         destination = payload.get('gist_url', '')
@@ -1748,22 +1813,24 @@ class App:
             raise ApiError(400, '请先选择已导出的手机配置并确认上传。')
         with self.settings_operation():
             plan = self.plan()
-            revision = configuration_revision(self.local)
-            expected = (mobile_export.mobile_scope(plan), revision)
-            if not all(expected) or self.mobile_export_revisions.get(identifier) != expected:
+            status = self.mobile_export_status(plan, platforms)
+            if status.get('id') != identifier or not set(platforms) <= set(status['current']):
                 raise ApiError(409, '待同步的文件已过期，请按当前配置重新生成。')
+            _, revisions = self.mobile_export_revisions[identifier]
             try:
-                bound = mobile_export.gist_binding(self.local, plan).get('url')
+                previous = mobile_export.gist_binding(self.local, plan)
+                bound = previous.get('url')
                 if bound and bound.casefold() != destination.casefold():
                     raise ApiError(409, '该配置已经绑定 Secret Gist，请刷新界面并同步到原地址。')
                 files = {platform: self.mobile_download(identifier, platform)[0] for platform in platforms}
-                binding = mobile_export.sync_secret_gist(files, bound or destination)
-                mobile_export.save_gist_binding(self.local, plan, binding)
-            except mobile_export.ExportError as exc:
-                raise ApiError(502, str(exc)) from None
+                try:
+                    binding = mobile_export.publish_gist(self.local, plan, files, bound or destination, revisions)
+                except mobile_export.ExportError as exc:
+                    mobile_export.record_sync_failure(self.local, plan, previous, revisions, platforms, str(exc))
+                    raise ApiError(502, str(exc)) from None
             except (OSError, ValueError):
                 raise ApiError(500, '无法读写本机 Secret Gist 绑定记录，请在 GitHub 核对同步结果。') from None
-            return {'gist_url': binding['url'], 'binding': binding}
+            return {'gist_url': binding['url'], 'binding': mobile_export.binding_status(self.local, plan, binding)}
 
     def reveal_local(self, recovery=None):
         target = self.local.resolve()
@@ -2219,6 +2286,17 @@ def make_handler(app):
                     self._json(app.export_mobile())
                 elif parsed.path == '/api/mobile-gist':
                     self._json(app.sync_mobile_gist(payload))
+                elif parsed.path == '/api/find-mobile-gists':
+                    try:
+                        self._json({'gists': mobile_export.find_mobile_gists()})
+                    except mobile_export.ExportError as exc:
+                        raise ApiError(502, str(exc)) from None
+                elif parsed.path == '/api/mobile-export-clean':
+                    self._json(app.clean_mobile_exports())
+                elif parsed.path == '/api/mobile-gist-manage':
+                    self._json(app.manage_mobile_gist(payload))
+                elif parsed.path == '/api/mobile-gist-auto-sync':
+                    self._json(app.save_mobile_gist_auto_sync(payload))
                 elif parsed.path == '/api/open-github-gist':
                     try:
                         os.startfile('https://gist.github.com/')

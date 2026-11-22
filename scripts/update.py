@@ -329,6 +329,9 @@ def main(argv=None):
   # this ordering when an older installation has both recoveries pending.
   with operation_lock(LOCAL,rule_recovery=True,settings_recovery=args.recover_only):
    result={'success':True,'recovery_only':True,'recovered_previous_update':recover_pending()} if args.recover_only else update(migrate_source=args.migrate_source)
+   if result['success'] and not (result.get('skipped') or args.recover_only):
+    from mobile_export import sync_gist_after_rule_update
+    result['mobile_gist_sync']=sync_gist_after_rule_update(LOCAL)
  except Exception as exc:result=failure_result(exc)
  result['time']=datetime.datetime.now().astimezone().isoformat();write(LOCAL/'update-result.json',result)
  print(json.dumps(result,ensure_ascii=False))

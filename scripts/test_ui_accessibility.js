@@ -338,11 +338,13 @@ async function main() {
   dynamic.document.root.append(dynamic.context.setup(configureCtx));
   const mobileCard = dynamic.document.getElementById('mobile-export-card');
   assert.equal(dynamic.document.root.children[0].children.at(-1), mobileCard, 'mobile export is below the configuration form');
-  assert(dynamic.document.getElementById('generate-mobile-files').disabled);
+  assert(dynamic.document.getElementById('download-mobile-android').disabled);
+  assert(dynamic.document.getElementById('download-mobile-ios').disabled);
   configureCtx.state.configured = true;
   configureCtx.state.plan = {};
   dynamic.context.refreshStatus(configureCtx);
-  assert(!dynamic.document.getElementById('generate-mobile-files').disabled, 'newly applied configuration enables export');
+  assert(!dynamic.document.getElementById('download-mobile-android').disabled, 'newly applied configuration enables Android download');
+  assert(!dynamic.document.getElementById('download-mobile-ios').disabled, 'newly applied configuration enables iPhone download');
   const modeSelect=dynamic.document.getElementById('configuration-mode');
   const fields=dynamic.document.root.querySelector('.choice-area');
   const choose=value=>modeSelect.handlers.change({target:{value}});

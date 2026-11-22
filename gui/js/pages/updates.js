@@ -2,6 +2,7 @@ import { icon } from '../icons.js';
 import * as ui from '../ui.js';
 
 let saving = false;
+let savingGistSync = false;
 let revision = 0;
 let currentCtx = null;
 export function hasDraft() { return draft.dirty || saving; }
@@ -33,9 +34,46 @@ export function render(ctx) {
       ui.button('恢复上次更新', {variant: 'secondary', disabled: ctx.busy || Boolean(state.operation?.pending_tun?.length), onClick: () => recoverRules(ctx)})));
   }
   root.append(modeCard(ctx, update));
+  root.append(gistSyncSettings(ctx, update));
   root.append(statusCard(ctx, update));
   root.append(lastResultCard(ctx, update));
   return root;
+}
+
+function gistSyncSettings(ctx, update) {
+  let enabled = update.mobile_gist_auto_sync !== false && update.mobile_gist_auto_sync !== null;
+  const toggle = ui.el('input', {
+    id: 'mobile-gist-auto-sync', type: 'checkbox', checked: enabled, disabled: savingGistSync || operationsBlocked(ctx),
+    onchange: async event => {
+      const input = event.target;
+      const next = input.checked;
+      if (savingGistSync || operationsBlocked(ctx)) {
+        input.checked = enabled;
+        return;
+      }
+      savingGistSync = true;
+      input.disabled = true;
+      try {
+        const result = await ctx.api.post('/api/mobile-gist-auto-sync', {enabled: next});
+        ctx.acceptState('update', {...ctx.state.update, mobile_gist_auto_sync: result.enabled});
+        enabled = result.enabled;
+        input.checked = result.enabled;
+        ui.toast(result.enabled ? '手机订阅自动同步已开启。' : '手机订阅自动同步已关闭。', 'ok');
+      } catch (error) {
+        input.checked = enabled;
+        ui.toast(error.message || '无法保存自动同步设置。', 'bad');
+      } finally {
+        savingGistSync = false;
+        const current = document.getElementById?.('mobile-gist-auto-sync') || input;
+        current.checked = enabled;
+        current.disabled = operationsBlocked(ctx);
+      }
+    },
+  });
+  return ui.card({title: '手机订阅'},
+    ui.el('label', {class: 'check-row'}, toggle, ui.el('span', {text: '允许规则更新后同步已授权的 Secret Gist'})),
+    ui.el('p', {class: 'muted small', text: '此开关控制所有绑定。每个订阅需在「一键配置」单独开启。手动和定时规则更新均使用当前 Windows 用户已登录的 GitHub CLI。'}),
+    update.mobile_gist_auto_sync === null ? ui.note('自动同步设置无法读取，保存开关后可恢复。', 'warn') : null);
 }
 
 function modeCard(ctx, update) {
@@ -143,6 +181,10 @@ function lastResultCard(ctx, update) {
   const tone = last.skipped ? 'warn' : last.success ? 'ok' : 'bad';
   const outcome = last.skipped ? '已跳过' : !last.success ? '未完成' : last.recovery_only ? '已恢复' : last.unchanged ? '已是最新' : last.migrated ? '已切换来源' : '成功';
   const labels = { domains: '国内域名', ips: '国内 IP', privateDomains: '私有域名', lanCidrs: '局域网地址' };
+  const gist = last.mobile_gist_sync || {};
+  const gistLabel = {updated: '已覆盖原 Gist，可刷新手机订阅', unchanged: '已同步当前配置',
+    unbound: '当前配置未绑定 Gist', disabled: '自动同步已关闭', inactive: '绑定的配置当前未启用',
+    partial: '部分配置已同步', failed: '同步未完成'}[gist.status];
   const counts = Object.entries(last.changes || {}).map(([key, row]) => [labels[key] || key,
     `${row.after ?? '—'} 条（新增 ${row.added ?? 0}，移除 ${row.removed ?? 0}）`]);
   return ui.card({ title: '最近一次更新', actions: ui.badge(outcome, tone) },
@@ -151,10 +193,12 @@ function lastResultCard(ctx, update) {
       ['结果', last.skipped ? '未执行（订阅或脚本关联已变化）' : !last.success ? '更新未完成' : last.recovery_only ? '已处理上次更新的恢复记录，未下载新规则' : last.unchanged ? '规则内容未变化，无需重载' : '已发布并核对新配置'],
       ...(last.chain_profile_updated ? [['链式配置', '已同步分流规则']] : []),
       ...(last.chain_traffic_updated ? [['链式流量', '已同步原订阅缓存用量，Clash 客户端可能需重新打开显示']] : []),
+      ...(gistLabel ? [['手机订阅', gist.reason ? gistLabel + '（' + gist.reason + '）' : gistLabel]] : []),
       ...(last.reason || last.error ? [['原因', last.reason || last.error]] : []),
       ...counts,
     ]),
     !last.success && !last.skipped ? ui.note(last.recovery_required ? '恢复尚未完成。请先处理本地恢复记录，当前配置状态需要核对。' : '请检查网络、来源变化或本地错误记录后再重试。', 'warn') : null,
+    ['partial', 'failed'].includes(gist.status) ? ui.note('本机规则已更新或已是最新。下次规则检查将重试手机订阅同步。', 'warn') : null,
     last.skipped ? ui.note('脚本关联已改变，更新主动跳过。请重新配置后再更新。', 'warn') : null);
 }
 

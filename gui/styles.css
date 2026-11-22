@@ -322,6 +322,7 @@ select.input { appearance: none; padding-right: 30px; background-image: linear-g
 .mobile-export-option .btn { max-width: 100%; }
 .mobile-export-option > .btn, .mobile-export-option > .mobile-export-buttons { margin-top: auto; }
 .mobile-export-buttons { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.mobile-import-steps { display: grid; gap: 6px; padding-left: 20px; }
 .mobile-gist-steps { display: grid; gap: 6px; padding-left: 20px; font-size: 12px; color: var(--muted); }
 
 .log-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }

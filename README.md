@@ -41,22 +41,33 @@ Windows 11 + Clash Verge Rev / Mihomo 的本地网络配置工具：国内域名
 
 ### 导出手机分流配置
 
-在「一键配置」页面底部的「导出手机配置」卡片点击「生成手机配置」。导出以 Clash Verge Rev 当前启用的项目配置为准，沿用固定节点和现有分流顺序。配置文件保存在 `.local/mobile-exports/`，可能含节点凭据，请只通过私下渠道传输。
+1. 打开「一键配置 → 导出手机配置」，点「下载安卓配置」或「下载 iPhone 配置」。
+2. 将下载的文件私下传到自己的手机。文件可能含节点凭据，请勿转发给他人。
+3. 在手机应用的「配置」页导入文件。安卓用 Clash Meta，iPhone 用 Shadowrocket。iPhone 导入后，把「全局路由」设为「配置」。
 
-- **Android** 下载 YAML 并导入 Clash Meta for Android 等使用 Mihomo 内核的客户端。保留内嵌的国内与局域网规则、GeoSite / GeoIP 顺序、固定节点及其链路和 Mihomo DNS 设置。手机端内核需要 GeoSite 和 GeoIP 库。
-- **iOS** 下载 CONF 并导入 Shadowrocket，再将全局路由设为「配置」。导出将本机地理库和内嵌列表展开为逐条规则。iOS 文件使用 Shadowrocket 的 DNS 设置，跳过无法可靠转换的 GeoSite 正则。若界面列出节点名称，请先将对应原节点导入 Shadowrocket 并使用界面给出的名称。自动前置代理组仅支持 Android 导出。
+页面会提示需要手动添加的节点。版本信息、导出限制、旧文件清理和 GitHub 订阅都在「进阶设置」。配置变化后，请重新下载并导入。
 
-移动配置按域名和 IP 分流，Windows 进程匹配、防火墙及系统保护由各平台独立处理。手机导入、网络行为、真实 Claude 路由与账号可用性均未验证。
+<details>
+<summary>格式与兼容性</summary>
+
+- **Android** 使用 YAML，沿用当前固定节点、代理链、分流规则和 Mihomo DNS 设置。手机客户端需要 Mihomo 内核及 GeoSite、GeoIP 规则库。
+- **iPhone** 使用 Shadowrocket CONF。自动选择前置节点的代理链仅支持 Android。部分 iPhone 节点需要先手动添加，再改成界面给出的名称。跳过的 GeoSite 正则可能改变部分域名的分流。
+- Windows 的进程规则、防火墙和系统保护由各平台独立处理。手机导入、网络行为、真实 Claude 路由与账号可用性未验证。
+- 项目目录的 `.local/mobile-exports/` 保留最近三批本地导出。相关配置或规则库变化后，对应文件需要重新导出。
+
+</details>
 
 #### 使用 Secret Gist 按 URL 导入
 
-在「导出手机配置」卡片的「订阅链接」栏，点击「同步到 Secret Gist」。Windows 需安装 GitHub CLI、登录 `github.com` 并获得 `gist` 权限。首次同步时，填写已有 Secret Gist 地址可沿用手机里的原订阅链接，留空则创建一个新的。软件按当前的分流规则重新生成文件，确认后覆盖同一 Gist 内的同名文件，再在手机端刷新原订阅即可。请使用软件生成的不含提交哈希的链接。
+在「导出手机配置 → 进阶设置」的「GitHub 订阅」部分，可以「创建 Secret Gist」或「更新 Secret Gist」。Windows 需安装 GitHub CLI、登录 `github.com` 并获得 `gist` 权限。已有旧订阅时，可点击「查找已有 Secret Gist」或粘贴原地址，再确认更新以保存绑定。留空则创建一个新的。软件按当前的分流规则重新生成文件，确认后覆盖同一 Gist 内的同名文件，再在手机端刷新原订阅即可。请使用软件生成的不含提交哈希的链接。
 
-手动操作时，生成手机配置后展开「手动创建 Secret Gist」。复制所需配置内容，点击「打开 GitHub Gist」在 Windows 默认浏览器继续。按原文件名添加 `android-clash-meta.yaml` 或 `ios-shadowrocket.conf`，再选择 **Create secret gist**。两个文件可以放在同一个 Gist 内。
+手动操作时，展开「进阶设置 → 手动创建 Secret Gist」，点击「生成配置文件」并复制所需配置内容。点击「打开 GitHub Gist」在 Windows 默认浏览器继续。按原文件名添加 `android-clash-meta.yaml` 或 `ios-shadowrocket.conf`，再选择 **Create secret gist**。两个文件可以放在同一个 Gist 内。
 
 将 Gist 页面地址或 Raw 地址粘贴回界面，选择已上传的文件，点击「生成订阅链接」。在对应平台的结果中复制链接。Android 从 URL 导入 YAML，Shadowrocket 在「配置」页导入 CONF。更新时编辑同一个 Gist 内的同名文件，再在手机端刷新。
 
-Secret Gist 的链接可匿名访问，请妥善保管。每个配置的绑定保存在本机 `.local/mobile-gists.json`，CLI 上传仅在界面明确确认后执行。Windows 定时规则更新完成后，在页面点一次「同步到 Secret Gist」即可推送最新配置。手动创建时，由用户在 GitHub 页面上传。
+Secret Gist 的链接可匿名访问，请妥善保管。每个配置的绑定保存在本机 `.local/mobile-gists.json`。首次创建或绑定时需在界面确认。
+
+每个 Gist 绑定的自动同步默认关闭。首次上传后，可在「一键配置」单独确认开启。「规则更新 → 手机订阅」提供总开关，用于暂停所有绑定的自动同步。手动或定时规则更新成功后，已开启的当前绑定可继续使用原链接。同步使用当前 Windows 用户已登录的 GitHub CLI。Android 和 iOS 分别显示同步状态和上次成功时间，远端同步失败时保留 Windows 的更新，下次规则检查会重试。解除绑定只更新本机记录，远端文件仍可访问。
 
 各操作页保留主要状态和按钮，补充说明通过圆形问号悬停或键盘聚焦查看。一键配置的完整变更对照位于节点选择下方，默认折叠；使用说明按主题展开，包含规则更新校验、恢复边界、当前配置和浏览器详情。快照页仅在设置保存中断时显示恢复入口；日志页默认收起已通过的验收明细，错误和待恢复事项直接提示。
 

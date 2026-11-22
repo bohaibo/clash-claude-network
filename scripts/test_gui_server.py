@@ -273,13 +273,22 @@ class GuiServer(unittest.TestCase):
         self.assertIn('IP-CIDR,203.0.113.0/24,DIRECT,no-resolve', conf)
         self.assertEqual(conf[-2:], ['PROTOCOL,UDP,REJECT', 'FINAL,' + GROUP])
 
+        self.assertTrue(exported['generated_at'])
+        self.assertEqual(exported['source'], 'Pinned')
+        geosite = index_path.parent / 'geosite.dat'
+        geosite.write_bytes(geosite.read_bytes() + b'fixture')
+        self.assertEqual(self.request('GET', exported['ios'], {'Cookie': cookie})[0], 409)
+        self.assertEqual(self.request('GET', exported['android'], {'Cookie': cookie})[0], 200)
+        geosite.write_bytes(geosite.read_bytes()[:-7])
+
         front['type'] = 'unsupported-fixture'
         config_path.write_text(dumps(config), encoding='utf-8')
         status, _, raw = self.request('POST', '/api/mobile-export', headers, '{}')
         self.assertEqual(status, 200)
         manual = json.loads(raw)
-        self.assertEqual(manual['ios_manual'], [{'name': 'Front', 'alias': alias + '-1'},
-                                               {'name': 'Pinned', 'alias': alias + '-2'}])
+        self.assertEqual(manual['ios_manual'][0]['alias'], alias + '-1')
+        self.assertIn('协议', manual['ios_manual'][0]['reason'])
+        self.assertEqual(manual['ios_manual'][1], {'name': 'Pinned', 'alias': alias + '-2'})
         self.assertNotIn(b'[Proxy]', self.request('GET', manual['ios'], {'Cookie': cookie})[2])
 
         exit_node['dialer-proxy'] = 'Automatic'
@@ -295,6 +304,14 @@ class GuiServer(unittest.TestCase):
         android = loads(self.request('GET', exported['android'], {'Cookie': cookie})[2])
         self.assertEqual(android['proxy-groups'][0], automatic)
         self.assertEqual(android['proxies'][-1]['dialer-proxy'], 'Automatic')
+
+        unmanaged = self.local / 'mobile-exports' / ('0' * 32)
+        unmanaged.mkdir()
+        (unmanaged / 'user.txt').write_text('offline fixture', encoding='utf-8')
+        status, _, raw = self.request('POST', '/api/mobile-export-clean', headers, '{}')
+        self.assertEqual((status, json.loads(raw)), (200, {'removed': 2}))
+        self.assertTrue((unmanaged / 'user.txt').is_file())
+        self.assertEqual(self.request('GET', exported['android'], {'Cookie': cookie})[0], 200)
 
         index['current'] = 'different-profile'
         index_path.write_text(dumps(index), encoding='utf-8')
@@ -316,10 +333,44 @@ class GuiServer(unittest.TestCase):
             open_url.side_effect = OSError('offline fixture')
             self.assertEqual(self.request('POST', endpoint, headers, '{}')[0], 500)
 
+    def test_mobile_gist_auto_sync_setting_defaults_on_and_saves_separately(self):
+        endpoint = '/api/mobile-gist-auto-sync'
+        cookie = self.session_cookie()
+        headers = {'Cookie': cookie, **self.token_headers()}
+        self.assertTrue(gui_server.mobile_export.gist_auto_sync(self.local))
+        self.assertEqual(self.request('POST', endpoint, {'Cookie': cookie}, '{"enabled":false}')[0], 403)
+        self.assertEqual(self.request('POST', endpoint, headers, '{"enabled":"false"}')[0], 400)
+        status, _, raw = self.request('POST', endpoint, headers, '{"enabled":false}')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw), {'enabled': False})
+        self.assertFalse(gui_server.mobile_export.gist_auto_sync(self.local))
+        self.assertFalse((self.local / 'ui-settings.json').exists())
+
+    def test_find_mobile_gists_reads_only_secret_mobile_gist_metadata(self):
+        endpoint = '/api/find-mobile-gists'
+        cookie = self.session_cookie()
+        headers = {'Cookie': cookie, **self.token_headers()}
+        matching = {'id': 'a' * 32, 'owner': {'login': 'fixture-user'}, 'public': False,
+                    'files': {'android-clash-meta.yaml': {'content': 'offline fixture'}},
+                    'updated_at': '2026-01-01T00:00:00Z'}
+        public = dict(matching, id='b' * 32, public=True)
+        unrelated = dict(matching, id='c' * 32, files={'notes.txt': {}})
+        with patch.object(gui_server.mobile_export, '_gist_api') as api:
+            api.return_value.return_value = [[public], [matching, unrelated]]
+            self.assertEqual(self.request('POST', endpoint, {'Cookie': cookie}, '{}')[0], 403)
+            api.assert_not_called()
+            status, _, raw = self.request('POST', endpoint, headers, '{}')
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(raw), {'gists': [{
+                'url': 'https://gist.github.com/fixture-user/' + 'a' * 32,
+                'platforms': ['android'], 'updated_at': '2026-01-01T00:00:00Z',
+            }]})
+            api.return_value.assert_called_once_with('GET', 'gists?per_page=100', paginate=True)
+            self.assertFalse((self.local / 'mobile-gists.json').exists())
+
     def test_mobile_gist_binds_then_patches_only_named_files_with_mock_cli(self):
         from subprocess import CompletedProcess
-        from config_health import configuration_revision
-        from mobile_export import FILES
+        from mobile_export import FILES, mobile_revisions
 
         endpoint = '/api/mobile-gist'
         identifier = 'a' * 32
@@ -327,7 +378,7 @@ class GuiServer(unittest.TestCase):
         client.write(self.local / 'plan.json', plan)
         client.write(self.local / 'profiles.yaml', {'current': 'synthetic'})
         client.write(self.local / 'clash-verge.yaml', {'rules': ['synthetic']})
-        self.app.mobile_export_revisions[identifier] = (gui_server.mobile_export.mobile_scope(plan), configuration_revision(self.local))
+        self.app.mobile_export_revisions[identifier] = (gui_server.mobile_export.mobile_scope(plan), mobile_revisions(self.local, plan))
         folder = self.local / 'mobile-exports' / identifier
         folder.mkdir(parents=True)
         for name in FILES.values():
@@ -354,6 +405,8 @@ class GuiServer(unittest.TestCase):
             status, _, raw = self.request('POST', endpoint, headers, json.dumps(payload))
             self.assertEqual(status, 200)
             self.assertEqual(json.loads(raw)['gist_url'], gist_url)
+            self.assertFalse(json.loads(raw)['binding']['auto_sync'])
+            self.assertEqual(json.loads(raw)['binding']['statuses']['android']['status'], 'current')
             self.assertEqual(gui_server.mobile_export.gist_binding(self.local, plan)['url'], gist_url)
             self.assertEqual(self.request('POST', endpoint, headers, json.dumps(payload))[0], 409)
             self.assertEqual(execute.call_count, 1)
@@ -367,11 +420,23 @@ class GuiServer(unittest.TestCase):
             status, _, raw = self.request('POST', endpoint, headers, json.dumps(dict(payload, gist_url=gist_url)))
             self.assertEqual(status, 200)
             self.assertEqual(json.loads(raw)['gist_url'], gist_url)
+            self.assertFalse(json.loads(raw)['binding']['auto_sync'])
+            self.assertEqual(json.loads(raw)['binding']['statuses']['android']['status'], 'current')
             self.assertEqual(execute.call_args.args[0][5:7], ['PATCH', 'gists/' + gist_id])
             self.assertEqual(json.loads(execute.call_args.kwargs['input']),
                              {'files': {FILES['android']: {'content': 'fresh fixture'}}})
             client.write(self.local / 'clash-verge.yaml', {'rules': ['updated-during-confirmation']})
             self.assertEqual(self.request('POST', endpoint, headers, json.dumps(dict(payload, gist_url=gist_url)))[0], 409)
+            self.assertEqual(execute.call_count, 4)
+            for action in ('enable', 'disable', 'unbind'):
+                status, _, raw = self.request('POST', '/api/mobile-gist-manage', headers,
+                                              json.dumps({'action': action, 'gist_url': gist_url, 'confirm': True}))
+                self.assertEqual(status, 200)
+                if action == 'unbind':
+                    self.assertEqual(json.loads(raw), {})
+                else:
+                    self.assertIs(json.loads(raw)['auto_sync'], action == 'enable')
+                    self.assertEqual(json.loads(raw)['statuses']['android']['status'], 'stale')
             self.assertEqual(execute.call_count, 4)
 
     def test_sync_old_gist_preserves_shadowrocket_alias_and_rejects_public_target(self):

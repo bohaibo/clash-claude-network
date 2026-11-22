@@ -6,20 +6,25 @@ const source = fs.readFileSync('gui/js/pages/network.js', 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/export function /g, 'function ');
 const clipboard = [];
 const requests = [];
+const downloads = [];
 let confirmUpload = false;
 const ui = {
   card: (props, ...children) => ({ props, children, dataset: {} }),
   disclosure: (props, ...children) => ({ props, children }),
-  el: (tag, props, ...children) => ({ tag, props, children, replaceChildren(...values) { this.children = values; } }),
+  el: (tag, props, ...children) => ({
+    tag, props, children, replaceChildren(...values) { this.children = values; },
+    click() { downloads.push([props.href, props.download]); }, remove() {},
+  }),
   note: (text) => ({ text }), helpTip: () => null,
   button: (label, options) => ({ label, ...options }),
-  input: (value) => ({ value }), field: (label, input) => ({ field: label, children: [input] }),
-  select: (options, value) => ({options, value}),
+  input: (value, props) => ({ value, props }), field: (label, input) => ({ field: label, children: [input] }),
+  select: (options, value, onChange) => ({options, value, onChange}),
+  formatTime: value => value,
   confirmDialog: async () => confirmUpload,
   toast: () => {},
 };
 const context = vm.createContext({ ui, URL,
-  document: {getElementById: () => null},
+  document: {getElementById: () => null, body: {append() {}}},
   navigator: {clipboard: {writeText: async text => clipboard.push(text)}},
   fetch: async (href, options) => {
     requests.push({href, mode: options.mode});
@@ -68,10 +73,18 @@ async function testSecretGist() {
   const iosHref = '/api/mobile-exports/' + id + '/ios';
   const posts = [];
   let expectedGist = '';
+  const existing = {url: page, platforms: ['android'], updated_at: '2026-01-01T00:00:00Z'};
+  let lookupGists = [existing];
   const auto = {state: {configured: true}, busy: false, acceptState: (key, value) => { auto.state[key] = value; },
     api: {post: async (path, payload) => {
     posts.push(path);
-    if (path === '/api/mobile-export') return {android: href, ios: iosHref, omitted_geo_regex: 1};
+    if (path === '/api/mobile-export') return {id, android: href, ios: iosHref, omitted_geo_regex: 1};
+    if (path === '/api/find-mobile-gists') return {gists: lookupGists};
+    if (path === '/api/mobile-gist-manage') {
+      assert.equal(payload.gist_url, page);
+      assert.equal(payload.confirm, true);
+      return payload.action === 'unbind' ? {} : {...auto.state.mobile_gist, auto_sync: payload.action === 'enable'};
+    }
     if (path === '/api/mobile-gist') {
       assert.equal(payload.id, id);
       assert.deepEqual([...payload.platforms], ['android', 'ios']);
@@ -80,8 +93,39 @@ async function testSecretGist() {
       return {gist_url: page, binding: {url: page, platforms: ['android', 'ios']}};
     }
   }}};
-  const createLabel = '同步到 Secret Gist';
+  const createLabel = '创建 Secret Gist';
+  const updateLabel = '更新 Secret Gist';
   const controls = () => flatten(context.mobileExportCard(auto));
+  const advancedTitle = '进阶设置（订阅、故障详情和清理）';
+  const initialCard = context.mobileExportCard(auto);
+  const advanced = initialCard.children.find(node => node?.props?.title === advancedTitle);
+  assert.ok(advanced && !advanced.props.open);
+  assert.ok(flatten(advanced).some(node => node.label === createLabel));
+  assert.ok(flatten(advanced).some(node => node.label === '清理旧导出'));
+  assert.ok(initialCard.children.every(node => node === advanced || !flatten(node).some(item => item.label === createLabel)));
+
+  await controls().find(node => node.label === '下载安卓配置').onClick();
+  assert.deepEqual(posts, ['/api/mobile-export']);
+  assert.deepEqual(downloads, [[href, 'android-clash-meta.yaml']]);
+  const androidCard = context.mobileExportCard(auto);
+  const beginner = flatten(androidCard.children.filter(node => node?.props?.title !== advancedTitle));
+  assert.ok(beginner.some(node => node.props?.text?.includes('Clash Meta')));
+  assert.ok(!beginner.some(node => node.props?.text?.includes('Shadowrocket')));
+  assert.ok(beginner.some(node => node.props?.text === '下载没开始？点这里' && node.props.href === href));
+
+  await controls().find(node => node.label === '下载 iPhone 配置').onClick();
+  assert.deepEqual(downloads.at(-1), [iosHref, 'ios-shadowrocket.conf']);
+  assert.deepEqual(posts, ['/api/mobile-export', '/api/mobile-export']);
+
+  auto.state.mobile_export = {};
+  const exportPost = auto.api.post;
+  auto.api.post = async (path, ...args) => path === '/api/mobile-export'
+    ? {id, android: href, ios_error: '离线限制'} : exportPost(path, ...args);
+  await controls().find(node => node.label === '下载 iPhone 配置').onClick();
+  assert.equal(downloads.length, 2);
+  assert.ok(controls().some(node => node.text === '当前配置无法导出到 iPhone。原因见「进阶设置」。'));
+  auto.api.post = exportPost;
+
   for (const confirmed of [false, true]) {
     vm.runInContext('mobileExport = null; gistLinks = {};', context);
     posts.length = 0;
@@ -102,14 +146,31 @@ async function testSecretGist() {
   }
   posts.length = 0;
   expectedGist = page;
-  await controls().find(node => node.label === createLabel).onClick();
+  await controls().find(node => node.label === updateLabel).onClick();
   assert.deepEqual(posts, ['/api/mobile-export', '/api/mobile-gist']);
   assert.ok(controls().some(node => node.text?.includes('已覆盖原 Gist')));
   delete auto.state.mobile_gist;
   const unbound = controls();
   const previousGist = unbound.find(node => node.field === '已有 Secret Gist（可选）').children[0];
+  const gistButton = unbound.find(node => node.label === createLabel);
+  const findButton = unbound.find(node => node.label === '查找已有 Secret Gist');
+  lookupGists = [existing, {...existing, url: 'https://gist.github.com/fixture-user/' + 'c'.repeat(32)}];
+  posts.length = 0;
+  await findButton.onClick();
+  assert.equal(previousGist.value, '');
+  const choices = flatten(unbound).find(node => node.field === '选择要沿用链接的 Gist').children[0];
+  assert.equal(choices.options.length, 3);
+  lookupGists = [existing];
+  posts.length = 0;
+  await findButton.onClick();
+  assert.deepEqual(posts, ['/api/find-mobile-gists']);
+  assert.equal(previousGist.value, page);
+  assert.equal(gistButton.textContent, updateLabel);
+  assert.equal(auto.state.mobile_gist, undefined);
   previousGist.value = rawBase + 'b'.repeat(40) + '/android-clash-meta.yaml';
-  await unbound.find(node => node.label === createLabel).onClick();
+  previousGist.props.oninput({target: previousGist});
+  assert.equal(gistButton.textContent, updateLabel);
+  await gistButton.onClick();
   assert.equal(auto.state.mobile_gist.url, page);
   const androidUrl = rawBase + 'android-clash-meta.yaml';
   assert.equal(controls().find(node => node.field === 'Android 订阅链接').children[0].value, androidUrl);
@@ -128,12 +189,12 @@ async function testSecretGist() {
   makeLinks.onClick();
   assert.ok(flatten(manual).some(node => node.text?.startsWith('请粘贴')));
   const help = controls().find(node => node.props?.title === '手动创建 Secret Gist');
-  assert.ok(!flatten(help).some(node => node.label === createLabel));
+  assert.ok(!flatten(help).some(node => [createLabel, updateLabel].includes(node.label)));
   input.value = page;
   manual.find(node => node.field === 'Gist 中上传的文件').children[0].value = 'ios';
   makeLinks.onClick();
-  assert.ok(!controls().some(node => node.field === 'Android 订阅链接'));
-  assert.equal(controls().find(node => node.field === 'iOS 订阅链接').children[0].value,
+  assert.ok(controls().some(node => node.field === 'Android 订阅链接'));
+  assert.equal(controls().find(node => node.field === '手动生成的 iOS 链接').children[0].value,
     rawBase + 'ios-shadowrocket.conf');
 
   const subscriptionPost = auto.api.post;
@@ -141,18 +202,40 @@ async function testSecretGist() {
     if (path === '/api/mobile-gist') throw new Error('模拟 Gist 上传失败');
     return subscriptionPost(path, payload);
   };
-  await controls().find(node => node.label === createLabel).onClick();
+  await controls().find(node => node.label === updateLabel).onClick();
   assert.ok(controls().some(node => node.text === '模拟 Gist 上传失败'));
   assert.ok(controls().some(node => node.props?.text === '下载 Android YAML'));
   assert.ok(controls().some(node => node.field === 'iOS 订阅链接'));
   auto.api.post = subscriptionPost;
 
+  auto.state.mobile_export = {id, current: ['android']};
+  assert.ok(controls().some(node => node.text === '本地文件已过期，请重新生成。'));
+  assert.ok(controls().some(node => node.props?.text === '下载 Android YAML'));
+  assert.ok(!controls().some(node => node.props?.text === '下载 iOS CONF'));
+  assert.ok(controls().some(node => node.field === 'iOS 订阅链接'));
+  vm.runInContext('mobileExport = null;', context);
+  assert.ok(controls().some(node => node.field === 'Android 订阅链接'));
+
   vm.runInContext('mobileExport = {android: "/api/mobile-exports/' + id + '/android", ios_error: "离线 iOS 限制"}; gistLinks = {};', context);
   assert.ok(controls().some(node => node.text === '离线 iOS 限制'));
   assert.ok(!controls().some(node => node.props?.text === '下载 iOS CONF'));
+  posts.length = 0;
+  confirmUpload = false;
+  await controls().find(node => node.label === '开启自动同步').onClick();
+  assert.deepEqual(posts, []);
+  confirmUpload = true;
+  await controls().find(node => node.label === '开启自动同步').onClick();
+  assert.equal(auto.state.mobile_gist.auto_sync, true);
+  await controls().find(node => node.label === '关闭自动同步').onClick();
+  assert.equal(auto.state.mobile_gist.auto_sync, false);
+  const bound = auto.state.mobile_gist;
+  await controls().find(node => node.label === '解除绑定').onClick();
+  assert.equal(auto.state.mobile_gist.url, undefined);
+  assert.deepEqual(posts, Array(3).fill('/api/mobile-gist-manage'));
+  auto.state.mobile_gist = bound;
   auto.state.configured = false;
   const blocked = controls();
-  assert.ok(blocked.find(node => node.label === createLabel).disabled);
+  assert.ok(blocked.find(node => node.label === updateLabel).disabled);
   assert.ok(blocked.some(node => node.text === '完成一键配置后可以导出。'));
 }
 

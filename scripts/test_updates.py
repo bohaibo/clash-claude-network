@@ -2,7 +2,7 @@
 import copy,contextlib,io,json,os,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
-import client,update,gui_server
+import client,update,gui_server,mobile_export
 
 class RuleSources(unittest.TestCase):
  def encoded(self,items):return client.yaml.safe_dump({'payload':items}).encode()
@@ -63,6 +63,84 @@ class Updates(unittest.TestCase):
  def test_no_change_does_not_reload_or_build(self):
   result=update.update();self.assertTrue(result['unchanged']);self.api.assert_not_called();self.build.assert_not_called()
 
+ def test_auto_gist_sync_requires_binding_consent_and_skips_inactive_profiles(self):
+  self.assertTrue(mobile_export.gist_auto_sync(self.local))
+  with patch.object(mobile_export,'export') as export,patch.object(mobile_export,'sync_secret_gist') as push:
+   self.assertEqual(mobile_export.sync_gist_after_rule_update(self.local)['status'],'unbound')
+   mobile_export.save_gist_binding(self.local,self.plan,{'url':'https://gist.github.com/fixture/'+'a'*32,'platforms':['android']})
+   self.assertEqual(mobile_export.sync_gist_after_rule_update(self.local)['status'],'disabled')
+   binding=mobile_export.gist_binding(self.local,self.plan)
+   mobile_export.save_gist_binding(self.local,self.plan,dict(binding,auto_sync=True))
+   mobile_export.save_gist_auto_sync(self.local,False)
+   self.assertEqual(mobile_export.sync_gist_after_rule_update(self.local)['status'],'disabled')
+   mobile_export.save_gist_auto_sync(self.local,True)
+   client.write(self.root/'profiles.yaml',dict(self.profiles,current='different-fixture'))
+   self.assertEqual(mobile_export.sync_gist_after_rule_update(self.local)['status'],'inactive')
+   export.assert_not_called();push.assert_not_called()
+
+ def test_rule_update_commits_before_gist_sync_and_retries_on_no_rule_change(self):
+  self.mutate_domains()
+  self.build.side_effect=lambda *args:(self.wrapper(dict(self.data,**args[-1])),json.dumps(self.config),{},None)
+  url='https://gist.github.com/fixture/'+'a'*32
+  binding={'url':url,'platforms':['android']}
+  mobile_export.save_gist_binding(self.local,self.plan,dict(binding,auto_sync=True))
+  identifier='f'*32
+  export_url='/api/mobile-exports/'+identifier+'/android'
+  results=[]
+  def push(files,target):
+   self.assertEqual(target,url)
+   self.assertEqual(set(files),{'android'})
+   self.assertFalse((self.local/'rule-update-pending.json').exists())
+   self.assertIn('+.example.cn',self.script.read_text(encoding='utf-8'))
+   if not results:
+    results.append('offline failure')
+    raise mobile_export.ExportError('fixture sync failed')
+   results.append('offline success')
+   return binding.copy()
+  with (patch.object(mobile_export,'export',return_value={'android':export_url}),
+        patch.object(mobile_export,'sync_secret_gist',side_effect=push) as mocked,
+        patch.dict(os.environ),contextlib.redirect_stdout(io.StringIO())):
+   for status in ('failed','updated','unchanged'):
+    exit_code=update.main([])
+    report=client.load(self.local/'update-result.json')
+    self.assertEqual(exit_code,0,(self.local/'update-error.log').read_text(encoding='utf-8') if exit_code else '')
+    self.assertTrue(report['success'],report)
+    self.assertEqual(report['mobile_gist_sync']['status'],status)
+    platform=mobile_export.binding_status(self.local,self.plan,mobile_export.gist_binding(self.local,self.plan))['statuses']['android']
+    self.assertEqual(platform['status'],'failed' if status=='failed' else 'current')
+    self.assertEqual(bool(platform['last_success']),status!='failed')
+    self.assertFalse(list((self.local/'mobile-exports').iterdir()))
+   self.assertEqual(mocked.call_count,2)
+
+ def test_mobile_gist_sync_retries_only_ios_after_partial_update(self):
+  url='https://gist.github.com/fixture/'+'a'*32
+  binding={'url':url,'platforms':['android','ios']}
+  mobile_export.save_gist_binding(self.local,self.plan,dict(binding,auto_sync=True))
+  exports='/api/mobile-exports/'+'f'*32
+  geosite=self.root/'geosite.dat'
+  geosite.write_bytes(b'first offline rules')
+
+  with (patch.object(mobile_export,'export',side_effect=[
+          {'android':exports+'/android','ios_error':'offline conversion failure'},
+          {'ios':exports+'/ios'}, {'ios':exports+'/ios'}]) as generate,
+        patch.object(mobile_export,'sync_secret_gist',return_value=binding) as upload):
+   self.assertEqual(mobile_export.sync_gist_after_rule_update(self.local)['status'],'partial')
+   state=mobile_export.binding_status(self.local,self.plan,mobile_export.gist_binding(self.local,self.plan))
+   self.assertEqual(state['statuses']['android']['status'],'current')
+   self.assertEqual(state['statuses']['ios']['status'],'failed')
+   self.assertEqual(mobile_export.sync_gist_after_rule_update(self.local)['status'],'updated')
+   self.assertEqual(list(upload.call_args.args[0]),['ios'])
+
+   geosite.write_bytes(b'changed offline rules')
+   state=mobile_export.binding_status(self.local,self.plan,mobile_export.gist_binding(self.local,self.plan))
+   self.assertEqual(state['statuses']['android']['status'],'current')
+   self.assertEqual(state['statuses']['ios']['status'],'stale')
+   self.assertTrue(state['statuses']['ios']['last_success'])
+   self.assertEqual(mobile_export.sync_gist_after_rule_update(self.local)['status'],'updated')
+   self.assertEqual(generate.call_args.kwargs['platforms'],['ios'])
+   self.assertEqual(list(upload.call_args.args[0]),['ios'])
+   self.assertFalse(list((self.local/'mobile-exports').iterdir()))
+
  def test_changed_or_deleted_source_during_build_stops_before_reload(self):
   self.mutate_domains();source=self.root/'profiles/source.yaml';original_build=self.build.side_effect
   for remove in (False,True):
@@ -116,6 +194,7 @@ class Updates(unittest.TestCase):
   with patch.dict(os.environ),contextlib.redirect_stdout(io.StringIO()):self.assertEqual(update.main(['--recover-only']),0)
   self.assertEqual(self.snapshot_files(),before);self.download.assert_not_called();self.build.assert_not_called()
   result=client.load(self.local/'update-result.json');self.assertTrue(result['recovery_only'])
+  self.assertNotIn('mobile_gist_sync',result)
   self.assertFalse((self.local/'rule-update-pending.json').exists())
   app=gui_server.App(local=self.local,open_browser=False,idle_exit=False)
   with patch.object(app,'task_status',return_value={'installed':False}):summary=app.update_summary()
