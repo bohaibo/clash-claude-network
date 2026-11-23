@@ -79,6 +79,19 @@ class SnapshotStore(unittest.TestCase):
                 store.delete_snapshot(self.local, 'old')
         self.assertTrue((self.old / 'client' / 'original.yaml').exists())
 
+    def test_reconfigure_active_id_protects_job_snapshot_and_fails_closed(self):
+        run_id = 'a' * 32
+        run_dir = self.local / 'reconfigure-runs' / run_id
+        run_dir.mkdir(parents=True)
+        self.write('reconfigure-active.json', {'id': run_id})
+        # Missing job.json fails closed.
+        with self.assertRaises(ValueError):
+            store.delete_snapshot(self.local, 'old')
+        (run_dir / 'job.json').write_text(json.dumps({'snapshot': str(self.old)}), encoding='utf-8')
+        with self.assertRaises(ValueError):
+            store.delete_snapshot(self.local, 'old')
+        (self.local / 'reconfigure-active.json').unlink()
+
     def test_root_and_target_links_refused(self):
         original = store.linked
         for name in ('snapshots', 'old'):

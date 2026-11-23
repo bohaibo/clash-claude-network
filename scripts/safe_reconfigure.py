@@ -2,7 +2,7 @@
 import argparse,ctypes,json,os,subprocess,sys,time,uuid
 from pathlib import Path
 import baseline,client
-from operation_lock import check_pending_settings,check_pending_rules
+from operation_lock import check_pending_settings,check_pending_rules,check_pending_firewall
 
 def save(folder,name,value):client.write(folder/name,value)
 
@@ -28,9 +28,11 @@ def stop_worker(folder):
  record=folder/'worker.json'
  if not record.exists():return
  worker=json.loads(record.read_text(encoding='utf-8'))
- if process_birth(worker['pid'])!=worker['birth']:return
+ birth=worker.get('birth')
+ if birth is None:return
+ if process_birth(worker['pid'])!=birth:return
  result=subprocess.run(['taskkill.exe','/PID',str(worker['pid']),'/T','/F'],capture_output=True,timeout=15)
- if result.returncode and process_birth(worker['pid'])==worker['birth']:
+ if result.returncode and process_birth(worker['pid'])==birth:
   raise RuntimeError('Cannot stop owned worker; recovery must not race system writes')
 
 def load_job(folder):
@@ -80,15 +82,15 @@ def network_ready():
   except (OSError,subprocess.TimeoutExpired):pass
  return False
 
-def restart_current_runtime(job):
+def restart_current_runtime(job, allow_non_rule=False):
  # Reload only today's native generated file, never a snapshot's node YAML.
  result=subprocess.run(['powershell.exe','-NoProfile','-Command',
                         'Start-Service clash_verge_service -ErrorAction Stop'],capture_output=True,timeout=30)
  if result.returncode:raise RuntimeError('Core restart failed')
  root=client.root_path(job['root'])
  config=client.load(root/'clash-verge.yaml')
- if config.get('mode')!='rule':raise ValueError('Current runtime is not in rule mode')
- if any(g.get('name')==client.GROUP for g in config.get('proxy-groups',[])):
+ if not allow_non_rule and config.get('mode')!='rule':raise ValueError('Current runtime is not in rule mode')
+ if any(g.get('name')==client.GROUP for g in (config.get('proxy-groups') or [])):
   item=client.select(root,job['node'],job['subscription_uid'])
   client.validate(config,client.load(client.safe_file(root,'profiles/'+item['file'])),job['node'])
  deadline=time.monotonic()+35
@@ -100,12 +102,15 @@ def restart_current_runtime(job):
    if time.monotonic()>=deadline:raise RuntimeError('Current runtime recovery failed') from None
    time.sleep(1)
 
-def bounded_restart(folder,job):
+def bounded_restart(folder,job,allow_non_rule=False):
  # Named-pipe I/O can block even when its caller has a Python deadline. Keep
  # it in an owned process whose entire tree the guardian can actually stop.
  with (folder/'runtime-recovery.log').open('ab') as output:
-  child=subprocess.Popen([sys.executable,__file__,'--restart',str(folder)],stdout=output,stderr=subprocess.STDOUT)
-  save(folder,'worker.json',{'pid':child.pid,'birth':process_birth(child.pid),'action':'runtime-recovery'})
+  args=[sys.executable,__file__,'--restart',str(folder)]
+  if allow_non_rule:args.append('--allow-non-rule')
+  child=subprocess.Popen(args,stdout=output,stderr=subprocess.STDOUT)
+  birth=process_birth(child.pid)
+  if birth is not None:save(folder,'worker.json',{'pid':child.pid,'birth':birth,'action':'runtime-recovery'})
   try:code=child.wait(timeout=80)
   except subprocess.TimeoutExpired:
    stop_worker(folder);child.wait(timeout=15)
@@ -120,11 +125,12 @@ def recover(folder,job):
   # Reuse the normal, subscription-preserving restore. A second independent
   # timeout bounds this recovery worker as well.
   child=subprocess.Popen(command(job,'restore'),stdout=output,stderr=subprocess.STDOUT,env=env)
-  save(folder,'worker.json',{'pid':child.pid,'birth':process_birth(child.pid),'action':'recovery'})
+  birth=process_birth(child.pid)
+  if birth is not None:save(folder,'worker.json',{'pid':child.pid,'birth':birth,'action':'recovery'})
   try:restored=child.wait(timeout=300)==0
   except subprocess.TimeoutExpired:
    birth=process_birth(child.pid)
-   if birth:
+   if birth is not None:
     save(folder,'worker.json',{'pid':child.pid,'birth':birth,'action':'recovery'})
     stop_worker(folder);child.wait(timeout=15)
   # A cosmetic/client error must not prevent emergency firewall/service repair.
@@ -132,12 +138,13 @@ def recover(folder,job):
    emergency=subprocess.Popen(['powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',
                                str(client.PROJECT/'scripts/emergency_network.ps1'),'-Python',sys.executable],
                               env=env,stdout=output,stderr=subprocess.STDOUT)
-   save(folder,'worker.json',{'pid':emergency.pid,'birth':process_birth(emergency.pid),'action':'emergency'})
+   birth=process_birth(emergency.pid)
+   if birth is not None:save(folder,'worker.json',{'pid':emergency.pid,'birth':birth,'action':'emergency'})
    try:code=emergency.wait(timeout=120)
    except subprocess.TimeoutExpired:
     stop_worker(folder);emergency.wait(timeout=15);raise RuntimeError('Emergency firewall restore timed out') from None
    if code:raise RuntimeError('Emergency firewall restore failed')
- bounded_restart(folder,job)
+ bounded_restart(folder,job,allow_non_rule=restored)
  return {'network_ready':network_ready(),'full_restore':restored}
 
 def guard(folder):
@@ -179,6 +186,7 @@ def validate_apply_result(report,job,previous_id):
  return report['configuration_id']
 
 def reconfigure():
+ check_pending_firewall(client.LOCAL)
  check_pending_rules(client.LOCAL)
  check_pending_settings(client.LOCAL)
  if os.name!='nt' or not ctypes.windll.shell32.IsUserAnAdmin():raise RuntimeError('Administrator required')
@@ -234,9 +242,9 @@ def reconfigure():
   return 1
 
 if __name__=='__main__':
- parser=argparse.ArgumentParser();parser.add_argument('--guard');parser.add_argument('--worker');parser.add_argument('--restart');parser.add_argument('--action',choices=('restore','apply'));args=parser.parse_args()
+ parser=argparse.ArgumentParser();parser.add_argument('--guard');parser.add_argument('--worker');parser.add_argument('--restart');parser.add_argument('--allow-non-rule',action='store_true');parser.add_argument('--action',choices=('restore','apply'));args=parser.parse_args()
  try:
-  code=guard(args.guard) if args.guard else worker(args.worker,args.action) if args.worker else restart_current_runtime(load_job(args.restart)[1]) if args.restart else reconfigure()
+  code=guard(args.guard) if args.guard else worker(args.worker,args.action) if args.worker else restart_current_runtime(load_job(args.restart)[1],allow_non_rule=args.allow_non_rule) if args.restart else reconfigure()
  except Exception as exc:
   import traceback
   (client.LOCAL/'reconfigure-error.log').write_text(traceback.format_exc(),encoding='utf-8')

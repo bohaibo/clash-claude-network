@@ -78,12 +78,27 @@ if($Python){
 }
 $python=$Python
 if($python -like '*\Microsoft\WindowsApps\*'){throw '检测到的是 Windows 应用商店的 Python 占位程序。请运行「一键网络.cmd」使用项目内 Python 3.13。'}
+function Invoke-NativeQuiet([scriptblock]$Block) {
+ $old=$ErrorActionPreference
+ $ErrorActionPreference='Continue'
+ try{return (& $Block)}finally{$ErrorActionPreference=$old}
+}
+function Quote-CmdArg([string]$value) {
+ '"' + ($value -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"'
+}
+function Escape-Ps5Arg([string]$value) {
+ if($value -match '\s'){$value=$value -replace '(\\+)$','$1$1'}
+ $value -replace '(\\*)"','$1$1\"'
+}
+$script:lockRejected=$false
 if($require313){
- & $python -c 'import sys,importlib.util;sys.exit(10 if sys.version_info[:2]!=(3,13) else 11 if importlib.util.find_spec(''yaml'') is None else 0)' 2> (Join-Path $local 'dependency-error.log')
+ $depErr=Join-Path $local 'dependency-error.log'
+ $null=Invoke-NativeQuiet {& $python -c 'import sys,importlib.util;sys.exit(10 if sys.version_info[:2]!=(3,13) else 11 if importlib.util.find_spec(''yaml'') is None else 0)' 2> $depErr}
  if($LASTEXITCODE -eq 10){throw '项目内 Python 不是 3.13。请重新运行「一键网络.cmd」修复 .runtime。'}
  if($LASTEXITCODE -eq 11){throw '项目内 Python 缺少 PyYAML。请重新运行「一键网络.cmd」修复依赖。'}
 } else {
- & $python -c 'import sys,importlib.util;sys.exit(10 if sys.version_info < (3,10) else 11 if importlib.util.find_spec(''yaml'') is None else 0)' 2> (Join-Path $local 'dependency-error.log')
+ $depErr=Join-Path $local 'dependency-error.log'
+ $null=Invoke-NativeQuiet {& $python -c 'import sys,importlib.util;sys.exit(10 if sys.version_info < (3,10) else 11 if importlib.util.find_spec(''yaml'') is None else 0)' 2> $depErr}
  if($LASTEXITCODE -eq 10){throw 'Python 版本太旧。需要项目内 Python 3.13，请运行「一键网络.cmd」。'}
  if($LASTEXITCODE -eq 11){throw '当前 Python 缺少 PyYAML。请重新运行「一键网络.cmd」修复依赖。'}
 }
@@ -178,7 +193,7 @@ function Stop-ClashClient {
   # 固定原进程句柄，等待该进程的退出信号；PID 查询仍返回对象不代表进程存活。
   # 保留句柄直到等待结束，也避免把复用的 PID 当成原进程。
   foreach($process in $stopping){$null=$process.Handle}
-  $stopping | Stop-Process -Force
+  $stopping | Stop-Process -Force -ErrorAction SilentlyContinue
   foreach($process in $stopping){
    if(!$process.WaitForExit(15000)){throw 'Clash 旧进程尚未退出，未继续写入；请检查客户端后重试。'}
   }
@@ -260,14 +275,15 @@ if($Action -eq 'restore' -and !$Snapshot){
 
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),'-Action',$Action,'-Region',$Region)
-  if($Node){$arguments+=@('-Node',('"'+$Node+'"'))};if($Subscription){$arguments+=@('-Subscription',('"'+$Subscription+'"'))}
-  if($ChainSpecPath){$arguments+=@('-ChainSpecPath',('"'+$ChainSpecPath+'"'))}
-  if($Snapshot){$arguments+=@('-Snapshot',('"'+$Snapshot+'"'))}
+  $arguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Quote-CmdArg $PSCommandPath),'-Action',$Action,'-Region',$Region)
+  if($Node){$arguments+=@('-Node',(Quote-CmdArg $Node))};if($Subscription){$arguments+=@('-Subscription',(Quote-CmdArg $Subscription))}
+  if($ChainSpecPath){$arguments+=@('-ChainSpecPath',(Quote-CmdArg $ChainSpecPath))}
+  if($Snapshot){$arguments+=@('-Snapshot',(Quote-CmdArg $Snapshot))}
   if($RecoveryId){$arguments+=@('-RecoveryId',$RecoveryId)}
   if($Acknowledged){$arguments+='-Acknowledged'};if($NoPause){$arguments+='-NoPause'}
-  if($Python){$arguments+=@('-Python',('"'+$Python+'"'))}
+  if($Python){$arguments+=@('-Python',(Quote-CmdArg $Python))}
   $elevationProgram='powershell.exe'
+  $elevationStyle='Normal'
   if($eventsPath){
    # UAC opens a separate process, so its output must be captured on that side.
    $taskArguments=@('-Action',$Action,'-Region',$Region,'-Python',$python,'-EventsFile',$eventsPath)
@@ -280,13 +296,14 @@ if(!([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principa
    $payload=[ordered]@{events=$eventsPath;arguments=$taskArguments} | ConvertTo-Json -Compress
    $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
    $elevationProgram=$python
-   $arguments=@(('"'+(Join-Path $PSScriptRoot 'gui_job_console.py')+'"'),$encoded)
+   $elevationStyle='Hidden'
+   $arguments=@((Quote-CmdArg (Join-Path $PSScriptRoot 'gui_job_console.py')),$encoded)
   }
   Write-GuiEvent 'elevation' ([ordered]@{message='等待 Windows 管理员授权'})
   Write-Host '即将请求管理员权限；请在 Windows 授权窗口中确认。取消授权不会执行所选操作。' -ForegroundColor Yellow
   # Start-Process -Wait also waits for Clash descendants, which stay open.
   # Wait only for the elevated operation process itself.
-  try{$process=Start-Process -FilePath $elevationProgram -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -PassThru;$null=$process.Handle;$process.WaitForExit()}
+  try{$process=Start-Process -FilePath $elevationProgram -Verb RunAs -ArgumentList $arguments -WindowStyle $elevationStyle -PassThru;$null=$process.Handle;$process.WaitForExit()}
   catch{
    $native=$_.Exception
    while($native.InnerException){$native=$native.InnerException}
@@ -335,7 +352,7 @@ if($Action -eq 'drill-recover'){
 }
 # The same byte-range lock is used by the Python scheduled updater.
 $operationStream=[IO.File]::Open((Join-Path $local 'operation.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite)
-try{$operationStream.Lock(0,1)}catch{$operationStream.Dispose();throw '本项目另一个操作正在执行，请稍后重试。'}
+try{$operationStream.Lock(0,1)}catch{$operationStream.Dispose();$script:lockRejected=$true;throw '本项目另一个操作正在执行，请稍后重试。'}
 try {
 Resolve-PendingFirewall -LocalDir $local -Python $python
 Assert-NoPendingRules -LocalDir $local
@@ -368,7 +385,7 @@ if($Action -eq 'snapshot'){
  Write-Step '另存当前状态，不覆盖首次基线；不修改网络或浏览器设置'
  $snapshotError=Join-Path $local 'snapshot-error.log'
  try{
-  $output=& $python (Join-Path $PSScriptRoot 'client.py') create-snapshot 2> $snapshotError
+  $output=Invoke-NativeQuiet {& $python (Join-Path $PSScriptRoot 'client.py') create-snapshot 2> $snapshotError}
   if($LASTEXITCODE -ne 0){throw 'client.py failed'}
  }catch{throw ('快照采集失败，未做任何改动。详细错误保存在：'+$snapshotError)}
  $created=($output | Select-Object -Last 1) | ConvertFrom-Json
@@ -380,6 +397,7 @@ if($Action -eq 'snapshot'){
  [ordered]@{success=$true;action=$Action;snapshot=$created.snapshot} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
  Write-Done ('快照已保存：'+$created.snapshot)
  Write-Host '可在界面「快照与恢复」中选择此快照；它不会替换已有自动基线。'
+ $operationStream.Dispose()
  if(!$NoPause){Read-Host '按回车键关闭窗口'}
  return
 }
@@ -427,6 +445,7 @@ if($Action -eq 'supplement'){
   $result.error=$_.Exception.Message
   $_ | Format-List * -Force | Out-String | Set-Content -LiteralPath (Join-Path $local 'last-error.log') -Encoding UTF8
   Complete-StepTiming 'failed'
+  Write-GuiEvent 'error' ([ordered]@{message=$result.error})
   Write-Host ('补充配置未完成：'+$result.error) -ForegroundColor Red
   Write-Host '错误保存在 .local/last-error.log；如有未恢复的改动，可在「快照与恢复」中恢复到关联快照。'
  }finally{
@@ -501,7 +520,7 @@ try {
    } else {
     $subs=@()
     try{
-     $discovered=& $python (Join-Path $PSScriptRoot 'client.py') discover 2>$null | Select-Object -Last 1 | ConvertFrom-Json
+     $discovered=(Invoke-NativeQuiet {& $python (Join-Path $PSScriptRoot 'client.py') discover 2>$null}) | Select-Object -Last 1 | ConvertFrom-Json
      $subs=@($discovered.subscriptions)
      if($LASTEXITCODE -ne 0){throw 'discovery failed'}
     }catch{throw '读取当前订阅失败，未关闭 Clash。请检查客户端与订阅文件；详情见 .local/client-error.log。'}
@@ -548,12 +567,12 @@ try {
  else{throw '未找到项目内 Node.js。请重新运行「一键网络.cmd」修复 .runtime；未关闭应用或写入配置。'}
 }
   if($ChainSpecPath){
-   $proxyPreflight=@((Join-Path $PSScriptRoot 'client.py'),'chain-preflight','--chain-spec',$ChainSpecPath,'--node',$Node)
-   if($Subscription){$proxyPreflight+=@('--subscription',$Subscription)}
+   $proxyPreflight=@((Join-Path $PSScriptRoot 'client.py'),'chain-preflight','--chain-spec',$ChainSpecPath,'--node',(Escape-Ps5Arg $Node))
+   if($Subscription){$proxyPreflight+=@('--subscription',(Escape-Ps5Arg $Subscription))}
    & $python @proxyPreflight
    if($LASTEXITCODE -ne 0){throw '代理的节点、名称或静态端点校验失败；未关闭 Clash 或修改系统。'}
   }elseif($matches[0].chain){
-   & $python (Join-Path $PSScriptRoot 'client.py') chain-preflight --node $Node --subscription $Subscription
+   & $python (Join-Path $PSScriptRoot 'client.py') chain-preflight --node (Escape-Ps5Arg $Node) --subscription (Escape-Ps5Arg $Subscription)
    if($LASTEXITCODE -ne 0){throw '已有代理配置的源节点或关联已改变；未关闭 Clash 或修改系统。'}
   }
   Write-Step '先下载并严格校验四份规则；失败时不关闭 Clash 客户端'
@@ -564,8 +583,8 @@ try {
   Write-Step '关闭 Clash Verge，重新读取当前订阅，生成候选配置并用内核自带的检查验证能加载'
   $clientSessionTouched=$true
   Stop-ClashClient
-  $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',$Node,'--region',$Region,'--rules-bundle',$rulesBundle)
-  if($Subscription){$prepareArguments+=@('--subscription',$Subscription)}
+  $prepareArguments=@((Join-Path $PSScriptRoot 'client.py'),'prepare','--node',(Escape-Ps5Arg $Node),'--region',$Region,'--rules-bundle',$rulesBundle)
+  if($Subscription){$prepareArguments+=@('--subscription',(Escape-Ps5Arg $Subscription))}
   if($ChainSpecPath){$prepareArguments+=@('--chain-spec',$ChainSpecPath)}
   $prepared=& $python @prepareArguments;if($LASTEXITCODE -ne 0){throw '候选配置/备份生成失败，未改动任何系统设置。规则下载或内核检查详情见 .local/client-error.log。'}
   $planState=($prepared | Select-Object -Last 1) | ConvertFrom-Json
@@ -600,6 +619,7 @@ try {
    if(Test-Path -LiteralPath (Join-Path $local ($watchToken+'.rollback'))){throw '防火墙看门狗已回滚，本次部署不算成功。'}
    $firewallPlan=Get-Content -LiteralPath (Join-Path $local 'plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
    Assert-StrictFirewall -coreProgram ([string]$firewallPlan.core_program)
+   $global:LASTEXITCODE=0
    & (Join-Path $PSScriptRoot 'system.ps1') -Action recheck-ipv6 -Python $python
    if($LASTEXITCODE -ne 0){throw '内核重启后的 IPv6 绑定复查未通过。'}
    & $python -c 'import sys;sys.path.insert(0,sys.argv[1]);from client import api,root_path,load,LOCAL,GROUP;from config_health import assert_live;p=load(LOCAL/''plan.json'');r=root_path(p[''root'']);assert_live(api(r,''GET'',''/configs''),api(r,''GET'',''/rules''));g=api(r,''GET'',''/proxies'')[''proxies''][GROUP];assert g[''all'']==[p[''node'']] and g[''now'']==p[''node''];__import__(''managed_chain'').assert_live(p,api(r,''GET'',''/proxies'')) if p.get(''chain'') else None' $PSScriptRoot
@@ -616,6 +636,7 @@ try {
    if([string]$uiSettings.update.time -match '^(?:[01]\d|2[0-3]):[0-5]\d$'){$updateTime=[string]$uiSettings.update.time}
    if([string]$uiSettings.update.days -match '^\d+$'){$candidateDays=[int]$uiSettings.update.days;if($candidateDays -ge 1 -and $candidateDays -le 365){$updateDays=$candidateDays}}
   }catch{}
+  $global:LASTEXITCODE=0
   if($updateMode -eq 'manual'){
    & (Join-Path $PSScriptRoot 'update_task.ps1') -Action remove -Python $python
    if($LASTEXITCODE -ne 0){throw '移除规则更新任务失败。'}
@@ -785,10 +806,12 @@ if(!$result.success -or !$auditPassed){exit 1}
  $startupError=$_
  Complete-StepTiming 'failed'
  Write-GuiEvent 'error' ([ordered]@{message=$startupError.Exception.Message})
- if($Action -ne 'drill-recover'){
-  [ordered]@{success=$false;action=$Action;status='failed';error=$startupError.Exception.Message} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
+ if(!$script:lockRejected){
+  if($Action -ne 'drill-recover'){
+   [ordered]@{success=$false;action=$Action;status='failed';error=$startupError.Exception.Message} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $local 'last-run.json') -Encoding UTF8
+  }
+  $_ | Format-List * -Force | Out-String | Set-Content -LiteralPath (Join-Path $local 'last-error.log') -Encoding UTF8
  }
- $_ | Format-List * -Force | Out-String | Set-Content -LiteralPath (Join-Path $local 'last-error.log') -Encoding UTF8
  Write-Host ('操作未完成：'+$_.Exception.Message) -ForegroundColor Red
  Write-Host '详情见 .local/last-error.log。请保留 .local 中的快照和恢复记录；不要删除记录或用当前状态覆盖首次基线。'
  if($Action -eq 'snapshot'){Write-Host '本次快照未保存完整，不能用作已验证恢复点；请排除错误后重新保存。'}

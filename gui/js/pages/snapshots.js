@@ -47,21 +47,21 @@ function baselineCard(ctx) {
   const verified = state.baseline && state.plan?.snapshot === state.baseline;
   return ui.card({
     title: '固定首次恢复点',
-    help: '首次配置前自动保存的原始状态，之后不会覆盖。用于失败恢复或重建环境；保存当前快照会另存一份。',
+    help: '首次配置前自动保存的原始系统状态，不会被覆盖。',
     actions: state.baseline ? ui.badge(verified ? '与配置关联' : '已固定', verified ? 'ok' : 'neutral') : ui.badge('缺失', 'bad'),
   },
   ui.kv([
     ['恢复点', state.baseline || '—'],
     ['配置关联', state.plan?.snapshot || '—'],
   ]),
-  !state.baseline ? ui.note('没有可用的首次恢复点。请完成一次配置，或确认 .local/snapshots 未被删除。不要用当前状态伪造基线。', 'bad') : null);
+  !state.baseline ? ui.note('未找到首次恢复点，请完成一次配置或检查 .local/snapshots 目录。', 'bad') : null);
 }
 
 function listCard(ctx, snapshots) {
   const host = ui.el('div', { class: 'snapshot-library' });
   const card = ui.card({
     title: '全部快照',
-    help: '选择快照后点击恢复所选。首次恢复点和正在使用的快照不可删除。封存不代表完整性已验证，恢复前仍会校验；恢复会中断网络，执行前会再次确认。',
+    help: '选中快照后点击「恢复所选」即可还原；首次恢复点和当前使用的快照不可删除。',
     actions: ui.button('恢复所选', { variant: 'ink', icon: 'clock', disabled: !selected || operationsBlocked(ctx), onClick: () => restoreSelected(ctx) }),
   }, host);
   const restoreButton = card.querySelector('.card-actions .btn');
@@ -136,11 +136,7 @@ async function saveSnapshot(ctx) {
   if (operationsBlocked(ctx) || deleting) return;
   const ok = await ctx.confirm({
     title: '保存当前快照？',
-    description: '会把当前客户端目录、系统设置和防火墙记录另存为一个新的快照。不会修改网络、浏览器或现有快照，也不会覆盖首次基线。',
-    items: [
-      { title: '需要读取系统记录', text: '保存过程会请求管理员权限以导出防火墙和系统状态。' },
-      { title: '不会关闭浏览器', text: '默认浏览器都保持运行。' },
-    ],
+    description: '将当前客户端配置、系统设置和防火墙状态另存为一份新快照，不影响现有快照。',
     confirmText: '保存快照',
   });
   if (!ok) return;
@@ -159,15 +155,11 @@ async function restoreSelected(ctx) {
   const ok = await ctx.confirm({
     title: '恢复到这份快照？',
     subtitle: row.name,
-    description: '会按记录还原防火墙、IPv6、定位、国家/区域格式/时区、自动时区及自动校时、区域语言、代理设置和客户端项目关联；保留当前订阅、节点更新和后来手动选择的其他设置。',
-    items: [
-      { title: '需要管理员权限', text: '恢复会关闭并重新启动 Clash Verge；默认浏览器不会被关闭。' },
-      { title: '可能部分完成', text: '如果文件被占用，界面会报告未完成项目；可以重试恢复。' },
-    ],
-    note: '恢复不会运行网络验收。恢复后本项目注册的规则更新任务会被移除。',
+    description: '将还原防火墙、IPv6、定位、地区/时区、代理设置及客户端配置关联，保留你现有的订阅和节点。',
+    note: '恢复会重启 Clash 并移除定时更新任务，期间网络会短暂断开。',
     confirmText: '确认恢复',
     danger: true,
-    requireCheck: '我已保存工作，并了解恢复会改动系统网络设置。',
+    requireCheck: '我已保存工作，确认恢复此快照。',
   });
   if (!ok) return;
   ctx.startJob({ action: 'restore', snapshot: row.name, confirm: row.name });

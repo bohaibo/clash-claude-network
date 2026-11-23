@@ -2,10 +2,17 @@ import { icon } from '../icons.js';
 import * as ui from '../ui.js';
 
 let saving = false;
+let saveBusy = false;
 let savingGistSync = false;
 let revision = 0;
 let currentCtx = null;
 export function hasDraft() { return draft.dirty || saving; }
+
+function needsTaskSync(ctx) {
+  const update = ctx?.state?.update || {};
+  return Boolean((draft.mode === 'scheduled' && ctx?.state?.configured && update.task?.installed === false) ||
+    (draft.mode === 'manual' && update.task?.installed));
+}
 
 const PRESETS = [[1, '每天'], [3, '每 3 天'], [7, '每周'], [30, '每月'], [180, '每半年']];
 const draft = { mode: '', time: '', days: 1, custom: false, dirty: false };
@@ -78,13 +85,13 @@ function gistSyncSettings(ctx, update) {
 
 function modeCard(ctx, update) {
   const configured = ctx.state.configured;
-  const option = (value, title, iconName) => ui.el('button', {
+  const option = (value, title, description, iconName) => ui.el('button', {
     class: 'mode-card' + (draft.mode === value ? ' selected' : ''),
     type: 'button',
     onclick: () => { draft.mode = value; draft.dirty = true; revision++; rerenderMode(ctx); },
   },
   ui.el('span', { class: 'mode-icon' }, icon(iconName, 20)),
-  ui.el('div', {}, ui.el('strong', { text: title })),
+  ui.el('div', {}, ui.el('strong', { text: title }), ui.el('p', { text: description })),
   ui.el('span', { class: 'mode-check' }, draft.mode === value ? icon('check', 15) : null));
 
   const timeInput = ui.input(draft.time, {
@@ -116,18 +123,20 @@ function modeCard(ctx, update) {
       updateSaveState();
     },
   });
-  const save = ui.button('保存更新方式', { variant: 'ink', disabled: !draft.dirty || operationsBlocked(ctx) || saving, onClick: () => saveSettings(ctx) });
+  const save = ui.button('保存更新方式', { variant: 'ink', disabled: (!draft.dirty && !needsTaskSync(ctx)) || operationsBlocked(ctx) || saveBusy, onClick: () => saveSettings(ctx) });
   save.id = 'save-update-settings';
+  const unsaved = ui.el('span', { id: 'update-unsaved-hint', class: 'unsaved-hint', hidden: !draft.dirty, text: '有未保存的修改' });
   const card = ui.card({ title: '更新方式', help: configured ? '保存后会立即调整 Windows 计划任务。' : '尚未配置网络；此设置会在首次配置时生效。' },
     ui.el('div', { class: 'mode-grid' },
-      option('manual', '手动更新', 'clock'),
-      option('scheduled', '定时更新', 'refresh')),
-    ui.el('div', { class: 'muted small heading-with-help' }, '更新范围', ui.helpTip('仅更新已审核的国内域名、国内 IP、私有域名和局域网规则，不更新内核或节点。手动方式不运行后台任务；定时方式仅在当前用户登录时运行，可设 1–365 天间隔。', '规则更新说明')),
+      option('manual', '手动更新', '需要时手动点击更新，不注册后台任务', 'clock'),
+      option('scheduled', '定时更新', '登录期间按设定间隔自动检查并更新', 'refresh')),
+    ui.el('div', { class: 'muted small heading-with-help' }, '更新范围', ui.helpTip('只更新国内和局域网分流名单，不改内核和节点。定时任务在当前用户登录期间运行。', '规则更新说明')),
     ui.el('div', { class: 'time-row' },
       ui.el('label', { class: 'field time-field' }, ui.el('span', { class: 'field-label', text: '更新时间' }), timeInput),
       ui.field('更新间隔', frequency),
       ui.el('label', { class: 'field days-field' }, ui.el('span', { class: 'field-label', text: '间隔天数' }), daysInput),
-      save),
+      save,
+      unsaved),
     draft.mode === 'scheduled' && configured && update.task?.installed === false
       ? ui.note('当前方式为定时，但尚未检测到计划任务。保存一次即可注册；配置流程也会按此方式注册。', 'warn')
       : null,
@@ -158,7 +167,7 @@ function statusCard(ctx, update) {
   const taskBadge = task.installed === true ? ui.badge('已注册', 'ok') : task.installed === false ? ui.badge('未注册', 'neutral') : ui.badge('无法读取', 'warn');
   return ui.card({
     title: '计划任务',
-    help: '以当前用户权限在登录期间运行，不提升权限，不强制唤醒电脑。恢复网络快照会移除本项目任务，需要时重新保存。',
+    help: '在当前用户登录期间自动运行；恢复快照会移除该任务。',
     actions: taskBadge,
   },
   ui.kv([
@@ -204,11 +213,13 @@ function lastResultCard(ctx, update) {
 
 function updateSaveState() {
   const button = document.getElementById('save-update-settings');
-  if (button) button.disabled = !draft.dirty || saving || operationsBlocked(currentCtx);
+  if (button) button.disabled = (!draft.dirty && !needsTaskSync(currentCtx)) || saveBusy || operationsBlocked(currentCtx);
+  const unsaved = document.getElementById('update-unsaved-hint');
+  if (unsaved) unsaved.hidden = !draft.dirty;
 }
 
 async function saveSettings(ctx) {
-  if (saving || operationsBlocked(ctx)) return;
+  if (saveBusy || operationsBlocked(ctx)) return;
   const validTime = value => typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
   const validDays = value => Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 365;
   const scheduled = draft.mode === 'scheduled';
@@ -221,6 +232,7 @@ async function saveSettings(ctx) {
     return;
   }
   saving = true;
+  saveBusy = true;
   updateSaveState();
   const sentRevision = revision;
   try {
@@ -234,8 +246,9 @@ async function saveSettings(ctx) {
   } catch (error) {
     ui.toast(error.message || '保存更新方式失败。', 'bad');
   } finally {
-    await ctx.refresh(true);
     saving = false;
+    await ctx.refresh(true);
+    saveBusy = false;
     updateSaveState();
   }
 }
@@ -244,11 +257,7 @@ async function updateNow(ctx) {
   if (operationsBlocked(ctx)) return;
   const ok = await ctx.confirm({
     title: '立即更新分流规则？',
-    description: '使用 Loyalsoldier 更新国内/私有规则；旧配置会在本次操作中首次切换来源。后续更新仍受变化阈值保护，不更新内核或节点。',
-    items: [
-      { title: '可能短暂重连', text: '有变化时通过本地控制通道重载；内容未变化时不重载。' },
-      { title: '保留更新前备份', text: '发布失败会尝试恢复；不会访问 Claude 服务进行验证。' },
-    ],
+    description: '更新国内与局域网分流名单（不改动内核和节点）。有变化时会自动重载配置。',
     confirmText: '开始更新',
   });
   if (!ok) return;
@@ -257,7 +266,7 @@ async function updateNow(ctx) {
 
 async function recoverRules(ctx) {
   const ok = await ctx.confirm({title: '恢复上次规则更新？',
-    description: '校验上次更新的备份并恢复受影响文件，必要时重载本机内核。不会下载规则或恢复系统快照，可能短暂重连。',
+    description: '从备份还原上次规则更新前的文件并重载配置。',
     confirmText: '恢复上次更新'});
   if (ok) ctx.startJob({action: 'update-recover', confirm: 'RECOVER-RULES'});
 }

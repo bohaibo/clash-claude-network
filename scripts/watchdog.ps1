@@ -13,7 +13,7 @@ if($WaitForFirewall){
  while($clock.Elapsed.TotalSeconds -lt $window -and !(Test-Path -LiteralPath $armed)){
   if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2
  }
- if($clock.Elapsed.TotalSeconds -lt $window -and (Test-Path -LiteralPath $armed)){$clock=New-GuardClock;$window=$FirewallTimeoutSeconds}
+ if(Test-Path -LiteralPath $armed){$clock=New-GuardClock;$window=$FirewallTimeoutSeconds}
 }
 while($clock.Elapsed.TotalSeconds -lt $window){if(Test-Path -LiteralPath $commit){exit};Start-Sleep -Seconds 2}
 try{

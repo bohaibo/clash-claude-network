@@ -31,6 +31,17 @@ def protection(local):
             if not isinstance(data, dict):
                 raise ValueError('Invalid recovery pointer')
             value = data.get('snapshot')
+            if filename == 'reconfigure-active.json' and not value:
+                run_id = data.get('id')
+                if not isinstance(run_id, str) or not re.fullmatch(r'[a-f0-9]{32}', run_id):
+                    raise ValueError('Invalid reconfigure run reference')
+                job_file = local / 'reconfigure-runs' / run_id / 'job.json'
+                job_data = json.loads(job_file.read_text(encoding='utf-8-sig'))
+                if not isinstance(job_data, dict):
+                    raise ValueError('Invalid reconfigure job record')
+                value = job_data.get('snapshot')
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError('Missing reconfigure snapshot reference')
             if filename == 'plan.json' and (not isinstance(value, str) or not value.strip()):
                 raise ValueError('Missing plan recovery point')
             if value:

@@ -1,7 +1,7 @@
 """Managed proxy profiles for the normal Windows apply/restore lifecycle."""
 import copy, ipaddress, json, re, uuid
 from pathlib import Path
-import chain_profile
+import chain_profile, routing_checks
 from checks import require
 from safe_yaml import loads
 
@@ -193,8 +193,8 @@ def resolve(root, profiles, request, local):
     require(isinstance(request, dict), 'Invalid chain selection')
     name = request.get('name')
     require(isinstance(name, str) and name == name.strip() and 0 < len(name) <= 100 and
-            not any(ord(c) < 32 for c in name) and name not in
-            ('DIRECT', 'REJECT', 'GLOBAL', 'Claude-Overseas-Pinned', FRONT, 'Chain-Exit'),
+            not any(ord(c) < 32 for c in name) and name not in RESERVED_NAMES and name not in
+            ('Claude-Overseas-Pinned', FRONT, 'Chain-Exit'),
             'Invalid chain name')
     record = {'root': str(Path(root).resolve()), 'node': name, 'name': name}
     if 'front_group' in request:
@@ -222,14 +222,15 @@ def resolve(root, profiles, request, local):
     require('source_uid' not in record or anchor(record) != (record['front_uid'], record['front_node']),
             'A chain cannot use the same node twice')
     known = records(root, local)
+    active_uids = {i.get('uid') for i in (profiles.get('items') or [])}
+    active_known = {uid: r for uid, r in known.items() if uid in active_uids}
     identity = selection(record)
-    matches = [r for uid, r in known.items() if selection(r) == identity and
-               r.get('static_exit') == record.get('static_exit') and
-               any(i.get('uid') == uid for i in profiles.get('items') or [])]
+    matches = [r for r in active_known.values() if selection(r) == identity and
+               r.get('static_exit') == record.get('static_exit')]
     if matches:
         require(len(matches) == 1, 'Duplicate managed chain selection')
         return matches[0]
-    require(not any(r.get('node') == name for r in known.values()), 'Chain name already exists; choose another name')
+    require(not any(r.get('node') == name for r in active_known.values()), 'Chain name already exists; choose another name')
     uid = 'ManagedChain' + uuid.uuid4().hex[:12]
     return dict(record, uid=uid, file=uid + '.yaml')
 
@@ -295,16 +296,16 @@ def source(root, profiles, record):
         if parts[0] == 'RULE-SET' and re.search('private|localarea|lancidr|lan$', parts[1], re.I):
             providers[parts[1]] = copy.deepcopy(original.get('rule-providers', {})[parts[1]])
             lan.append(rule)
-        elif parts[0] in ('IP-CIDR', 'IP-CIDR6'):
+        elif parts[0] in ('IP-CIDR', 'IP-CIDR6') and len(parts) in (3, 4) and (len(parts) == 3 or parts[3] == 'no-resolve'):
             net = ipaddress.ip_network(parts[1], strict=False)
-            if (net.is_private or net.is_loopback or net.is_link_local) and (net.version == 6 or not net.overlaps(ipaddress.ip_network('198.18.0.0/15'))):
+            if routing_checks.local_network(net) and (net.version == 6 or not net.overlaps(ipaddress.ip_network('198.18.0.0/15'))):
                 lan.append(rule)
         elif parts[0] in ('DOMAIN', 'DOMAIN-SUFFIX') and (parts[1] in ('localhost', 'lan', 'local', 'internal') or parts[1].endswith(('.lan', '.local', '.internal'))):
             lan.append(rule)
     domestic = ['https://223.5.5.5/dns-query#DIRECT&disable-qtype-64=true&disable-qtype-65=true']
     if 'static_exit' in record:
         lan.append('NETWORK,udp,REJECT')
-    group = chain_profile.GROUP if record.get('direct') else 'Chain-Exit'
+    group = 'Chain-Exit'
     groups = [{'name': group, 'type': 'select', 'proxies': [record['node']]}]
     if front_group:
         groups.append(front_group)

@@ -130,8 +130,8 @@ function Download([string]$url,[string]$target){
 
 function Test-Python313 {
  if(!(Test-Path -LiteralPath $python) -or !(Test-Path -LiteralPath $pythonw)){return $false}
- try{$value=& $python -c 'import sys;print(''%d.%d''%sys.version_info[:2])' 2>$null}catch{return $false}
- return ($value -eq '3.13')
+ $old=$ErrorActionPreference;$ErrorActionPreference='Continue'
+ try{$value=& $python -c 'import sys;print(''%d.%d''%sys.version_info[:2])' 2>$null;return ($LASTEXITCODE -eq 0 -and $value -eq '3.13')}catch{return $false}finally{$ErrorActionPreference=$old}
 }
 
 function Ensure-Python {
@@ -181,11 +181,13 @@ function Ensure-Sitecustomize {
 }
 
 function Test-Yaml {
- try{& $python -c 'import yaml' 2>$null;return ($LASTEXITCODE -eq 0)}catch{return $false}
+ $old=$ErrorActionPreference;$ErrorActionPreference='Continue'
+ try{& $python -c 'import yaml' 2>$null | Out-Null;return ($LASTEXITCODE -eq 0)}catch{return $false}finally{$ErrorActionPreference=$old}
 }
 
 function Test-Pip {
- try{& $python -m pip --version 2>$null | Out-Null;return ($LASTEXITCODE -eq 0)}catch{return $false}
+ $old=$ErrorActionPreference;$ErrorActionPreference='Continue'
+ try{& $python -m pip --version 2>$null | Out-Null;return ($LASTEXITCODE -eq 0)}catch{return $false}finally{$ErrorActionPreference=$old}
 }
 
 function Ensure-Pip {
@@ -211,8 +213,8 @@ function Ensure-Yaml {
 
 function Test-Node {
  if(!(Test-Path -LiteralPath $node)){return $false}
- try{$value=& $node --version 2>$null}catch{return $false}
- return ($value -match '^v\d+\.')
+ $old=$ErrorActionPreference;$ErrorActionPreference='Continue'
+ try{$value=& $node --version 2>$null;return ($LASTEXITCODE -eq 0 -and $value -match '^v\d+\.')}catch{return $false}finally{$ErrorActionPreference=$old}
 }
 
 function Ensure-Node {

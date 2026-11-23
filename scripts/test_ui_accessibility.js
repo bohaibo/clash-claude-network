@@ -389,6 +389,17 @@ async function main() {
     assert.equal(Boolean(rendered.querySelector('.badge-ok')),green);
   }
   assert(recoveryLog.textContent.includes('.local/tun-drills/'+'b'.repeat(32)));
+  // Regression checks: null-state Help page, auto-region on node switch, and task-sync save enablement.
+  networkPage.expose('globalThis.cfgDetails=configurationDetails;');
+  assert.equal(networkPage.context.cfgDetails({state:null,navigate(){}}).length,1,'Help configurationDetails must not crash when state is null');
+  overview.context.fixture.regions={offline:{'Node A':{code:'SG'},'Node B':{code:'JP'}}};
+  picker.form.node='Node A';picker.form.region='SG';picker.form.regionManual=true;
+  picker.renderChoices(ctx);
+  overview.document.root.querySelector('.node-list').children[1].handlers.click();
+  assert.equal(picker.form.region,'JP','switching to a different node re-enables automatic region detection');
+  const desynced={state:{configured:true,operation:{},update:{mode:'scheduled',time:'13:00',days:1,task:{installed:false}}},busy:false};
+  const desyncedPage=updates.context.renderUpdates(desynced);
+  assert(!byText(desyncedPage,'保存更新方式').disabled,'save button must be enabled when scheduled task needs registration');
   console.log('Offline UI checks passed: API evidence, historical results, global recovery, blocked actions, node focus/radio keys and associated labels');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

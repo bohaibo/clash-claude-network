@@ -18,13 +18,15 @@ def resolver(value):
 
 def network(config):
     from client import GROUP
-    group = next((g for g in config.get('proxy-groups', []) if g.get('name') == GROUP), {})
+    group = next((g for g in (config.get('proxy-groups') or []) if isinstance(g, dict) and g.get('name') == GROUP), {})
     nodes = group.get('proxies') or []
     tun = config.get('tun') or {}
     dns = config.get('dns') or {}
     yes = lambda v: '开启' if v is True else '关闭' if v is False else '未显式设置'
     servers = lambda key: '、'.join(resolver(v) for v in (dns.get(key) or [])) or '未设置'
     policies = dns.get('nameserver-policy') or {}
+    nameservers = dns.get('nameserver') or []
+    filtered_dns = bool(nameservers) and all('disable-qtype-64=true' in str(v) and 'disable-qtype-65=true' in str(v) for v in nameservers)
     return {
         'fixed_node': nodes[0] if len(nodes) == 1 and nodes[0] not in ('DIRECT', 'REJECT') else None,
         'routing_simple': {'rule': '按规则分流', 'global': '全部通过代理', 'direct': '全部直接连接'}.get(config.get('mode'), '未能确认'),
@@ -32,10 +34,10 @@ def network(config):
         'dns_protection': '开启' if (dns.get('enable') is True and dns.get('ipv6') is False and dns.get('enhanced-mode') == 'fake-ip' and tun.get('enable') is True and tun.get('strict-route') is True and {'any:53', 'tcp://any:53'}.issubset(set(tun.get('dns-hijack') or []))) else '未完整开启',
         'tun_simple': yes(tun.get('enable')),
         'strict_route_simple': yes(tun.get('strict-route')),
-        'dns_filter_simple': '开启' if dns.get('nameserver') and all('disable-qtype-64=true' in str(v) and 'disable-qtype-65=true' in str(v) for v in dns.get('nameserver', [])) else '未发现开启',
+        'dns_filter_simple': '开启' if filtered_dns else '未发现开启',
         'routing': '模式 ' + str(config.get('mode', '未设置')) + '；规则 ' + str(len(config.get('rules') or [])) + ' 条；代理组 ' + str(len(config.get('proxy-groups') or [])) + ' 个（规则文件，不代表已验证实时流量）',
-        'dns': '启用：' + yes(dns.get('enable')) + '；模式：' + str(dns.get('enhanced-mode', '未设置')) + '；DNS IPv6：' + yes(dns.get('ipv6')) + '；上游：' + servers('nameserver') + '；备用：' + servers('fallback') + '；引导：' + servers('default-nameserver') + '；分域策略 ' + str(len(policies)) + ' 项；Type 64/65 过滤：' + ('上游参数包含过滤' if any('disable-qtype-64=true' in str(v) and 'disable-qtype-65=true' in str(v) for v in dns.get('nameserver', [])) else '未在上游参数中发现完整过滤（未做 DNS 实测）'),
-        'tun': '启用：' + yes(tun.get('enable')) + '；协议栈：' + str(tun.get('stack', '未设置')) + '；自动路由：' + yes(tun.get('auto-route')) + '；严格路由：' + yes(tun.get('strict-route')) + '；DNS 劫持：' + '、'.join(str(v) for v in tun.get('dns-hijack', [])) + '；全局 IPv6：' + yes(config.get('ipv6')),
+        'dns': '启用：' + yes(dns.get('enable')) + '；模式：' + str(dns.get('enhanced-mode', '未设置')) + '；DNS IPv6：' + yes(dns.get('ipv6')) + '；上游：' + servers('nameserver') + '；备用：' + servers('fallback') + '；引导：' + servers('default-nameserver') + '；分域策略 ' + str(len(policies)) + ' 项；Type 64/65 过滤：' + ('上游参数包含过滤' if filtered_dns else '未在上游参数中发现完整过滤（未做 DNS 实测）'),
+        'tun': '启用：' + yes(tun.get('enable')) + '；协议栈：' + str(tun.get('stack', '未设置')) + '；自动路由：' + yes(tun.get('auto-route')) + '；严格路由：' + yes(tun.get('strict-route')) + '；DNS 劫持：' + '、'.join(str(v) for v in (tun.get('dns-hijack') or [])) + '；全局 IPv6：' + yes(config.get('ipv6')),
     }
 
 
@@ -45,7 +47,7 @@ def app_proxy(name, path):
         return '配置文件不存在，未配置代理'
     text = path.read_text(encoding='utf-8-sig')
     if name == 'docker':
-        groups = json.loads(text).get('proxies', {})
+        groups = (json.loads(text) or {}).get('proxies') or {}
         fields = sorted({key for group in groups.values() if isinstance(group, dict) for key in group if key in ('httpProxy', 'httpsProxy', 'noProxy', 'allProxy')})
     else:
         pattern = r'(?im)^\s*(proxy|https-proxy)\s*=' if name == 'npm' else r'(?im)^\s*(proxy)\s*='

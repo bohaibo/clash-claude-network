@@ -63,7 +63,7 @@ def inspect(config, current, plan):
                 raise ValueError('Managed chain marker changed')
             managed_chain.audit(config, source)
             good = True
-        except (OSError, ValueError, AssertionError, KeyError, TypeError):
+        except (OSError, ValueError, AssertionError, KeyError, TypeError, yaml.YAMLError):
             good = False
         add('链式方向与节点 DNS', good, True, '重新配置')
     add('配置生成版本', plan.get('source_digest'), source_digest(), '重新配置')

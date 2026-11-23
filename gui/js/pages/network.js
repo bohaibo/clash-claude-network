@@ -4,13 +4,13 @@ import * as ui from '../ui.js';
 function operationsBlocked(ctx, settingsRecovery = false) { return ctx.busy || Boolean(ctx.state.operation?.pending_rule_update) || Boolean(ctx.state.operation?.pending_tun?.length) || (!settingsRecovery && Boolean(ctx.state.operation?.settings_pending?.length)); }
 
 const FLOW = [
-  ['节点连接与真实局域网', '窄范围例外、真实私有地址、已审核的路由器/本地服务域名保持直连。'],
-  ['拒绝公网 IPv6', '在代理前阻断公网 IPv6，避免绕过 TUN 的路径。'],
-  ['Claude 优先', 'Claude 进程、官方入站 IP、核心与补充域名先于国内规则进入固定节点组。'],
-  ['海外域名优先', 'geolocation-!cn 先于国内白名单进入固定海外节点，对应 DNS 同样走海外出口。'],
-  ['国内域名', '已审核的国内域名名单先转换为规则；不使用未经审核的远程关键词。'],
-  ['国内 IP 与 GEOIP,CN', '国内 IP 段与 GeoIP 规则使用 no-resolve，避免额外 DNS 泄漏。'],
-  ['MATCH 固定海外组', '未知海外流量进入固定节点组，不回落 DIRECT。'],
+  ['局域网与节点直连', '代理服务器、局域网地址及本地路由器域名直接连接。'],
+  ['阻断公网 IPv6', '拦截公网 IPv6 连接，防止绕过代理。'],
+  ['Claude 优先', 'Claude 相关进程、域名与官方 IP 优先走固定节点。'],
+  ['海外域名优先', '海外域名及对应 DNS 查询优先走固定节点。'],
+  ['国内域名', '国内常见域名直连。'],
+  ['国内 IP 直连', '国内 IP 段直接连接（不额外解析域名）。'],
+  ['其余走固定节点', '未匹配的海外流量统一走固定节点，不回落直连。'],
 ];
 
 export function render(ctx) {
@@ -213,6 +213,7 @@ export function mobileExportCard(ctx) {
       finderResults.replaceChildren(ui.el('p', {class: 'muted small', text: '正在读取 GitHub CLI 账号中的 Gist…'}));
       try {
         const result = await ctx.api.post('/api/find-mobile-gists');
+        if (destinationInput.isConnected === false) return;
         const choices = result.gists.filter(({url}) => gistRawBase(url));
         if (!choices.length) {
           finderResults.replaceChildren(ui.note('未找到可识别的手机配置 Gist。知道原地址时，可以直接粘贴。', 'info'));
@@ -230,10 +231,13 @@ export function mobileExportCard(ctx) {
           ], '', selectGist)));
         }
       } catch (error) {
+        if (destinationInput.isConnected === false) return;
         finderResults.replaceChildren(ui.note(error.message || '无法查找已有 Secret Gist。', 'warn'));
       } finally {
-        find.disabled = Boolean(mobileProgress);
-        create.disabled = disabled || Boolean(binding.error || mobileProgress);
+        if (destinationInput.isConnected !== false) {
+          find.disabled = Boolean(mobileProgress);
+          create.disabled = disabled || Boolean(binding.error || mobileProgress);
+        }
       }
     },
   }) : null;
@@ -262,8 +266,9 @@ export function mobileExportCard(ctx) {
       }
     });
   }
+  const manageDisabled = Boolean(mobileProgress || operationsBlocked(ctx));
   const manage = boundUrl ? ui.button(binding.auto_sync ? '关闭自动同步' : '开启自动同步', {
-    variant: 'secondary', disabled, onClick: () => manageBinding(binding.auto_sync ? 'disable' : 'enable'),
+    variant: 'secondary', disabled: manageDisabled, onClick: () => manageBinding(binding.auto_sync ? 'disable' : 'enable'),
   }) : null;
   if (manage) manage.id = 'manage-mobile-gist';
   const cleanup = ui.button('清理旧导出', {variant: 'secondary', disabled: Boolean(mobileProgress || operationsBlocked(ctx)),
@@ -308,7 +313,7 @@ export function mobileExportCard(ctx) {
         finderResults,
         binding.error ? ui.note(binding.error, 'warn') : null,
         ui.el('div', {class: 'mobile-export-buttons'}, create, find, manage,
-          boundUrl ? ui.button('解除绑定', {variant: 'secondary', disabled, onClick: () => manageBinding('unbind')}) : null),
+          boundUrl ? ui.button('解除绑定', {variant: 'secondary', disabled: manageDisabled, onClick: () => manageBinding('unbind')}) : null),
         binding.auto_sync && ctx.state.update?.mobile_gist_auto_sync === false
           ? ui.note('规则更新中的总开关已暂停自动同步。', 'info') : null),
       progress && mobileProgress !== 'export' ? ui.el('p', {class: 'muted small', role: 'status', text: progress}) : null,
@@ -347,7 +352,7 @@ function gistRawBase(address) {
   const [, owner, id, suffix = ''] = match;
   if ((url.hostname === 'gist.github.com' && (suffix === '' || suffix === '/')) ||
       (url.hostname === 'gist.githubusercontent.com' && /^\/raw(?:\/|$)/.test(suffix))) {
-    return 'https://gist.githubusercontent.com/' + owner + '/' + id + '/raw/';
+    return 'https://gist.githubusercontent.com/' + owner + '/' + id.toLowerCase() + '/raw/';
   }
   return null;
 }
@@ -467,7 +472,7 @@ function secretGistGuide(files, api, refresh, bound, generate) {
 
 // Detailed status belongs in the guide, keeping the network page focused on actions.
 export function configurationDetails(ctx) {
-  const state = ctx.state;
+  const state = ctx.state || {};
   if (!state.plan?.exists) return [ui.card({ title: '当前配置详情' },
     ui.empty('尚未配置网络', '完成一次配置后可在这里查看详细状态。',
       ui.button('去一键配置', { variant: 'ink', onClick: () => ctx.navigate('overview') })))];
@@ -487,8 +492,8 @@ export function configurationDetails(ctx) {
     ui.kv((rtc?.browsers || []).filter(row => row.installation).map(row => [row.browser + ' 扩展安装', row.installation.label])),
     ui.kv([['离线备用扩展', rtc?.bundle?.label || '尚未读取'], ['备用目录', rtc?.bundle?.path || '配置时准备']]),
     rtc?.bundle?.path ? ui.button('复制备用目录', { variant: 'secondary', size: 'small', onClick: async () => {
-      try { await navigator.clipboard.writeText(rtc.bundle.path); ui.toast('已复制扩展目录', 'success'); }
-      catch { ui.toast('复制失败，请手动复制上方目录', 'error'); }
+      try { await navigator.clipboard.writeText(rtc.bundle.path); ui.toast('已复制扩展目录', 'ok'); }
+      catch { ui.toast('复制失败，请手动复制上方目录', 'bad'); }
     } }) : null,
     ui.el('p', { class: 'muted small', text: rtc?.installation_help || '一键配置会自动安排 Chrome、Edge 安装官方商店扩展，已有扩展直接复用。' }),
     ui.el('p', { class: 'muted small', text: rtc?.note || '正在读取 WebRTC 配置。' })));
@@ -553,7 +558,7 @@ function verificationCard(ctx) {
       ui.el('span', { class: 'status-dot ' + (stage.success ? 'ok' : stage.status === 'unverified' ? 'warn' : stage.tested ? 'bad' : 'warn') }),
       ui.el('div', {}, ui.el('strong', { text: stage.title }), ui.el('small', { text: stage.success ? '已通过' : stage.status === 'unverified' ? '待检查' : stage.tested ? '未通过' : '未记录' }))))));
   }
-  return ui.card({ title: '上次网络验收', help: '显示最近一次验收记录及其与当前配置的对应关系。浏览器、虚拟网络、Claude 服务和账号行为未验证。', actions: ui.button('查看日志', { variant: 'ghost', size: 'small', icon: 'list', onClick: () => ctx.navigate('logs') }) }, ...body);
+  return ui.card({ title: '上次网络验收', help: '显示最近一次网络验收结果。', actions: ui.button('查看日志', { variant: 'ghost', size: 'small', icon: 'list', onClick: () => ctx.navigate('logs') }) }, ...body);
 }
 
 function actionsCard(ctx) {
@@ -561,18 +566,18 @@ function actionsCard(ctx) {
   const unavailable = !state.configured;
   const collection = state.collection?.preview;
   const recommendation = state.preview?.current?.health?.recommendation;
-  return ui.card({ title: '维护与恢复', help: '这些动作会修改系统设置或短暂中断网络，执行前会再次确认。' },
+  return ui.card({ title: '维护与恢复', help: '按改动范围选择对应操作，执行前会弹窗确认。' },
     recommendation ? ui.note(collection?.stale || collection?.refreshing
-      ? '本地状态正在刷新或已经过期，请刷新后再参考操作建议。'
+      ? '本地状态正在刷新或已过期，请先刷新状态。'
       : recommendation.reason, 'info') : null,
     ui.el('div', { class: 'action-grid' },
-      actionRow('只更新分流名单', '只下载并审核规则变化；内容和生成版本均未变化时不重载，不重新应用系统设置。',
+      actionRow('只更新分流名单', '仅更新国内与局域网分流名单，不动系统设置。',
         ui.button('去规则更新', { variant: 'secondary', disabled: unavailable || ctx.busy, onClick: () => ctx.navigate('updates') })),
-      actionRow('补充配置', '补充防火墙、IPv6、地区和常用浏览器 WebRTC 策略，累积恢复记录。不会关闭浏览器或运行网络测试。',
+      actionRow('补充配置', '补齐防火墙、IPv6、地区及浏览器 WebRTC 设置。',
         ui.button('补充配置', { variant: 'secondary', icon: 'shield', disabled: unavailable || operationsBlocked(ctx), onClick: () => supplement(ctx) })),
-      actionRow('更换节点、地区或重新应用配置', '在一键配置页选择精确节点和地区。沿用首次恢复点，生成并校验新配置；不先执行完整恢复。',
+      actionRow('更换节点或地区', '前往「一键配置」切换节点、出口地区或代理模式。',
         ui.button('去一键配置', { variant: 'secondary', disabled: ctx.busy, onClick: () => ctx.navigate('overview') })),
-      actionRow('恢复最早状态并重新配置', '先恢复固定首次恢复点，再沿用当前精确节点完整配置。需要独立本机看护；失败或超时会尝试恢复网络。',
+      actionRow('恢复最早状态并重新配置', '先还原首次备份，再用当前节点重新完整配置。',
         ui.button('恢复并重新配置', { variant: 'danger', icon: 'alert', disabled: !state.baseline || !state.plan?.node || operationsBlocked(ctx), onClick: () => reconfigure(ctx) })),
     ));
 }
@@ -585,7 +590,7 @@ function actionRow(title, text, action) {
 
 function diagnosticsCard(ctx) {
   return ui.card({ title: '检查与故障演练',
-    subtitle: '检查连通性和防火墙，演练节点故障、关闭 TUN 和内核退出，并在恢复后复测。执行期间公网会短暂中断。',
+    subtitle: '检查连通性与防火墙，并演练节点故障、关闭 TUN 及停核保护。期间会短暂断网。',
     actions: ui.button('完整网络验收', { variant: 'secondary', icon: 'shield',
       disabled: !ctx.state.configured || operationsBlocked(ctx), onClick: () => audit(ctx) }) });
 }
@@ -594,15 +599,13 @@ async function supplement(ctx) {
   if (operationsBlocked(ctx)) return;
   const ok = await ctx.confirm({
     title: '执行补充配置？',
-    subtitle: '不重新选择节点，不关闭浏览器',
-    description: '会扫描当前本地防火墙规则与全部网卡，禁用非项目的出站放行规则、关闭启用的 IPv6 绑定、系统定位、自动时区和自动校时，按所选节点地区设置国家/区域格式/时区，将改动记录到关联快照。入站规则保留。',
+    subtitle: '不换节点，不关闭浏览器',
+    description: '补齐当前系统的防火墙规则、网卡 IPv6、定位、地区/时区与浏览器 WebRTC 策略，并记录到当前快照。',
     items: [
-      { title: '可能影响', text: '新软件、其他 VPN、Docker/WSL、远程控制和依赖 IPv6 的内网资源可能失效；三款标准浏览器的 WebRTC 策略和扩展安装策略也会补充，网页通话可能受影响。' },
-      { title: '验收入口', text: '补充配置完成后，可在「检查与故障演练」手动运行完整网络验收。' },
+      { title: '影响范围', text: '新装软件的其他出站规则或依赖 IPv6 的内网连接可能会受影响。' },
     ],
-    note: '需要已有完整配置记录和可校验的原始快照；缺失时会停止，不会覆盖首次基线。',
     confirmText: '补充配置',
-    requireCheck: '我已了解补充配置会修改防火墙、网卡、定位、国家/时间设置。',
+    requireCheck: '确认执行补充配置。',
   });
   if (!ok) return;
   ctx.startJob({ action: 'supplement', confirm: 'SUPPLEMENT' });
@@ -612,9 +615,7 @@ async function audit(ctx) {
   if (!ctx.state.configured || operationsBlocked(ctx)) return;
   const ok = await ctx.confirm({
     title: '开始完整网络验收？',
-    description: '将请求管理员权限，检查国内连通性、海外出口、DNS、IPv6 与防火墙，并演练节点故障、关闭 TUN 和内核退出。恢复后将再次核对网络与防火墙。公网连接会短暂中断，整个过程可能需要数分钟。',
-    items: [{title: '独立恢复看护', text: '每个故障阶段由本机看护负责恢复；恢复失败可在「日志与验证」重试。'},
-      {title: '检查未完成', text: '补齐管理员权限或修复失败项目后重新检查。'}],
+    description: '将检查国内直连、海外出口、DNS、IPv6 与防火墙，并演练断网保护。全程需数分钟，期间网络会短暂断开。',
     confirmText: '开始验收',
   });
   if (ok) ctx.startJob({action: 'audit', confirm: 'AUDIT'});
@@ -625,17 +626,12 @@ async function reconfigure(ctx) {
   const state = ctx.state;
   const ok = await ctx.confirm({
     title: '恢复最早状态并重新配置？',
-    subtitle: '这是一个高风险恢复动作',
-    description: '将先恢复固定首次恢复点，再沿用配置记录中的精确节点、订阅和出口地区完整配置。独立本机看护会在失败、超时或主控退出时尝试恢复网络。',
-    items: [
-      { title: '会中断网络', text: '恢复和配置期间公网会短暂中断；正在下载、会议或远程控制可能断开。' },
-      { title: '不会关闭浏览器', text: '默认浏览器都不会被关闭，但网页可能因网络中断失去连接。' },
-      { title: '记录位置', text: '.local/reconfigure-runs 保存阶段、日志与恢复结果。' },
-    ],
-    note: '必须已有配置记录、可校验的首次恢复点和独立看护就绪；不满足时会在改动系统前停止。',
+    subtitle: '先还原首次备份，再重新配置',
+    description: '将先恢复首次保存的原始系统状态，再按当前节点与地区重新完整配置，期间网络会短暂断开。',
+    note: '请先保存进行中的网络工作。',
     confirmText: '确认恢复并重新配置',
     danger: true,
-    requireCheck: '我已保存工作，并了解网络会短暂中断且恢复不一定成功。',
+    requireCheck: '我已保存工作，确认恢复并重新配置。',
   });
   if (!ok) return;
   ctx.startJob({ action: 'reconfigure', confirm: 'RECONFIGURE' });

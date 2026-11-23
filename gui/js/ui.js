@@ -264,14 +264,29 @@ export function toast(message, type = 'info', timeout = 4200) {
     host = el('div', { id: 'toasts', class: 'toasts', 'aria-live': 'polite' });
     document.body.append(host);
   }
-  const node = el('div', { class: 'toast toast-' + type },
-    icon(type === 'ok' ? 'check' : type === 'bad' ? 'alert' : type === 'warn' ? 'alert' : 'info', 18),
-    el('span', { text: message }));
-  host.append(node);
-  setTimeout(() => {
+  let timer = null;
+  let dismissed = false;
+  const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
+    clearTimeout(timer);
     node.classList.add('leaving');
     setTimeout(() => node.remove(), 220);
-  }, timeout);
+  };
+  const arm = (ms = timeout) => {
+    clearTimeout(timer);
+    if (!dismissed && ms > 0) timer = setTimeout(dismiss, ms);
+  };
+  const node = el('div', {
+    class: 'toast toast-' + type,
+    onmouseenter: () => clearTimeout(timer),
+    onmouseleave: () => arm(1800),
+  },
+  icon(type === 'ok' ? 'check' : type === 'bad' ? 'alert' : type === 'warn' ? 'alert' : 'info', 18),
+  el('span', { text: message }),
+  el('button', { class: 'toast-close', type: 'button', 'aria-label': '关闭提示', onclick: dismiss }, icon('close', 13)));
+  host.append(node);
+  arm();
 }
 
 export function copyText(text, label = '已复制') {

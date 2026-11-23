@@ -153,7 +153,8 @@ class ManagedChain(unittest.TestCase):
         self.exit['rules'].insert(0,'IP-CIDR6,fe80::/10,DIRECT,no-resolve');self.put('profiles/exit.yaml',self.exit)
         _,_,normal,_=client.build(self.root,self.index['items'][0],'Exit',copy.deepcopy(self.data))
         self.prepare();chain=client.load(self.local/'candidate.yaml')
-        self.assertEqual(chain['rules'],normal['rules'])
+        self.assertNotIn('IP-CIDR,192.0.2.10/32,DIRECT,no-resolve',chain['rules'])
+        self.assertEqual(chain['rules'],[r for r in normal['rules'] if r!='IP-CIDR,192.0.2.10/32,DIRECT,no-resolve'])
         self.assertEqual(chain['tun'],normal['tun'])
         self.assertEqual(chain['dns']['nameserver-policy'],normal['dns']['nameserver-policy'])
         self.assertEqual(chain['dns']['nameserver'],normal['dns']['nameserver'])
@@ -495,6 +496,54 @@ class ManagedChain(unittest.TestCase):
         self.assertEqual(chain_source.read_bytes(),chain_bytes)
         self.assertEqual(client.load(self.root/'profiles.yaml')['current'],'exit')
         self.assertEqual((Path(normal_plan['snapshot'])/'manifest.json').read_bytes(),baseline)
+
+    def test_single_static_restore_and_mobile_export_work_without_desktop_leaks(self):
+        import mobile_export
+        request=self.direct_request('socks5')
+        with patch.object(client,'api',return_value={}):
+            client.prepare(self.root,request['name'],None,'US',chain_spec=request)
+            client.apply_client()
+        plan=client.load(self.local/'plan.json')
+        source=client.load(self.root/'profiles'/plan['chain']['file'])
+        self.assertNotIn(client.GROUP,[g.get('name') for g in source.get('proxy-groups',[])])
+        # Restoring baseline when single static is active must treat regenerated raw profile as ready.
+        self.put('verge.yaml',{'enable_tun_mode':False})
+        self.put('clash-verge.yaml',source)
+        report={'active_uid':plan['subscription_uid'],'project_node':None,'previous_runtime_sha256':'0'*64}
+        self.assertIsNotNone(client.restored_runtime_ready(self.root,report))
+        # Static IP mobile export must strip UDP-guarded Windows PROCESS-NAME rules and succeed for iOS.
+        runtime=client.load(self.local/'candidate.yaml')
+        profile=mobile_export.pinned_profile(runtime,plan['node'])
+        self.assertFalse(any('PROCESS-NAME' in rule for rule in profile['rules']))
+        with patch.object(mobile_export,'geo_entries',side_effect=lambda path,code: [{1:2,2:b'example.com'}] if path.name=='geosite.dat' else [{1:b'\x01\x00\x01\x00',2:24}]):
+            conf,_,_=mobile_export.shadowrocket(profile,self.root,'a'*32)
+        self.assertIn('PROTOCOL,UDP,REJECT',conf)
+
+    def test_reserved_chain_names_and_rfc5737_lan_rules(self):
+        index=client.load(self.root/'profiles.yaml')
+        for bad_name in ('REJECT-DROP','PASS','COMPATIBLE'):
+            req=dict(self.direct_request(),name=bad_name)
+            with self.subTest(name=bad_name),self.assertRaises(AssertionError):
+                managed_chain.resolve(self.root,index,req,self.local)
+        self.exit['rules'].insert(0,'IP-CIDR,192.0.2.0/24,DIRECT,no-resolve')
+        self.put('profiles/exit.yaml',self.exit)
+        _,_,candidate,_=client.build(self.root,self.index['items'][0],'Exit',copy.deepcopy(self.data))
+        self.assertNotIn('IP-CIDR,192.0.2.0/24,DIRECT,no-resolve',candidate['rules'])
+
+    def test_deleted_clash_chain_profile_does_not_block_reusing_name(self):
+        first=self.apply()
+        old_uid=first['subscription_uid']
+        # Simulate user deleting the chain profile from Clash Verge while managed-chains.json still has it.
+        index=client.load(self.root/'profiles.yaml')
+        index['items']=[i for i in index['items'] if i['uid']!=old_uid]
+        index['current']='exit'
+        self.put('profiles.yaml',index)
+        # Re-creating a chain with the same name must succeed and prune the orphaned registry entry.
+        second=self.apply()
+        self.assertNotEqual(second['subscription_uid'],old_uid)
+        registry=managed_chain.records(self.root,self.local)
+        self.assertNotIn(old_uid,registry)
+        self.assertIn(second['subscription_uid'],registry)
 
 
 if __name__=='__main__':unittest.main()

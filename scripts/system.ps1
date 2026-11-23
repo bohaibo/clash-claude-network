@@ -222,7 +222,9 @@ if($Action -eq 'snapshot') {
     if($entry.exists){Copy-Item -LiteralPath $path -Destination (Join-Path $stateDir $entry.copy)};$appFiles[$relative]=$entry
   }
   & netsh.exe winhttp dump | Set-Content -LiteralPath (Join-Path $stateDir 'winhttp.txt') -Encoding UTF8
-  & netsh.exe advfirewall export (Join-Path $stateDir 'firewall.wfw') | Out-Null
+  $firewallFile=Join-Path $stateDir 'firewall.wfw'
+  if(Test-Path -LiteralPath $firewallFile){Remove-Item -LiteralPath $firewallFile -Force}
+  & netsh.exe advfirewall export $firewallFile | Out-Null
   if($LASTEXITCODE -ne 0){throw '防火墙导出失败，未改动任何系统设置。'}
   [ordered]@{timezone=(Get-TimeZone).Id;culture=(Get-Culture).Name;languages=@(Get-WinUserLanguageList);serviceStartupType=(Get-Service clash_verge_service).StartType.ToString();
     ipv6=@{exists=($null -ne $ipValue);value=if($ipValue){$ipValue.DisabledComponents}else{$null}};
@@ -261,7 +263,7 @@ if($Action -eq 'restore' -and (Test-Path -LiteralPath (Join-Path $stateDir 'webr
 $null=@(Read-FirewallRuleJournal $stateDir)
 $regionRecord=Join-Path $stateDir 'region-time.json'
 if($Action -ne 'rollback-firewall' -and (Test-Path -LiteralPath $regionRecord)){Assert-RegionTimeState (Get-Content -LiteralPath $regionRecord -Raw -Encoding UTF8 | ConvertFrom-Json)}
-if($Action -eq 'recheck-ipv6'){Disable-CurrentIpv6Bindings;return}
+if($Action -eq 'recheck-ipv6'){Disable-CurrentIpv6Bindings;$global:LASTEXITCODE=0;return}
 if($Action -eq 'supplement'){
   # Require an existing deployment; never capture a replacement baseline.
   $plan=Get-Content -LiteralPath (Join-Path $localDir 'plan.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -280,9 +282,9 @@ if($Action -eq 'supplement'){
     Invoke-WebRtcPolicy 'apply'
   }catch{
     $failure=$_
-    try{if($outbound.Count){$outbound | Enable-NetFirewallRule -ErrorAction Stop}}catch{Write-Warning '本次出站规则回滚未完成，请使用菜单 3 恢复。'}
+    try{if($outbound.Count){$outbound | Enable-NetFirewallRule -ErrorAction Stop}}catch{Write-Warning '本次出站规则回滚未完成，请使用菜单 2 恢复。'}
     foreach($adapter in $adapters){
-      try{Set-AdapterIpv6Binding $adapter $true}catch{Write-Warning '本次网卡回滚未完成，请使用菜单 3 恢复。'}
+      try{Set-AdapterIpv6Binding $adapter $true}catch{Write-Warning '本次网卡回滚未完成，请使用菜单 2 恢复。'}
     }
     throw $failure
   }
@@ -344,15 +346,16 @@ New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Pa
 # when they are later renamed, rebuilt or re-plugged and no longer match the snapshot.
 Disable-CurrentIpv6Bindings
 foreach($scope in @('User','Machine','Process')){foreach($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY')){[Environment]::SetEnvironmentVariable($name,$null,$scope)}}
-$key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings';Set-ItemProperty -LiteralPath $key -Name ProxyEnable -Value 0
+$key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings';New-ItemProperty -LiteralPath $key -Name ProxyEnable -PropertyType DWord -Value 0 -Force | Out-Null
 Remove-ItemProperty -LiteralPath $key -Name ProxyServer,AutoConfigURL -ErrorAction SilentlyContinue
 & netsh.exe winhttp reset proxy | Out-Null
 if($LASTEXITCODE -ne 0){throw 'WinHTTP 代理重置失败。'}
 if(Get-Command git -ErrorAction SilentlyContinue){
   $keys=& git config --global --name-only --get-regexp '^https?(\..*)?\.proxy$'
   foreach($name in $keys){& git config --global --unset-all $name}
+  $global:LASTEXITCODE=0
 }
-if(Get-Command npm.cmd -ErrorAction SilentlyContinue){& npm.cmd config delete proxy --location=user;& npm.cmd config delete https-proxy --location=user}
+if(Get-Command npm.cmd -ErrorAction SilentlyContinue){& npm.cmd config delete proxy --location=user;& npm.cmd config delete https-proxy --location=user;$global:LASTEXITCODE=0}
 $docker=Join-Path ([Environment]::GetFolderPath('UserProfile')) '.docker\config.json'
 if(Test-Path -LiteralPath $docker){
   & $Python -c "import json,pathlib; p=pathlib.Path.home()/'.docker/config.json'; d=json.loads(p.read_text(encoding='utf-8-sig')); d.pop('proxies',None); p.write_text(json.dumps(d,indent=2),encoding='utf-8')"

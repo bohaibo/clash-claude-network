@@ -14,7 +14,7 @@ export function render(ctx) {
   }));
   const tun = state.operation?.pending_tun || [];
   if (tun.length) root.append(ui.card({title: tun.some(row => row.kind) ? '故障演练待恢复' : 'TUN 演练待恢复'},
-    ui.note('独立看护正在等待或尝试恢复。待恢复标记消失前暂停项目操作；若失败或长时间未结束，请检查下方目录中的 recovery.json、watchdog.log 和本次验收记录。不要删除 ready/done 标记绕过保护。', 'bad'),
+    ui.note('演练恢复尚未完成，其他操作已暂时暂停。请等待自动恢复，或查看下方目录记录。', 'bad'),
     ...tun.map(row => ui.el('section', {}, ui.kv([['记录', row.id], ['阶段', ({'node-outage': '节点故障', 'core-exit': '停核'})[row.kind] || 'TUN 关闭'], ['状态', row.status === 'failed' ? '已报告恢复失败' : row.status === 'interrupted' ? '看护已停止，恢复尚未确认' : '恢复尚未确认'], ['本地目录', '.local/tun-drills/' + row.id]]),
       ui.el('div', {class: 'page-actions'},
         ui.button('打开本次记录', {variant: 'secondary', onClick: () => reveal(ctx, row.id)}),
@@ -61,22 +61,48 @@ function verificationCard(ctx) {
       ui.el('div', {}, ui.el('strong', { text: check.title }), ui.el('small', { text: ui.statusText(check.status) }))))),
     ui.kv((verification.stages || []).map(stage => [stage.title || stage.id, !stage.tested ? '未测试' : stage.success ? '通过' : stage.status === 'unverified' ? '未验证' : '未通过'])),
     ...(verification.not_tested || []).map(text => ui.note('未测试：' + text, 'info')),
-    ui.el('p', { class: 'muted small', text: '原始 IP 与探测明细只保存在 .local；界面只显示国家/城市摘要。' }));
+    ui.el('p', { class: 'muted small', text: '详细探测记录保存在本地 .local 目录。' }));
 }
 
 function logListCard(ctx, inline) {
   const files = ctx.state.log_files || [];
-  const body = files.length
-    ? ui.el('div', { class: 'log-list' }, files.map((file) => ui.el('button', {
-        class: 'log-row', type: 'button', 'data-log-name': file.name, 'aria-pressed': 'false', onclick: () => ctx.showLog(file.name),
+  let listArea;
+  if (files.length) {
+    const list = ui.el('div', { class: 'log-list' });
+    const renderRows = (query = '') => {
+      const needle = query.trim().toLowerCase();
+      const matched = needle ? files.filter(file => file.name.toLowerCase().includes(needle)) : files;
+      if (!matched.length) {
+        list.replaceChildren(ui.el('p', { class: 'muted pad', text: '没有匹配的日志文件。' }));
+        return;
+      }
+      const active = (typeof document !== 'undefined' ? document.getElementById?.('log-inline')?.dataset?.activeLog : null) ?? inline.dataset?.activeLog;
+      list.replaceChildren(...matched.map((file) => ui.el('button', {
+        class: 'log-row', type: 'button', 'data-log-name': file.name,
+        'aria-pressed': String(Boolean(active && active === file.name)),
+        onclick: () => ctx.showLog(file.name),
       },
       ui.el('span', { class: 'log-icon' }, icon('list', 16)),
       ui.el('span', { class: 'log-name', text: file.name }),
       ui.el('span', { class: 'muted', text: ui.formatBytes(file.bytes) }),
       ui.el('span', { class: 'muted', text: ui.relativeTime(file.time) }),
-      icon('chevron', 14))))
-    : ui.empty('还没有日志文件', '操作产生错误或更新结果时会生成日志。');
-  return ui.card({ title: '本地日志', help: '点击文件名在此读取；不会把日志上传到网络。' }, ui.el('div', {class: 'log-layout'}, body, inline));
+      icon('chevron', 14))));
+    };
+    renderRows();
+    if (files.length > 5) {
+      const filter = ui.input('', {
+        type: 'search', class: 'input log-filter', placeholder: '筛选日志文件名…',
+        'aria-label': '筛选日志文件',
+        oninput: (event) => renderRows(event.target.value),
+      });
+      listArea = ui.el('div', {}, filter, list);
+    } else {
+      listArea = list;
+    }
+  } else {
+    listArea = ui.empty('还没有日志文件', '操作产生错误或更新结果时会生成日志。');
+  }
+  return ui.card({ title: '本地日志', help: '点击文件名即可查看，所有日志仅保存在本地。' }, ui.el('div', {class: 'log-layout'}, listArea, inline));
 }
 
 function reconfigureCard(ctx) {
@@ -103,7 +129,7 @@ function actionName(action) {
 async function retryDrill(ctx, id) {
   const ok = await ctx.confirm({
     title: '重试本次演练恢复？',
-    description: '需要 Windows 管理员权限。仅恢复对应演练留下的变更，网络可能短暂中断。',
+    description: '将申请管理员权限并恢复本次演练的临时改动，期间网络可能短暂断开。',
     confirmText: '重试恢复',
   });
   if (ok) ctx.startJob({action: 'drill-recover', recovery: id, confirm: 'RECOVER-DRILL'});

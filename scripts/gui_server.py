@@ -638,7 +638,7 @@ class App:
                 'stage': str(status.get('stage') or ''),
                 'success': bool(status.get('success')),
                 'error': str(status.get('error') or ''),
-            'record_warning': status.get('record_warning') or (job.get('monitor_warning') if status.get('state') == 'running' else ''),
+                'record_warning': str(status.get('record_warning') or ''),
                 'time': datetime.datetime.fromtimestamp(folder.stat().st_mtime).astimezone().isoformat(timespec='seconds'),
                 'recovered': (folder / 'recovery-result.json').is_file(),
             })
@@ -1084,16 +1084,22 @@ class App:
                  'reconfigure': '重新配置', 'update': '规则更新', 'verify': '连通性检查'}.get(status.get('action'), '操作')
         message = '任务已手动结束；' + label + '可能未完成，请检查快照/日志后再决定是否重试。'
         status.update({'state': 'interrupted', 'finished': now_iso(), 'error': message})
-        atomic_json(folder / 'status.json', status)
-        append_event(folder / 'events.jsonl', {'type': 'cancelled', 'message': message})
         with self._lock:
             job = self.jobs.get(job_id)
-            if job:
-                job['forced'] = True
-                job['state'] = 'interrupted'
-                job['completion'] = status
-            if self.active_job and self.active_job.get('id') == job_id:
-                self.active_job = None
+            disk_status = read_json(folder / 'status.json', {})
+            settled = bool(job and job.get('completion')) or (
+                isinstance(disk_status, dict) and disk_status.get('state') in ('success', 'failed', 'cancelled', 'interrupted', 'unverified')
+            )
+            if not settled:
+                atomic_json(folder / 'status.json', status)
+                append_event(folder / 'events.jsonl', {'type': 'cancelled', 'message': message})
+                (folder / 'chain-selection.json').unlink(missing_ok=True)
+                if job:
+                    job['forced'] = True
+                    job['state'] = 'interrupted'
+                    job['completion'] = status
+                if self.active_job and self.active_job.get('id') == job_id:
+                    self.active_job = None
         return self.job_view(job_id)
 
     def _validate_job(self, payload):
@@ -1141,8 +1147,9 @@ class App:
             if confirm != CONFIRM[action]:
                 raise ApiError(400, '确认信息不匹配；未执行操作。')
         if action == 'apply':
-            node = str(payload.get('node') or '').strip()
-            if not node or len(node) > 200 or any(ord(ch) < 32 for ch in node):
+            raw_node = payload.get('node')
+            node = raw_node if isinstance(raw_node, str) else ''
+            if not node.strip() or len(node) > 200 or any(ord(ch) < 32 for ch in node):
                 raise ApiError(400, '请选择节点或填写静态代理配置名称。')
             subscription = str(payload.get('subscription') or '').strip()
             if len(subscription) > 160:
@@ -1227,6 +1234,7 @@ class App:
                 if self.active_job is job:
                     self.active_job = None
                 try:
+                    (folder / 'chain-selection.json').unlink(missing_ok=True)
                     atomic_json(folder / 'status.json', {'state': 'failed', 'action': action,
                         'error': '任务创建失败，未开始执行。', 'exit_code': None, 'finished': now_iso()})
                 except OSError:
@@ -1263,11 +1271,20 @@ class App:
         return [python_console(), str(self.scripts / 'verify.py')], events
 
     def _complete_job(self, job, status):
-        try:
-            atomic_json(Path(job['folder']) / 'status.json', status)
-        except OSError:
-            status['record_warning'] = '任务已结束，但状态记录写入失败；本次结果仅保留在当前界面会话中。'
+        folder = Path(job['folder'])
         with self._lock:
+            if job.get('forced'):
+                if self.active_job is job or (self.active_job and self.active_job['id'] == job['id']):
+                    self.active_job = None
+                return
+            try:
+                atomic_json(folder / 'status.json', status)
+            except OSError:
+                status['record_warning'] = '任务已结束，但状态记录写入失败；本次结果仅保留在当前界面会话中。'
+            try:
+                (folder / 'chain-selection.json').unlink(missing_ok=True)
+            except OSError:
+                pass
             job['completion'] = status
             job['state'] = status['state']
             if self.active_job is job or (self.active_job and self.active_job['id'] == job['id']):
@@ -1440,14 +1457,14 @@ class App:
             stored = read_json(folder / 'job.json', None)
             if not isinstance(stored, dict):
                 raise ApiError(404, '找不到该操作记录。')
-            job = {'id': job_id, **stored, 'started_epoch': 0}
+            job = {'id': job_id, 'folder': str(folder), **stored, 'started_epoch': 0}
         status = job.get('completion') or read_json(folder / 'status.json', {})
         if not job.get('completion') and job.get('runtime') and (not isinstance(status, dict) or status.get('state') in (None, 'running')):
             status = job['runtime']
         if (not isinstance(status, dict) or not status or (job.get('recovered') and
                 status.get('state') not in ('running', 'success', 'failed', 'cancelled', 'interrupted', 'unverified'))):
             status = {'state': job.get('state', 'running'), 'action': job.get('action'), 'exit_code': None}
-        if job.get('recovered') and status.get('state') in ('success', 'failed', 'cancelled', 'interrupted', 'unverified'):
+        if job.get('recovered') and not job.get('completion') and status.get('state') in ('success', 'failed', 'cancelled', 'interrupted', 'unverified'):
             self._complete_job(job, status)
         events = read_events(folder / 'events.jsonl')
         elapsed = 0

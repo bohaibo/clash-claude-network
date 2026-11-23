@@ -516,6 +516,28 @@ class GuiServer(unittest.TestCase):
             state.assert_called_once_with(wait=True)
             invalidate.assert_called_once_with()
 
+    def test_reconfigure_runs_running_and_node_whitespace_and_chain_cleanup(self):
+        run_dir = self.local / 'reconfigure-runs' / ('b' * 32)
+        run_dir.mkdir(parents=True)
+        (run_dir / 'status.json').write_text(json.dumps({'stage': 'restore', 'state': 'running', 'success': False}), encoding='utf-8')
+        rows = self.app.reconfigure_runs()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['stage'], 'restore')
+        with patch.object(self.app, 'configured', return_value=(False, '')):
+            _, params = self.app._validate_job({
+                'action': 'apply', 'confirm': gui_server.CONFIRM['apply'],
+                'node': '  Padded Node ', 'region': 'SG',
+            })
+            self.assertEqual(params['node'], '  Padded Node ')
+        job_id = 'c' * 32
+        folder = self.local / 'gui' / 'jobs' / job_id
+        folder.mkdir(parents=True)
+        secret_file = folder / 'chain-selection.json'
+        secret_file.write_text('{"static_exit":{"password":"secret"}}', encoding='utf-8')
+        job = {'id': job_id, 'action': 'apply', 'folder': str(folder), 'params': {}}
+        self.app._complete_job(job, {'state': 'success', 'action': 'apply'})
+        self.assertFalse(secret_file.exists())
+
     def test_validation_rejects_missing_confirmation(self):
         with self.assertRaises(gui_server.ApiError):
             self.app._validate_job({'action': 'apply', 'node': 'Chosen', 'region': 'SG'})

@@ -131,14 +131,14 @@ def stun_once(host='stun.l.google.com',port=19302,route_probe=None):
 
 def udp_route(root,node,probe):
  matches=[]
- for connection in api(root,'GET','/connections').get('connections',[]):
-  metadata=connection.get('metadata',{})
+ for connection in (api(root,'GET','/connections').get('connections') or []):
+  metadata=connection.get('metadata') or {}
   if (str(metadata.get('network','')).lower()=='udp' and
       str(metadata.get('sourcePort'))==str(probe['source_port']) and
       str(metadata.get('destinationPort'))==str(probe['destination_port']) and
       (metadata.get('host')==probe['host'] or metadata.get('destinationIP')==probe['destination_ip'])):
    matches.append(connection)
- chains=matches[0].get('chains',[]) if len(matches)==1 else []
+ chains=(matches[0].get('chains') or []) if len(matches)==1 else []
  return {'verified':len(matches)==1 and node in chains and GROUP in chains and 'DIRECT' not in chains,
          'matched_connections':len(matches),'selected_node_present':node in chains,
          'pinned_group_present':GROUP in chains,'direct_present':'DIRECT' in chains}
@@ -320,8 +320,8 @@ def verify(outage=False,stage=None):
      if value['name'] in failed_nodes:value['port']=1
     candidate=__import__('yaml').safe_dump(broken,allow_unicode=True,sort_keys=False)
     with guarded_outage(root,'node-outage',current,candidate):
-     for connection in outage_api(root,'GET','/connections').get('connections',[]):
-      if ({node} | failed_nodes).intersection(connection.get('chains',[])):
+     for connection in (outage_api(root,'GET','/connections').get('connections') or []):
+      if ({node} | failed_nodes).intersection(connection.get('chains') or []):
        try:outage_api(root,'DELETE','/connections/'+connection['id'])
        except Exception:pass
      require(curl('https://ipinfo.io/json')['exit']!=0,'Foreign traffic remained reachable during node outage')

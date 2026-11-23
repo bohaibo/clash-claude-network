@@ -37,7 +37,7 @@ def update_inputs(root,profiles,selected):
  """Pin every participating source before downloads and native validation."""
  inputs={};items={item['uid']:item for item in profiles['items']}
  participating={selected['uid']} | {item['uid'] for item in profiles['items']
-  if item.get('type') in ('remote','local') and str(item.get('option',{}).get('script','')).startswith('PortableClaude')}
+  if item.get('type') in ('remote','local') and str((item.get('option') or {}).get('script','')).startswith('PortableClaude')}
  for uid in participating:inputs.update(preparation_inputs(root,items[uid],profiles))
  for uid,record in managed_chain.records(root,LOCAL).items():
   if uid not in items or not (uid in participating or record.get('legacy') and record['source_uid'] in participating):continue
@@ -107,7 +107,7 @@ def companion_contexts(root,profiles,plan,fresh,migrate_source):
   if item.get('uid')==plan['subscription_uid'] or item.get('type') not in ('remote','local'):continue
   record=registry.get(item['uid']) if item.get('type')=='local' else None
   if item.get('type')=='local' and (not record or record.get('legacy')):continue
-  sid=item.get('option',{}).get('script')
+  sid=(item.get('option') or {}).get('script')
   if not str(sid).startswith('PortableClaude'):continue
   script=next((s for s in profiles['items'] if s.get('uid')==sid and s.get('type')=='script'),None)
   require(script is not None,'Configured companion script missing')
@@ -246,7 +246,7 @@ def update(migrate_source=False):
  plan=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'));root=root_path(plan['root'])
  profiles=load(root/'profiles.yaml')
  selected=next((x for x in profiles.get('items',[]) if x.get('uid')==plan['subscription_uid']),None)
- if selected is None or selected.get('option',{}).get('script')!=plan['script_uid']:
+ if selected is None or (selected.get('option') or {}).get('script')!=plan['script_uid']:
   return {'success':True,'skipped':True,'reason':'订阅已移除或脚本关联已改变；请重新配置。'}
  entry=next((x for x in profiles.get('items',[]) if x.get('uid')==plan['script_uid']),None)
  if entry is None or entry.get('file')!=plan['script_file']:

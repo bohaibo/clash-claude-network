@@ -374,7 +374,13 @@ def pinned_profile(config, selected):
             or 'RULE-SET,strict-cn-domain,DIRECT' not in rules
             or rules.index('GEOSITE,geolocation-!cn,' + GROUP) >= rules.index('RULE-SET,strict-cn-domain,DIRECT')):
         raise ExportError('当前配置缺少固定代理兜底或海外优先分流。')
-    rules = [rule for rule in rules if not rule.startswith('PROCESS-NAME,')]
+    def desktop_only(rule):
+        if rule.startswith('PROCESS-NAME,'):
+            return True
+        guard = UDP_GUARD.fullmatch(rule)
+        return bool(guard and guard[1].startswith('PROCESS-NAME,'))
+
+    rules = [rule for rule in rules if not desktop_only(rule)]
     providers = {}
     for rule in rules:
         kind, _, policy, *_ = rule.split(',') + ['']

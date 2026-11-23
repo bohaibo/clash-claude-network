@@ -28,7 +28,10 @@ $result.auto_timezone=Service-State 'tzautoupdate'
 $result.auto_time=(Service-State 'W32Time')+' / '+(Read-Value 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters' 'Type')
 $result.ipv6=Read-Value 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' 'DisabledComponents'
 if($result.ipv6 -eq '未设置'){$result.ipv6='未设置禁用项（Windows 默认启用 IPv6）'}
-try { $b=@(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden -AllBindings -ErrorAction Stop); $result.bindings="IPv6 已启用 $(@($b|Where-Object Enabled).Count) / $($b.Count) 个绑定" } catch { $result.bindings='未能读取（未验证）' }
+try { $b=@(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden -AllBindings -ErrorAction Stop); $result.bindings="IPv6 已启用 $(@($b|Where-Object Enabled).Count) / $($b.Count) 个绑定" } catch {
+ if($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*' -or $_.Exception.Message -like '*No MSFT_NetAdapterBindingSettingData*'){$result.bindings='IPv6 已启用 0 / 0 个绑定'}
+ else{$result.bindings='未能读取（未验证）'}
+}
 try { $result.firewall=(@(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop | ForEach-Object { $action=if($_.DefaultOutboundAction -eq 'NotConfigured'){'未显式设置（Windows 默认允许）'}else{[string]$_.DefaultOutboundAction}; "$($_.Name)：出站 $action；防火墙启用=$($_.Enabled)" }) -join '；') } catch {$result.firewall='未能读取（未验证）'}
 $result.proxy='ProxyEnable='+(Read-Value 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' 'ProxyEnable')
 $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -48,7 +51,7 @@ if($policy -eq '1' -or $consent -eq 'Deny'){$result.location_state='关闭'}
 elseif($consent -eq 'Allow'){$result.location_state='开启'}
 try {
  $tz=Get-Service tzautoupdate -ErrorAction Stop
- $result.auto_timezone_state=if($tz.StartType -eq 'Automatic'){'开启'}else{'关闭'}
+ $result.auto_timezone_state=if($tz.StartType -eq 'Disabled'){'关闭'}else{'开启'}
 } catch {$result.auto_timezone_state='未能确认'}
 try {
  $time=Get-Service W32Time -ErrorAction Stop
@@ -66,6 +69,12 @@ try {
 try {
  $allBindings=@(Get-NetAdapterBinding -ComponentID ms_tcpip6 -IncludeHidden -AllBindings -ErrorAction Stop)
  $result.ipv6_enabled_bindings=@($allBindings | Where-Object Enabled).Count
- if($result.ipv6_enabled_bindings -gt 0){$result.ipv6_state='未完整关闭'}
-} catch {$result.ipv6_enabled_bindings=$null;$result.ipv6_state='未能确认'}
+ if($result.ipv6_state -eq '关闭' -and $result.ipv6_enabled_bindings -gt 0){$result.ipv6_state='未完整关闭'}
+} catch {
+ if($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*' -or $_.Exception.Message -like '*No MSFT_NetAdapterBindingSettingData*'){
+  $result.ipv6_enabled_bindings=0
+ } else {
+  $result.ipv6_enabled_bindings=$null;$result.ipv6_state='未能确认'
+ }
+}
 $result | ConvertTo-Json -Compress

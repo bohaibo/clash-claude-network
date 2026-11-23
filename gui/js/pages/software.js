@@ -19,7 +19,7 @@ export function render(ctx, {id = 'check-software-update'} = {}) {
     ui.el('div', {class: 'form-foot'},
       check,
       releaseLink(info)),
-    ui.helpTip('每次打开软件自动检查一次。请从正式发布页下载，关闭管理窗口后覆盖程序文件，保留 .local 和 .runtime。', '软件更新说明')));
+    ui.helpTip('打开软件时自动检查更新。更新请到发布页下载，关闭窗口后覆盖程序文件即可（保留 .local 和 .runtime）。', '软件更新说明')));
   return root;
 }
 
@@ -27,9 +27,9 @@ export function packageCard(ctx) {
   const info = ctx.state?.software || {};
   const bundle = info.package;
   const exportButton = ui.button(exporting ? '正在打包…' : '生成 ZIP 安装包', {
-      variant: 'secondary', icon: 'download', disabled: exporting || ctx.busy || (ctx.state?.operation?.pending_rule_update || ctx.state?.operation?.settings_pending?.length || ctx.state?.operation?.pending_tun?.length),
+      variant: 'secondary', icon: 'download', disabled: !ctx.state || exporting || ctx.busy || (ctx.state?.operation?.pending_rule_update || ctx.state?.operation?.settings_pending?.length || ctx.state?.operation?.pending_tun?.length),
       onClick: async (event) => {
-        if (exporting || ctx.busy || (ctx.state?.operation?.pending_rule_update || ctx.state?.operation?.settings_pending?.length || ctx.state?.operation?.pending_tun?.length)) return;
+        if (!ctx.state || exporting || ctx.busy || (ctx.state?.operation?.pending_rule_update || ctx.state?.operation?.settings_pending?.length || ctx.state?.operation?.pending_tun?.length)) return;
         exporting = true;
         if (event?.currentTarget) { event.currentTarget.disabled = true; event.currentTarget.textContent = '正在打包…'; }
         try {
@@ -40,13 +40,14 @@ export function packageCard(ctx) {
           if (error.status === 409) await ctx.refresh(true);
         } finally {
           exporting = false;
-          card.replaceWith(packageCard(ctx));
+          const live = document.getElementById?.('export-package')?.closest?.('details') || card;
+          live.replaceWith(packageCard(ctx));
         }
       },
     });
   exportButton.id = 'export-package';
   const card = ui.disclosure({title: '导出便携安装包', key: 'help-package'},
-    ui.el('p', {class: 'muted small', text: '仅包含程序、文档和校验清单，不包含本机资料。解压后运行「一键网络.cmd」，新电脑会下载所需运行环境。'}),
+    ui.el('p', {class: 'muted small', text: '仅打包程序与文档，不含本机配置和隐私数据。新电脑解压后双击「一键网络.cmd」即可使用。'}),
     ui.el('div', {class: 'form-foot'}, exportButton, bundle?.download_url && /^\/api\/packages\/[a-f0-9]{32}$/.test(bundle.download_url)
       ? ui.el('a', {class: 'btn btn-secondary', href: bundle.download_url, download: bundle.filename, text: '下载安装包'}) : null),
     bundle ? ui.kv([['文件', bundle.filename], ['大小', (bundle.size / 1024).toFixed(0) + ' KB'], ['SHA-256', bundle.sha256]]) : null);
@@ -56,10 +57,10 @@ export function packageCard(ctx) {
 export function updateInstructions() {
   return ui.disclosure({title: '如何更新软件'},
     ui.el('ol', {class: 'check-list'},
-      ui.el('li', {text: '从正式发布页下载安装包，并核对发布方提供的 SHA-256。'}),
-      ui.el('li', {text: '等待当前操作结束，关闭管理窗口，再解压并覆盖同一软件目录内的程序文件。'}),
-      ui.el('li', {text: '保留原目录的 .local 和 .runtime；不要将本机资料复制给其他人。'}),
-      ui.el('li', {text: '重新双击「一键网络.cmd」。若提示配置不一致，请在「使用说明 → 当前配置与浏览器详情」核对。'})));
+      ui.el('li', {text: '从正式发布页下载安装包，并核对 SHA-256 校验值。'}),
+      ui.el('li', {text: '等待任务结束并关闭管理窗口，解压覆盖原目录的程序文件。'}),
+      ui.el('li', {text: '保留 .local 和 .runtime 目录，不要把本机数据发给他人。'}),
+      ui.el('li', {text: '重新双击「一键网络.cmd」启动。'})));
 }
 
 export function control(ctx) {

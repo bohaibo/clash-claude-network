@@ -215,4 +215,53 @@ class SubscriptionRestore(unittest.TestCase):
   result=self.restore();self.assertIsNone(result['project_node'])
   self.assertEqual(client.load(self.root/'profiles.yaml')['items'][0]['option']['script'],'user')
 
+ def test_named_pipe_request_respects_timeout_and_stops_on_complete_204(self):
+  import ctypes,threading,time,uuid
+  from ctypes import wintypes
+  k32=ctypes.WinDLL('kernel32',use_last_error=True)
+  k32.CreateNamedPipeW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p]
+  k32.CreateNamedPipeW.restype=wintypes.HANDLE
+  k32.ConnectNamedPipe.argtypes=[wintypes.HANDLE,ctypes.c_void_p];k32.ConnectNamedPipe.restype=wintypes.BOOL
+  k32.ReadFile.argtypes=[wintypes.HANDLE,ctypes.c_void_p,wintypes.DWORD,ctypes.POINTER(wintypes.DWORD),ctypes.c_void_p];k32.ReadFile.restype=wintypes.BOOL
+  k32.WriteFile.argtypes=[wintypes.HANDLE,ctypes.c_void_p,wintypes.DWORD,ctypes.POINTER(wintypes.DWORD),ctypes.c_void_p];k32.WriteFile.restype=wintypes.BOOL
+  k32.DisconnectNamedPipe.argtypes=[wintypes.HANDLE];k32.DisconnectNamedPipe.restype=wintypes.BOOL
+  k32.CloseHandle.argtypes=[wintypes.HANDLE];k32.CloseHandle.restype=wintypes.BOOL
+
+  def start_server(reply=None):
+   name=r'\\.\pipe\ccn-test-'+uuid.uuid4().hex
+   pipe=k32.CreateNamedPipeW(name,3,0,1,65536,65536,0,None)
+   release=threading.Event()
+   def serve():
+    try:
+     k32.ConnectNamedPipe(pipe,None)
+     buf=ctypes.create_string_buffer(4096);n=wintypes.DWORD(0)
+     k32.ReadFile(pipe,buf,4096,ctypes.byref(n),None)
+     if reply is not None:
+      w=wintypes.DWORD(0);k32.WriteFile(pipe,reply,len(reply),ctypes.byref(w),None)
+     release.wait(5)
+    finally:
+     k32.DisconnectNamedPipe(pipe);k32.CloseHandle(pipe)
+   thread=threading.Thread(target=serve,daemon=True);thread.start()
+   return name,release,thread
+
+  # 1. Hanging server must time out promptly instead of blocking forever.
+  name,release,thread=start_server(reply=None)
+  try:
+   t0=time.monotonic()
+   with self.assertRaises(TimeoutError):
+    client._pipe_request(name,b'PUT /configs?force=true HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}',timeout=0.3)
+   self.assertLess(time.monotonic()-t0,2.5)
+  finally:
+   release.set();thread.join(timeout=3)
+
+  # 2. Complete HTTP 204 response must return immediately even if server keeps pipe open.
+  name2,release2,thread2=start_server(reply=b'HTTP/1.1 204 No Content\r\n\r\n')
+  try:
+   t0=time.monotonic()
+   resp=client._pipe_request(name2,b'PUT /configs?force=true HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}',timeout=5.0)
+   self.assertTrue(resp.startswith(b'HTTP/1.1 204'))
+   self.assertLess(time.monotonic()-t0,1.5)
+  finally:
+   release2.set();thread2.join(timeout=3)
+
 if __name__=='__main__':unittest.main()

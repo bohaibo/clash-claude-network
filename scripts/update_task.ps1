@@ -8,11 +8,16 @@ $name='ClaudeNetwork-Update-'+$suffix
 $expectedAction='"'+(Join-Path $PSScriptRoot 'update.py')+'"'
 $existing=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
 
+function Resolve-UserSid([string]$userId) {
+ if($userId -match '^S-1-'){return [Security.Principal.SecurityIdentifier]::new($userId)}
+ return ([Security.Principal.NTAccount]::new($userId)).Translate([Security.Principal.SecurityIdentifier])
+}
+
 function Grant-UpdateTaskUserAccess {
  $task=Get-ScheduledTask -TaskName $name -ErrorAction Stop
  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
  if(@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -ne $expectedAction -or $task.Actions[0].Execute -ne $Python -or [int]$task.Principal.RunLevel -ne 0){throw 'Unexpected update task definition; permissions unchanged.'}
- $taskSid=([Security.Principal.NTAccount]::new($task.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier])
+ $taskSid=Resolve-UserSid $task.Principal.UserId
  if($taskSid.Value -ne $identity.User.Value){throw 'Update task belongs to another user; permissions unchanged.'}
  $scheduler=New-Object -ComObject 'Schedule.Service';$scheduler.Connect()
  $registered=$scheduler.GetFolder('\').GetTask($name)
@@ -29,7 +34,7 @@ function Grant-UpdateTaskUserAccess {
 function Get-TriggerTime($task){
  $trigger=@($task.Triggers | Select-Object -First 1)
  if(!$trigger.Count -or !$trigger[0].StartBoundary){return ''}
- try{return ([datetime]$trigger[0].StartBoundary).ToString('HH:mm')}catch{return ''}
+ try{return ([datetime]$trigger[0].StartBoundary).ToString('HH:mm',[Globalization.CultureInfo]::InvariantCulture)}catch{return ''}
 }
 
 function Get-TriggerInterval($task){
@@ -58,7 +63,7 @@ function Assert-OwnedUpdateTask($task){
  if(!$task){return}
  if(@($task.Actions).Count -ne 1 -or $task.Actions[0].Arguments -ne $expectedAction -or $task.Actions[0].Execute -ne $Python -or [int]$task.Principal.RunLevel -ne 0){throw 'Unexpected update task definition; task unchanged.'}
  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
- $sid=([Security.Principal.NTAccount]::new($task.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier])
+ $sid=Resolve-UserSid $task.Principal.UserId
  if($sid.Value -ne $identity.User.Value){throw 'Update task belongs to another user; task unchanged.'}
 }
 
@@ -101,15 +106,16 @@ if($Action -eq 'remove'){Assert-OwnedUpdateTask $existing;if($existing){Unregist
 if($At -notmatch '^(?:[01]\d|2[0-3]):[0-5]\d$'){throw '定时更新时间须为 HH:MM（00:00–23:59）。'}
 if($DaysInterval -lt 1 -or $DaysInterval -gt 365){throw '更新间隔必须是 1–365 天。'}
 $trigger=New-ScheduledTaskTrigger -Daily -At $At -DaysInterval $DaysInterval
+$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+$isAdmin=([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if($existing){
- if(@($existing.Actions | Where-Object {$_.Arguments -ne $expectedAction}).Count){throw '已存在一个参数不同的更新任务，请先人工确认。'}
- $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
- if(([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){Grant-UpdateTaskUserAccess}
+ if(@($existing.Actions | Where-Object {$_.Arguments -ne $expectedAction -or $_.Execute -ne $Python}).Count){throw '已存在一个参数不同的更新任务，请先人工确认。'}
+ if($isAdmin){Grant-UpdateTaskUserAccess}
  if((Get-TriggerTime $existing) -ne $At -or (Get-TriggerInterval $existing) -ne $DaysInterval){Set-ScheduledTask -TaskName $name -Trigger $trigger | Out-Null}
  return
 }
 $taskAction=New-ScheduledTaskAction -Execute $Python -Argument $expectedAction -WorkingDirectory $project
-$principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+$principal=New-ScheduledTaskPrincipal -UserId ($identity.Name) -LogonType Interactive -RunLevel Limited
 $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 4) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $name -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
-Grant-UpdateTaskUserAccess
+if($isAdmin){Grant-UpdateTaskUserAccess}

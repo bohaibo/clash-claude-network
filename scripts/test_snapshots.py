@@ -95,15 +95,7 @@ class Snapshots(unittest.TestCase):
   # A core that is still starting accepts the pipe and closes it before sending
   # a status line. That used to escape as IndexError and abort the whole restore
   # instead of being retried until the caller's deadline.
-  class Pipe:
-   def write(self,data):return len(data)
-   def read(self,size):return b''
-   def __enter__(self):return self
-   def __exit__(self,*args):return False
-  real_open=open
-  def fake_open(path,*args,**kwargs):
-   return Pipe() if 'pipe' in str(path) else real_open(path,*args,**kwargs)
-  with patch('os.listdir',return_value=['verge-mihomo-test']),patch('builtins.open',side_effect=fake_open):
+  with patch('os.listdir',return_value=['verge-mihomo-test']),patch.object(client,'_pipe_request',return_value=b''):
    with self.assertRaisesRegex(AssertionError,'response withheld'):
     client.api(self.root,'PUT','/configs?force=true',{})
 

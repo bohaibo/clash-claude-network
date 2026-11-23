@@ -3,13 +3,12 @@ import * as ui from '../ui.js';
 import { mobileExportCard, refreshMobileExportCard } from './network.js';
 
 const IMPACT = [
-  { title: 'Clash 客户端', text: '为所选订阅关联独立的项目增强脚本与固定节点组；保留原自定义脚本和现有节点。' },
-  { title: '严格出站防火墙', text: '保留四条项目放行并阻断 SharedAccess 服务出站。Mihomo 停止时国内公网也会断开。' },
-  { title: '系统 IPv6', text: '全局关闭并关闭现有网卡的 IPv6 绑定；依赖 IPv6 的内网资源可能不可用，需要重启 Windows 才完全生效。' },
-  { title: '系统自动定位', text: '通过 Windows 策略关闭系统定位，地图、天气等定位功能会受影响；恢复时还原原有策略。' },
-  { title: '区域与时区', text: '关闭自动时区和自动校时，按所选节点地区设置系统国家、Windows 语言和区域页面中的区域格式（日期和数字）及时区。区域格式可能需注销后重新登录或重启生效；恢复会还原原格式和时间设置。长期关闭校时可能产生误差。' },
-  { title: '代理清理', text: '清理系统、WinHTTP、环境变量与 Git/npm/Docker 的代理覆盖，普通流量交给 TUN；已打开的终端需要重启。' },
-  { title: '常用浏览器 WebRTC', text: '备份 Chrome、Edge、Firefox 的受管策略；Firefox 锁定禁用，Chrome/Edge 限制路径并自动安装官方商店的 WebRTC Control。已有扩展直接复用，项目自带离线扩展保留备用。外部指纹浏览器自行管理。' },
+  { title: 'Clash 分流', text: '为所选订阅绑定固定节点与分流规则，保留原有订阅和节点。' },
+  { title: '严格防火墙', text: '仅放行代理内核和局域网等必要连接；内核停止时会断网保护。' },
+  { title: '关闭 IPv6', text: '关闭系统与网卡 IPv6，重启 Windows 后完全生效。' },
+  { title: '定位、地区与时区', text: '关闭自动定位、自动时区与自动校时，按所选地区设置国家、区域格式和时区。' },
+  { title: '清理旧代理', text: '清除系统、环境变量及 Git/npm/Docker 的旧代理设置，统一由 TUN 接管。' },
+  { title: '浏览器 WebRTC', text: '为 Chrome、Edge、Firefox 配置 WebRTC 防护策略，并自动安排安装扩展。' },
 ];
 
 const REGIONS = [
@@ -103,12 +102,52 @@ export function render(ctx) {
 
 export function refreshStatus(ctx) {
   if (!rootNode?.isConnected) return;
+  const state = ctx.state;
+  const configured = Boolean(state.configured);
+  const pageTitle = rootNode.querySelector('.page-head h1');
+  if (pageTitle) pageTitle.textContent = configured ? '网络配置' : '一键配置';
+  const setupTitle = rootNode.querySelector('#setup-card-title');
+  if (setupTitle) setupTitle.textContent = configured ? '更换配置或重新配置' : '连接配置';
+  const bandHost = rootNode.querySelector('#current-band-host');
+  if (bandHost) {
+    const band = buildCurrentBand(state);
+    bandHost.replaceChildren(...(band ? [band] : []));
+  }
+  const actionsHost = rootNode.querySelector('#setup-card-actions');
+  if (actionsHost) {
+    const reapplyBtn = buildReapplyButton(ctx);
+    actionsHost.replaceChildren(...(reapplyBtn ? [reapplyBtn] : []));
+  }
   rootNode.querySelector('.tiles')?.replaceWith(statusGrid(ctx));
   renderImpact(ctx);
   updateStartButton(ctx);
-  const reapply = rootNode.querySelector('#quick-reapply');
-  if (reapply) reapply.disabled = operationsBlocked(ctx) || !ctx.state.plan?.node;
   refreshMobileExportCard(ctx);
+}
+
+function buildReapplyButton(ctx) {
+  const state = ctx.state;
+  const plan = state.plan || {};
+  if (!state.configured) return null;
+  const btn = ui.button('按当前记录重新配置', {
+    variant: 'secondary',
+    icon: 'refresh',
+    disabled: operationsBlocked(ctx) || !plan.node,
+    onClick: () => quickReapply(ctx),
+  });
+  btn.id = 'quick-reapply';
+  return btn;
+}
+
+function buildCurrentBand(state) {
+  const plan = state.plan || {};
+  if (!state.configured) return null;
+  return ui.el('div', { class: 'current-band' },
+    ui.el('div', {}, ui.el('strong', { text: plan.node || '—' })),
+    plan.chain ? ui.el('p',{class:'muted small',text:proxyRoute(plan.chain)+' · 完整防护状态请查看网络环境。'}) : null,
+    ui.el('div', { class: 'current-meta' },
+      ui.pill('订阅 ' + (plan.subscription ? plan.subscription.slice(0, 8) : '—'), 'neutral'),
+      ui.pill('出口 ' + (plan.region || 'SG'), 'neutral'),
+      ui.helpTip('恢复点：' + (plan.snapshot || '尚未记录'), '当前恢复点')));
 }
 
 function statusGrid(ctx) {
@@ -130,7 +169,7 @@ function statusGrid(ctx) {
       value: recovery || (!state.configured ? '未配置' : state.last_run?.success === false ? '上次操作未完成' : '已配置'),
       tone: recovery ? 'bad' : !state.configured ? 'warn' : state.last_run?.success === false ? 'bad' : awaitingVerification ? 'warn' : verification.dns_failed ? 'bad' : verifiedFresh && scopedPass ? 'ok' : 'warn',
       detail: state.configured ? ('节点 ' + (state.plan.node || '—') + (awaitingVerification ? ' · 网络未验收' : verification.available ? ' · 上次验收 ' + ui.relativeTime(verification.time) : ' · 尚未验收')) : '首次配置会先保存原始快照',
-      action: state.configured ? () => ctx.navigate('network') : null,
+      action: state.configured ? () => ctx.navigate('network') : () => document.getElementById('configuration-mode')?.focus(),
     },
     {
       label: '规则更新',
@@ -150,35 +189,20 @@ function statusGrid(ctx) {
   return ui.el('div', { class: 'tiles' }, tiles.map((tile) => ui.el('button', {
     class: 'tile', type: 'button', onclick: tile.action || undefined,
   },
-  ui.el('span', { class: 'tile-label' }, tile.label, ui.el('span', { class: 'status-dot ' + tile.tone })),
+  ui.el('span', { class: 'tile-label' }, tile.label, ui.el('span', { class: 'status-dot ' + tile.tone }),
+    tile.action ? ui.el('span', { class: 'tile-chevron', 'aria-hidden': 'true' }, icon('chevron', 13)) : null),
   ui.el('strong', { class: 'tile-value', text: tile.value }),
   ui.el('span', { class: 'tile-detail', text: tile.detail }))));
 }
 
 function setupCard(ctx) {
   const state = ctx.state;
-  const plan = state.plan || {};
   const configured = Boolean(state.configured);
   choicesHost = document.createElement('div');
   choicesHost.className = 'choice-area';
 
-  const headerActions = configured
-    ? ui.button('按当前记录重新配置', {
-        variant: 'secondary',
-        icon: 'refresh',
-        disabled: operationsBlocked(ctx) || !plan.node,
-        onClick: () => quickReapply(ctx),
-      })
-    : null;
-  if (headerActions) headerActions.id = 'quick-reapply';
-
-  const currentBand = configured ? ui.el('div', { class: 'current-band' },
-    ui.el('div', {}, ui.el('strong', { text: plan.node || '—' })),
-    plan.chain ? ui.el('p',{class:'muted small',text:proxyRoute(plan.chain)+' · 完整防护状态请查看网络环境。'}) : null,
-    ui.el('div', { class: 'current-meta' },
-      ui.pill('订阅 ' + (plan.subscription ? plan.subscription.slice(0, 8) : '—'), 'neutral'),
-      ui.pill('出口 ' + (plan.region || 'SG'), 'neutral'),
-      ui.helpTip('恢复点：' + (plan.snapshot || '尚未记录'), '当前恢复点'))) : null;
+  const actionsHost = ui.el('div', { id: 'setup-card-actions' }, buildReapplyButton(ctx));
+  const bandHost = ui.el('div', { id: 'current-band-host', class: 'current-band-host' }, buildCurrentBand(state));
 
   const modes = ui.field('配置方式', ui.select([
     {value:'',label:'请选择配置方式'},
@@ -191,8 +215,10 @@ function setupCard(ctx) {
   const card = ui.card({
     title: configured ? '更换配置或重新配置' : '连接配置',
     help: '每份配置固定一个海外出口。配置会请求管理员权限。',
-    actions: headerActions,
-  }, currentBand, modes, choicesHost);
+    actions: actionsHost,
+  }, bandHost, modes, choicesHost);
+  const titleSpan = card.querySelector?.('.heading-with-help span');
+  if (titleSpan) titleSpan.id = 'setup-card-title';
 
   renderChoices(ctx);
   if (form.mode) loadChoices(ctx);
@@ -274,7 +300,7 @@ function renderImpact(ctx) {
   ];
   impactHost.replaceChildren(ui.disclosure({ title: '配置变更详情', key: 'setup-impact',
     class: 'config-preview-card' },
-    ui.el('p', { class: 'muted small', text: '读取于 ' + readTime + ' · 地区识别仅依据节点名称，实际出口未验证。' }),
+    ui.el('p', { class: 'muted small', text: '读取于 ' + readTime + ' · 地区根据节点名称自动识别，可手动调整。' }),
     ui.el('div', { class: 'config-legend', 'aria-label': '状态颜色说明' },
       valueBadge('开启'), valueBadge('关闭'), valueBadge('未能确认')),
     ui.el('table', { class: 'config-table', 'aria-label': '当前状态与配置后的对照' },
@@ -288,8 +314,7 @@ function renderImpact(ctx) {
         items.map(([label, current, desired, description]) => ui.el('tr', { class: 'config-item' },
           ui.el('th', { scope: 'row' }, ui.el('span', { class: 'heading-with-help' }, ui.el('span', { text: label }), description ? ui.helpTip(description, label + '说明') : null)),
           ui.el('td', { 'data-label': '当前' }, valueBadge(current)),
-          ui.el('td', { 'data-label': '配置后', class: 'config-target' }, valueBadge(desired))))))),
-    ui.el('p', { class: 'muted small', text: '外部指纹浏览器由用户自行管理。' })));
+          ui.el('td', { 'data-label': '配置后', class: 'config-target' }, valueBadge(desired)))))))));
 }
 
 async function loadChoices(ctx) {
@@ -502,7 +527,9 @@ function renderChoices(ctx) {
     missingHint,
     ui.el('div', { class: 'ack-row' }, ack),
     ui.el('div', { class: 'choice-foot' },
-      ui.helpTip('配置需要管理员权限，期间可能短暂中断网络。详细改动可展开下方对照表查看，执行前会再次确认。', '配置影响'),
+      ui.el('div', { class: 'choice-foot-left' },
+        ui.helpTip('配置需要管理员权限，期间可能短暂中断网络。详细改动可展开下方对照表查看，执行前会再次确认。', '配置影响'),
+        ui.el('span', { id: 'apply-readiness-hint', class: 'readiness-hint', 'aria-live': 'polite' })),
       start),
   ].filter(Boolean));
   renderNodeList(ctx, count);
@@ -557,6 +584,7 @@ function renderNodeList(ctx, count) {
 function selectNode(ctx, name) {
   nodesState.selectionNotice = '';
   const scroll = listHost.scrollTop;
+  if (name !== form.node) form.regionManual = false;
   form.node = name;
   form.acknowledged = false;
   applyRegionHint(ctx, name);
@@ -574,14 +602,52 @@ function applyRegionHint(ctx, name) {
   form.region = form.regionAuto?.code || '';
 }
 
+function readinessHint(ctx, ready, inside) {
+  if (operationsBlocked(ctx)) return '当前有进行中或待恢复的操作';
+  if (form.mode === 'single') {
+    if (!form.node || !inside) return '请先从上方列表选择一个节点';
+    if (!form.region) return '请选择出口地区';
+    if (!form.acknowledged) return '请勾选上方确认框后继续';
+    return '准备就绪，点击开始配置';
+  }
+  const rows = (nodesState.data?.subscriptions || []).filter(r => !r.chain);
+  if (form.mode !== 'staticDirect' && !hasFrontChoice(rows)) {
+    return isStaticMode() && form.staticSaved ? '原前置节点已不可用，请切换「新建配置」重新设置' : '请选择前置（第一跳）订阅和节点';
+  }
+  if (isStaticMode() && !form.staticSaved) {
+    const endpoint = staticEndpoint();
+    const octets = endpoint.ip.split('.');
+    const validIp = octets.length === 4 && octets.every(octet => /^(0|[1-9]\d{0,2})$/.test(octet) && Number(octet) < 256);
+    if (!validIp) return '请填写有效的公网 IPv4 地址';
+    if (!(/^[0-9]{1,5}$/.test(form.staticPort) && endpoint.port >= 1 && endpoint.port <= 65535)) return '请填写有效端口（1–65535）';
+    if (Boolean(endpoint.username) !== Boolean(endpoint.password)) return '代理用户名和密码需同时填写或同时留空';
+  } else if (form.mode === 'chain') {
+    if (!rows.some(r => r.uid === form.subscription && r.nodes.includes(form.node))) return '请选择后置（第二跳）订阅和节点';
+    if (form.subscription === form.frontSubscription && form.node === form.frontNode) return '前置与后置不能选择同一节点';
+  }
+  if (!form.chainName.trim()) return '请填写配置名称';
+  if (chainNameConflict()) return '该配置名称已被已有配置使用，请换一个名称，或在「已保存配置」中选择它';
+  if (!form.region) return '请选择最终出口地区';
+  if (!ready) return '请补全上方配置项';
+  if (!form.acknowledged) return '请勾选上方确认框后继续';
+  return '准备就绪，点击开始配置';
+}
+
 function updateStartButton(ctx) {
+  if (typeof document === 'undefined') return;
   const button = document.getElementById('start-apply');
   if (!button) return;
   const current = currentSubscription(ctx);
   const inside = Boolean(current && (current.nodes || []).includes(form.node));
   const ready = form.mode === 'single' ? Boolean(form.node && inside) : chainReady();
-  button.disabled = !form.region || !ready || !form.acknowledged || operationsBlocked(ctx);
+  const enabled = Boolean(form.region && ready && form.acknowledged && !operationsBlocked(ctx));
+  button.disabled = !enabled;
   button.title = form.mode === 'single' && form.node && !inside ? '所选节点不在当前订阅中，请重新选择。' : '';
+  const hint = document.getElementById('apply-readiness-hint');
+  if (hint) {
+    hint.textContent = readinessHint(ctx, ready, inside);
+    hint.className = 'readiness-hint' + (enabled ? ' is-ready' : '');
+  }
 }
 
 function stateText(ctx) {
@@ -651,12 +717,12 @@ async function beginApply(ctx) {
   const ok = await ctx.confirm({
     title: '开始配置网络？',
     subtitle: (chain ? chain.name+' · '+proxyRoute(chain) : node) + ' · 最终出口 ' + region,
-    description: '配置会重启 Clash 并核对本机配置。完成后可在「网络环境」运行完整网络验收。',
+    description: '将应用以下网络与系统设置并重启 Clash。',
     items: IMPACT,
-    note: '重启 Mihomo 时公网会短暂断开，请先保存正在进行的网络工作。',
+    note: '配置期间网络会短暂断开，请先保存进行中的工作。',
     noteType: 'warn',
     confirmText: '确认配置',
-    requireCheck: '我已保存工作，并了解配置会修改系统设置和短暂断网。',
+    requireCheck: '我已保存工作，确认开始配置。',
   });
   if (!ok) return;
   ctx.startJob({
@@ -669,9 +735,27 @@ async function beginApply(ctx) {
   });
 }
 
+function chainNameConflict() {
+  const name = form.chainName.trim();
+  if (!name) return false;
+  const savedAll = (nodesState.data?.subscriptions || []).filter(row => row.chain);
+  const matching = savedAll.filter(row => row.chain.name === name);
+  if (!matching.length) return false;
+  if (isStaticMode()) {
+    const picked = savedStatic();
+    return !(picked && picked.chain.name === name);
+  }
+  return !matching.some(row => !row.chain.static_exit && !row.chain.direct &&
+    row.chain.front_subscription === form.frontSubscription &&
+    row.chain.front_node === form.frontNode &&
+    Boolean(row.chain.front_group) === form.frontGroup &&
+    row.chain.exit_subscription === form.subscription &&
+    row.chain.exit_node === form.node);
+}
+
 function chainReady() {
   const rows=(nodesState.data?.subscriptions || []).filter(r=>!r.chain);
-  if (!form.chainName.trim()) return false;
+  if (!form.chainName.trim() || chainNameConflict()) return false;
   if (form.mode !== 'staticDirect' && !hasFrontChoice(rows)) return false;
   if (isStaticMode()) {
     if (form.staticSaved) return Boolean(savedStatic());
@@ -701,7 +785,7 @@ function renderChainChoices(ctx) {
     const available=front && node ? hasFrontChoice(rows) : all.includes(node);
     const count=ui.el('span',{class:'muted small','aria-live':'polite'});
     const control=ui.select([],node,value=>{
-      if(front){form.frontNode=value;form.frontGroup=groups.includes(value);}else{form.node=value;applyRegionHint(ctx,value);}
+      if(front){form.frontNode=value;form.frontGroup=groups.includes(value);}else{if(value!==form.node)form.regionManual=false;form.node=value;applyRegionHint(ctx,value);}
       form.acknowledged=false;renderChoices(ctx);
     }, {'aria-label':label+'节点'});
     function updateChoices() {
@@ -722,7 +806,7 @@ function renderChainChoices(ctx) {
     updateChoices();
     return ui.el('div',{class:'choice-grid'},
       ui.field(label+'订阅',ui.select(subOptions,uid,value=>{
-        if(front){form.frontSubscription=value;form.frontNode='';form.frontGroup=false;}else{form.subscription=value;form.node='';}
+        if(front){form.frontSubscription=value;form.frontNode='';form.frontGroup=false;}else{form.subscription=value;form.node='';form.regionManual=false;applyRegionHint(ctx,'');}
         form[searchKey]='';
         form.acknowledged=false;renderChoices(ctx);
       })),
@@ -753,6 +837,8 @@ function renderChainChoices(ctx) {
     if(row)loadChainSelection(ctx,row.chain,row.uid);
     else {
       form.chainName='';form.frontSubscription='';form.frontNode='';form.frontGroup=false;form.acknowledged=false;
+      form.subscription='';form.node='';form.region='';form.regionAuto=null;form.regionManual=false;
+      form.frontSearch='';form.exitSearch='';
       form.staticSaved='';form.staticIp='';form.staticPort='';form.staticUser='';form.staticPassword='';
     }
     renderChoices(ctx);
@@ -763,32 +849,40 @@ function renderChainChoices(ctx) {
   const endpoint = staticMode && !selected ? ui.el('div',{class:'choice-grid'},
     ui.field('代理协议',ui.select([{value:'socks5',label:'SOCKS5'},{value:'http',label:'HTTP'},
       {value:'https',label:'HTTPS'}],form.staticProtocol,value=>setField('staticProtocol',value))),
-    field('公网静态 IPv4','staticIp',{placeholder:'填写供应商提供的 IP'}),
-    field('代理端口','staticPort',{inputmode:'numeric',maxlength:5}),
+    field('公网静态 IPv4','staticIp',{placeholder:'例如 203.0.113.10'}),
+    field('代理端口','staticPort',{inputmode:'numeric',maxlength:5,placeholder:'例如 1080'}),
     field('代理用户名（可选）','staticUser',{autocomplete:'off'}),
     field('代理密码（可选）','staticPassword',{type:'password',autocomplete:'new-password'}),
   ) : null;
   choicesHost.replaceChildren(...[
-    reloadButton(ctx),
-    savedPicker,
-    ui.note(direct ? 'Clash 直接连接静态 IP 上的代理服务。出口失效时，海外流量中断。' :
-      '链式配置使用与普通配置相同的分流和网络防护；任一跳故障时，海外流量中断。','neutral'),
-    staticMode ? ui.note('静态 IP 必须已运行代理服务。海外 TCP 经静态出口，海外 UDP 被阻断，国内和局域网按原规则分流。' +
+    ui.el('div',{class:'chain-toolbar'},savedPicker,reloadButton(ctx)),
+    nodesState.selectionNotice ? ui.note(nodesState.selectionNotice,'warn') : null,
+    staticMode && !direct && selected && !hasFrontChoice(rows)
+      ? ui.note('此已保存配置的前置节点已不在当前订阅中，请在上方选择「新建配置」重新设置。','warn') : null,
+    ui.note(direct ? 'Clash 直接连接此静态代理；出口故障时海外流量自动断开。' :
+      '任一跳故障时海外流量自动断开，不回落直连。','neutral'),
+    staticMode ? ui.note('海外 TCP 经静态 IP 出口，海外 UDP 阻断，国内与局域网直连。' +
       (direct ? '' : '流量条显示前置订阅额度。'),'info') :
-      ui.note('流量条按两份订阅的剩余额度取较小者，显示该账户的已用量/总量，并采用较早到期日。使用 Clash 缓存数据，缺少数据不显示；不是此链路独占的实时用量。','info'),
+      ui.note('流量条显示两份订阅中剩余较少者的缓存用量，到期日取较早者。','info'),
     !direct && (!staticMode || !selected) ? picker('前置（第一跳）','front') : null,
     staticMode ? endpoint : picker('后置 / 最终出口（第二跳）','exit'),
     ui.el('div',{class:'choice-grid'},!staticMode || !selected ? ui.field('配置名称',name) : null,
       ui.field('最终出口地区',ui.select(regionOptions(),form.region,value=>{
         form.region=value;form.regionManual=Boolean(value);form.regionAuto=null;form.acknowledged=false;renderChoices(ctx);
       }),direct ? '按供应商提供的出口地区选择。' : '按第二跳所在地区选择。')),
-    ui.el('p',{class:'muted',text:proxyRoute({front_node:direct ? '' : form.frontNode || '前置节点',
+    ui.el('p',{class:'route-preview',text:proxyRoute({front_node:direct ? '' : form.frontNode || '前置节点',
       exit_node:staticMode ? selected?.chain.static_exit.ip || '静态 IP' : form.node || '最终出口节点'})}),
     form.node && !form.region ? ui.note('未识别最终出口地区，请手动选择。','warn') : null,
     form.regionManual ? ui.pill('出口地区为手动选择','neutral') : null,
-    acknowledgement, start,
+    acknowledgement,
+    ui.el('div',{class:'choice-foot'},
+      ui.el('div',{class:'choice-foot-left'},
+        ui.helpTip('配置需要管理员权限，期间可能短暂中断网络。详细改动可展开下方对照表查看，执行前会再次确认。','配置影响'),
+        ui.el('span',{id:'apply-readiness-hint',class:'readiness-hint','aria-live':'polite'})),
+      start),
   ].filter(Boolean));
   renderImpact(ctx);
+  updateStartButton(ctx);
 }
 
 async function quickReapply(ctx) {
@@ -798,10 +892,10 @@ async function quickReapply(ctx) {
   const ok = await ctx.confirm({
     title: '按当前记录重新配置？',
     subtitle: plan.node + ' · 出口 ' + (plan.region || 'SG'),
-    description: '沿用上次记录的精确节点、订阅和地区重新配置，写入确认后自动执行完整网络验收。验收包含故障演练，公网会短暂中断。',
+    description: '使用上次的节点、订阅和地区重新配置，完成后自动做网络验收（期间会短暂断网）。',
     items: IMPACT,
     confirmText: '重新配置',
-    requireCheck: '我已了解重新配置会关闭 Clash 并短暂中断网络。',
+    requireCheck: '确认重新配置。',
   });
   if (!ok) return;
   ctx.startJob({

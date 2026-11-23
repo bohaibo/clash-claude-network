@@ -103,6 +103,8 @@ function bootShell() {
       h('div', { class: 'side-status', id: 'side-status' }),
       h('button', { class: 'link-btn', type: 'button', onclick: () => showLog('gui/server.log') }, icon('terminal', 15), '界面日志')));
 
+  const refreshBtn = ui.iconButton('refresh', '刷新状态', refreshManually);
+  refreshBtn.id = 'topbar-refresh';
   const topbar = h('header', { class: 'topbar' },
     h('div', { class: 'topbar-title' },
       h('span', { class: 'topbar-eyebrow', text: 'CLAUDE NETWORK' }),
@@ -110,7 +112,7 @@ function bootShell() {
     h('div', { class: 'topbar-actions' },
       h('div', { class: 'chips', id: 'top-chips' }),
       softwareControl(ctx),
-      ui.iconButton('refresh', '刷新状态', refreshManually)));
+      refreshBtn));
 
   const content = h('main', { class: 'content', id: 'content', tabindex: '-1' });
   shell = h('div', { class: 'app' },
@@ -186,6 +188,24 @@ function updateChrome() {
     ].filter(Boolean));
   }
   refreshSoftwareControl(ctx);
+  const navAlerts = {
+    updates: data.operation?.pending_rule_update ? 'bad'
+      : ((data.update?.last?.success === false || data.update?.last?.skipped) && data.update?.last?.time) ||
+        (data.update?.mode === 'scheduled' && data.update?.task?.installed === false && data.configured) ? 'warn' : '',
+    snapshots: data.operation?.settings_pending?.length ? 'bad' : '',
+    logs: data.operation?.pending_tun?.length || (data.configured && verification.dns_failed) || lastRunFailed ? 'bad'
+      : (data.configured && verification.available && verification.success === false) ? 'warn' : '',
+  };
+  for (const button of document.querySelectorAll?.('.nav-item') || []) {
+    const tone = navAlerts[button.dataset?.page] || '';
+    const existing = button.querySelector?.('.nav-dot');
+    if (tone) {
+      if (existing) existing.className = 'nav-dot ' + tone;
+      else button.append(h('span', { class: 'nav-dot ' + tone, 'aria-hidden': 'true' }));
+    } else if (existing) {
+      existing.remove?.();
+    }
+  }
   renderBanners();
 }
 
@@ -387,6 +407,8 @@ function refreshPage() {
 
 async function refreshState(force = false) {
   app.stateLoading = true;
+  const refreshBtn = document.getElementById?.('topbar-refresh');
+  refreshBtn?.classList?.add('is-spinning');
   if (app.showCollectionProgress) renderBanners();
   try {
     const revision = stateRevision;
@@ -414,6 +436,7 @@ async function refreshState(force = false) {
     }
   } finally {
     app.stateLoading = false;
+    document.getElementById?.('topbar-refresh')?.classList?.remove('is-spinning');
     if (!forceRefreshPending) app.showCollectionProgress = false;
     renderBanners();
   }
@@ -689,9 +712,19 @@ async function openLogInline(name) {
   try {
     const value = await api.getLog(name);
     if (requestRevision !== logRequestRevision || !host.isConnected) return;
+    const text = value.text || '';
+    const lineCount = text ? text.split(/\r?\n/).length : 0;
+    const pre = h('pre', { class: 'log-block' }, text || '空日志。');
     host.replaceChildren(
-      h('div', { class: 'log-head' }, h('strong', { text: value.name }), ui.button('复制', { variant: 'ghost', size: 'small', onClick: () => ui.copyText(value.text) })),
-      h('pre', { class: 'log-block' }, value.text || '空日志。'));
+      h('div', { class: 'log-head' },
+        h('div', { class: 'log-head-title' },
+          h('strong', { text: value.name }),
+          lineCount ? h('span', { class: 'muted small', text: lineCount + ' 行' }) : null),
+        h('div', { class: 'log-head-actions' },
+          lineCount > 20 ? ui.button('滚到底部', { variant: 'ghost', size: 'small', onClick: () => { pre.scrollTop = pre.scrollHeight; } }) : null,
+          ui.button('复制', { variant: 'ghost', size: 'small', onClick: () => ui.copyText(text) }),
+          ui.iconButton('close', '关闭日志', () => { delete host.dataset.activeLog; host.replaceChildren(); markActiveLog(host); }, { size: 15 }))),
+      pre);
   } catch (error) {
     if (requestRevision !== logRequestRevision || !host.isConnected) return;
     host.replaceChildren(ui.note(error.message || '读取日志失败。', 'bad'));

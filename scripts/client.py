@@ -213,18 +213,129 @@ def consume_rules(token):
   return download_rules(raw)
  finally:path.unlink(missing_ok=True)
 
-def api(root,method,path,body=None):
+def _http_response_complete(response):
+ header,sep,body=response.partition(b'\r\n\r\n')
+ if not sep:return False
+ lines=header.split(b'\r\n')
+ status=lines[0].split()
+ code=status[1] if len(status)>1 else b''
+ if code in (b'204',b'304') or code.startswith(b'1'):return True
+ headers={}
+ for line in lines[1:]:
+  k,c,v=line.partition(b':')
+  if c:headers[k.strip().lower()]=v.strip().lower()
+ if b'chunked' in headers.get(b'transfer-encoding',b''):
+  pos=0
+  while True:
+   end=body.find(b'\r\n',pos)
+   if end==-1:return False
+   size_part=body[pos:end].split(b';',1)[0].strip()
+   if not size_part:return False
+   try:size=int(size_part,16)
+   except ValueError:return False
+   pos=end+2
+   if size==0:return body.find(b'\r\n',pos)!=-1 or body[pos:]==b''
+   if len(body)<pos+size+2:return False
+   pos+=size+2
+ if b'content-length' in headers:
+  try:return len(body)>=int(headers[b'content-length'])
+  except ValueError:return False
+ return False
+
+def _pipe_request(pipe_path,request,timeout=15.0):
+ import ctypes
+ from ctypes import wintypes
+ class _OVERLAPPED(ctypes.Structure):
+  _fields_=[('Internal',ctypes.c_size_t),('InternalHigh',ctypes.c_size_t),
+            ('Offset',wintypes.DWORD),('OffsetHigh',wintypes.DWORD),('hEvent',wintypes.HANDLE)]
+ k32=ctypes.WinDLL('kernel32',use_last_error=True)
+ k32.CreateFileW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+ k32.CreateFileW.restype=wintypes.HANDLE
+ k32.WaitNamedPipeW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD]
+ k32.WaitNamedPipeW.restype=wintypes.BOOL
+ k32.CreateEventW.argtypes=[ctypes.c_void_p,wintypes.BOOL,wintypes.BOOL,wintypes.LPCWSTR]
+ k32.CreateEventW.restype=wintypes.HANDLE
+ k32.ResetEvent.argtypes=[wintypes.HANDLE];k32.ResetEvent.restype=wintypes.BOOL
+ k32.WriteFile.argtypes=[wintypes.HANDLE,ctypes.c_void_p,wintypes.DWORD,ctypes.POINTER(wintypes.DWORD),ctypes.POINTER(_OVERLAPPED)]
+ k32.WriteFile.restype=wintypes.BOOL
+ k32.ReadFile.argtypes=[wintypes.HANDLE,ctypes.c_void_p,wintypes.DWORD,ctypes.POINTER(wintypes.DWORD),ctypes.POINTER(_OVERLAPPED)]
+ k32.ReadFile.restype=wintypes.BOOL
+ k32.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD];k32.WaitForSingleObject.restype=wintypes.DWORD
+ k32.GetOverlappedResult.argtypes=[wintypes.HANDLE,ctypes.POINTER(_OVERLAPPED),ctypes.POINTER(wintypes.DWORD),wintypes.BOOL]
+ k32.GetOverlappedResult.restype=wintypes.BOOL
+ k32.CancelIoEx.argtypes=[wintypes.HANDLE,ctypes.POINTER(_OVERLAPPED)];k32.CancelIoEx.restype=wintypes.BOOL
+ k32.CloseHandle.argtypes=[wintypes.HANDLE];k32.CloseHandle.restype=wintypes.BOOL
+ INVALID_HANDLE=ctypes.c_void_p(-1).value
+ deadline=time.monotonic()+max(0.1,float(timeout))
+ handle=INVALID_HANDLE
+ while True:
+  handle=k32.CreateFileW(pipe_path,0xC0000000,0,None,3,0x40000000,None)
+  if handle!=INVALID_HANDLE:break
+  err=ctypes.get_last_error()
+  rem=int((deadline-time.monotonic())*1000)
+  if err==231 and rem>0:
+   k32.WaitNamedPipeW(pipe_path,min(500,rem))
+   continue
+  if err==231:raise TimeoutError('Mihomo control pipe busy')
+  raise ctypes.WinError(err)
+ event=k32.CreateEventW(None,True,False,None)
+ if not event:
+  err=ctypes.get_last_error();k32.CloseHandle(handle);raise ctypes.WinError(err)
+ def wait_io(ov,transferred,op):
+  rem=int((deadline-time.monotonic())*1000)
+  if rem<=0:
+   k32.CancelIoEx(handle,ctypes.byref(ov));k32.GetOverlappedResult(handle,ctypes.byref(ov),ctypes.byref(transferred),True)
+   raise TimeoutError(f'Mihomo control pipe {op} timed out')
+  state=k32.WaitForSingleObject(event,rem)
+  if state==258:
+   k32.CancelIoEx(handle,ctypes.byref(ov));k32.GetOverlappedResult(handle,ctypes.byref(ov),ctypes.byref(transferred),True)
+   raise TimeoutError(f'Mihomo control pipe {op} timed out')
+  if state!=0:
+   k32.CancelIoEx(handle,ctypes.byref(ov));k32.GetOverlappedResult(handle,ctypes.byref(ov),ctypes.byref(transferred),True)
+   raise OSError(f'Mihomo control pipe wait failed ({state})')
+ try:
+  ov=_OVERLAPPED(hEvent=event)
+  offset=0
+  while offset<len(request):
+   chunk=request[offset:]
+   k32.ResetEvent(event);ov.Offset=0;ov.OffsetHigh=0
+   written=wintypes.DWORD(0)
+   if not k32.WriteFile(handle,chunk,len(chunk),ctypes.byref(written),ctypes.byref(ov)):
+    err=ctypes.get_last_error()
+    if err!=997:raise ctypes.WinError(err)
+    wait_io(ov,written,'write')
+    if not k32.GetOverlappedResult(handle,ctypes.byref(ov),ctypes.byref(written),False):
+     raise ctypes.WinError(ctypes.get_last_error())
+   if written.value==0:raise OSError('Mihomo control pipe write returned 0 bytes')
+   offset+=written.value
+  response=b''
+  buf=ctypes.create_string_buffer(65536)
+  while not _http_response_complete(response):
+   k32.ResetEvent(event);ov.Offset=0;ov.OffsetHigh=0
+   read_bytes=wintypes.DWORD(0)
+   if not k32.ReadFile(handle,buf,65536,ctypes.byref(read_bytes),ctypes.byref(ov)):
+    err=ctypes.get_last_error()
+    if err==109:break
+    if err==234:
+     response+=buf.raw[:read_bytes.value];continue
+    if err!=997:raise ctypes.WinError(err)
+    wait_io(ov,read_bytes,'read')
+    if not k32.GetOverlappedResult(handle,ctypes.byref(ov),ctypes.byref(read_bytes),False):
+     err2=ctypes.get_last_error()
+     if err2==109:break
+     if err2!=234:raise ctypes.WinError(err2)
+   if read_bytes.value==0:break
+   response+=buf.raw[:read_bytes.value]
+  return response
+ finally:
+  k32.CloseHandle(event);k32.CloseHandle(handle)
+
+def api(root,method,path,body=None,timeout=15.0):
  config=load(root/'clash-verge.yaml');pipes=[n for n in os.listdir('//./pipe/') if n.startswith('verge-mihomo-')]
  require(len(pipes)==1,'Cannot identify a unique Mihomo control pipe')
  payload=b'' if body is None else json.dumps(body).encode()
  request=(f'{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {config.get("secret","")}\r\nContent-Type: application/json\r\nContent-Length: {len(payload)}\r\n\r\n').encode()+payload
- with open('\\\\.\\pipe\\'+pipes[0],'r+b',buffering=0) as stream:
-  stream.write(request);response=b''
-  while True:
-   try:part=stream.read(65536)
-   except OSError:break
-   if not part:break
-   response+=part
+ response=_pipe_request('\\\\.\\pipe\\'+pipes[0],request,timeout=timeout)
  header,_,value=response.partition(b'\r\n\r\n')
  # A controller that is still starting accepts the pipe and can close it before
  # writing a status line. That must stay a retryable failure, not an IndexError.
@@ -266,14 +377,15 @@ def build(root,item,node,data=None,*,runtime=None,profiles=None,original=None):
   fields=rule.split(',')
   if len(fields)<3 or fields[2]!='DIRECT':continue
   if fields[0] in ('IP-CIDR','IP-CIDR6'):
+   if len(fields) not in (3,4) or (len(fields)==4 and fields[3]!='no-resolve'):continue
    network=ipaddress.ip_network(fields[1],strict=False)
    if network.version==4 and network.overlaps(FAKE):continue
-   if network.is_private or network.is_link_local or network.is_loopback:data['lan'].append(rule)
+   if local_network(network):data['lan'].append(rule)
   elif fields[0] in ('DOMAIN','DOMAIN-SUFFIX') and (fields[1] in ('localhost','lan','local','internal') or fields[1].endswith(('.lan','.local','.internal'))):data['lan'].append(rule)
  selected=next(n for n in original.get('proxies',[]) if n['name']==node)
  try:
   address=ipaddress.ip_address(selected['server'])
-  if address.version==4 and not static_exit:data['lan'].insert(0,f'IP-CIDR,{address}/32,DIRECT,no-resolve')
+  if address.version==4 and not static_exit and not selected.get('dialer-proxy'):data['lan'].insert(0,f'IP-CIDR,{address}/32,DIRECT,no-resolve')
  except ValueError:pass
  # Preserve the selected subscription's cached classical LAN provider rules, not another subscription's.
  data['lanProviderOverrides']={}
@@ -298,7 +410,7 @@ def build(root,item,node,data=None,*,runtime=None,profiles=None,original=None):
   data['lan'].append(rule)
  data['lan']=list(dict.fromkeys(data['lan']))
  write(LOCAL/'lan-audit.json',{'source_profiles_changed':False,'changes':lan_audit})
- scriptid=item.get('option',{}).get('script')
+ scriptid=(item.get('option') or {}).get('script')
  entry=next((x for x in (profiles if profiles is not None else load(root/'profiles.yaml'))['items'] if x['uid']==scriptid),None)
  previous=safe_file(root,'profiles/'+entry['file']).read_text(encoding='utf-8') if entry else 'function main(config) { return config; }'
  # Do not nest this project's wrapper on repeated applications.
@@ -361,7 +473,7 @@ def validate(config,original,node):
   elif parts[0] in ('DOMAIN','DOMAIN-SUFFIX'):lan_domain(parts[1],policy)
   elif parts[0] in ('IP-CIDR','IP-CIDR6'):
    network=ipaddress.ip_network(parts[1],strict=False)
-   node_exception=bool(not original.get('x-portable-chain',{}).get('static_exit') and server and server.version==4 and network==ipaddress.ip_network(str(server)+'/32'))
+   node_exception=bool(not original.get('x-portable-chain',{}).get('static_exit') and not selected.get('dialer-proxy') and server and server.version==4 and network==ipaddress.ip_network(str(server)+'/32'))
    require(local_network(network) or node_exception,'Public address in early LAN DIRECT rules')
   else:raise AssertionError('Unknown early DIRECT rule; review required')
  for server in config['dns']['nameserver']:
@@ -432,7 +544,7 @@ def seal():
  write(manifest,state);return {'system_backup_sealed':True}
 def preparation_inputs(root,item,profiles):
  names=['profiles.yaml','clash-verge.yaml','profiles/'+item['file']]
- scriptid=item.get('option',{}).get('script')
+ scriptid=(item.get('option') or {}).get('script')
  entry=next((x for x in profiles['items'] if x['uid']==scriptid),None)
  if entry:names.append('profiles/'+entry['file'])
  original=load(safe_file(root,'profiles/'+item['file'])) or {}
@@ -544,12 +656,14 @@ def apply_client():
  require(item is not None,'Selected subscription disappeared before apply')
  journal_path=(Path(plan['snapshot']) if plan.get('snapshot') else snapshot_dir())/'client-changes.json'
  journal=json.loads(journal_path.read_text(encoding='utf-8-sig')) if journal_path.exists() else {'subscriptions':{}}
- record=journal['subscriptions'].setdefault(item['uid'],{'had_option':'option' in item,'had_script':'script' in item.get('option',{}),
-                 'script':item.get('option',{}).get('script'),'applied_scripts':[]})
+ option=item.get('option') or {}
+ record=journal['subscriptions'].setdefault(item['uid'],{'had_option':'option' in item and item['option'] is not None,'had_script':'script' in option,
+                 'script':option.get('script'),'applied_scripts':[]})
  if plan['script_uid'] not in record['applied_scripts']:record['applied_scripts'].append(plan['script_uid'])
  write(journal_path,journal) # Commit recovery metadata before changing any association.
  if not plan['script_existed']:profiles['items'].append({'uid':plan['script_uid'],'type':'script','file':plan['script_file'],'desc':'Portable Claude network enhancement','updated':int(__import__('time').time())})
- item.setdefault('option',{})['script']=plan['script_uid'];profiles['current']=item['uid']
+ if not isinstance(item.get('option'),dict):item['option']={}
+ item['option']['script']=plan['script_uid'];profiles['current']=item['uid']
  if plan.get('chain'):managed_chain.sync_traffic(profiles,plan['chain'])
  targets={root/'profiles.yaml':yaml_dumps(profiles,allow_unicode=True,sort_keys=False),
   safe_file(root,'profiles/'+plan['script_file']):(LOCAL/'candidate.js').read_text(encoding='utf-8'),root/'clash-verge.yaml':text}
@@ -557,7 +671,9 @@ def apply_client():
  if plan.get('chain'):
   chain_target=safe_file(root,'profiles/'+plan['chain']['file'])
   targets[chain_target]=(LOCAL/'managed-chain-source.yaml').read_text(encoding='utf-8')
-  registry=managed_chain.records(root,LOCAL);registry[plan['subscription_uid']]=plan['chain']
+  live_uids={x.get('uid') for x in profiles['items']}
+  registry={k:v for k,v in managed_chain.records(root,LOCAL).items() if k in live_uids}
+  registry[plan['subscription_uid']]=plan['chain']
   targets[LOCAL/managed_chain.REGISTRY]=json.dumps(registry,ensure_ascii=False,indent=2)
  for filename,updates in [('verge.yaml',{'enable_tun_mode':True,'enable_system_proxy':False,'enable_dns_settings':False}),('config.yaml',{'mode':'rule','ipv6':False,'tun':yaml_loads(text)['tun']})]:
   value=load(root/filename) or {};value.update(updates);targets[root/filename]=yaml_dumps(value,allow_unicode=True,sort_keys=False)
@@ -650,7 +766,8 @@ def client_restore_targets(root,original,plan,journal):
    # Legacy versions overwrote user scripts; remove only the project suffix.
    targets[file]=cleaned
  for entry in items:
-  uid=entry['uid'];option=entry.get('option',{})
+  uid=entry['uid'];option=entry.get('option')
+  if not isinstance(option,dict):option={}
   current=option.get('script')
   saved=journal.get('subscriptions',{}).get(uid)
   if saved and current in saved.get('applied_scripts',[]) and current in owned:
@@ -662,17 +779,17 @@ def client_restore_targets(root,original,plan,journal):
    else:option.pop('script',None)
    if not option and not saved.get('had_option'):entry.pop('option',None)
   elif current in owned:
-   old=originals.get(uid,{}).get('option',{})
+   old=originals.get(uid,{}).get('option') or {}
    if 'script' in old and old['script'] not in owned:
     if old['script'] and old['script'] not in {x['uid'] for x in items}:raise ValueError('Previous user script no longer exists')
     option['script']=old['script']
    else:option.pop('script',None)
  # Never resurrect removed subscriptions, change the active subscription, or
  # overwrite source files, URLs, ordering, timestamps, or node updates.
- referenced={x.get('option',{}).get('script') for x in items}
+ referenced={(x.get('option') or {}).get('script') for x in items}
  if any(uid in referenced for uid in owned):raise ValueError('Project script is still referenced')
  for entry in items:
-  uid=entry.get('option',{}).get('script')
+  uid=(entry.get('option') or {}).get('script')
   if uid not in preserved:
    old=originals.get(uid,{})
    if old.get('file'):
@@ -728,7 +845,7 @@ def restore_client():
   try:api(root,'PUT','/configs?force=true',{'payload':runtime.read_text(encoding='utf-8')});reloaded=True
   except Exception as exc:failed.append({'file':'clash-verge.yaml','operation':'reload','reason':type(exc).__name__})
  active=next((x for x in profiles.get('items',[]) if x.get('uid')==profiles.get('current')),None)
- script=next((x for x in profiles.get('items',[]) if active and x.get('uid')==active.get('option',{}).get('script')),None)
+ script=next((x for x in profiles.get('items',[]) if active and x.get('uid')==(active.get('option') or {}).get('script')),None)
  project_node=None
  if script and script.get('file') and not failed:
   text=safe_file(root,'profiles/'+script['file']).read_text(encoding='utf-8')
@@ -753,7 +870,7 @@ def restored_runtime_ready(root,report):
  source=restore_yaml(safe_file(root,'profiles/'+item['file'])) or {}
  if not isinstance(source,dict):raise ValueError('Invalid subscription source')
  if project_node:
-  script=next((x for x in current.get('items',[]) if x.get('uid')==item.get('option',{}).get('script')),None)
+  script=next((x for x in current.get('items',[]) if x.get('uid')==(item.get('option') or {}).get('script')),None)
   if not script or not script.get('file'):return None
   if parse_project_wrapper(safe_file(root,'profiles/'+script['file']).read_text(encoding='utf-8'))[3]!=project_node:return None
   # A configured manual snapshot legitimately retains the pinned group. Check
@@ -780,15 +897,37 @@ def finish_restore(timeout=90):
  import time
  report=json.loads((LOCAL/'client-restore-result.json').read_text(encoding='utf-8'))
  root=root_path(report['root']);deadline=time.monotonic()+timeout
+ settled=False;restarted_core=False
  try:
   if report['failed_items']:raise ValueError('File restoration is incomplete')
   while True:
    try:
     text=restored_runtime_ready(root,report)
     if text is not None:
-     api(root,'PUT','/configs?force=true',{'payload':text})
+     if timeout>0 and not settled:
+      settled=True
+      age=time.time()-(root/'clash-verge.yaml').stat().st_mtime
+      if 0<=age<1.5:
+       wait=min(1.5-age,max(0.0,deadline-time.monotonic()))
+       if wait>0:time.sleep(wait)
+       text=restored_runtime_ready(root,report)
+       if text is None:continue
+     remaining=deadline-time.monotonic()
+     if timeout>0 and remaining<15.0:
+      api(root,'PUT','/configs?force=true',{'payload':text},timeout=max(1.0,remaining))
+     else:
+      api(root,'PUT','/configs?force=true',{'payload':text})
      report.update(client_restored=True,status='complete',runtime_reloaded=True,runtime_rebuild_required=False)
      break
+   except TimeoutError:
+    if timeout>0 and not restarted_core and (deadline-time.monotonic())>15 and os.name=='nt':
+     restarted_core=True
+     try:
+      subprocess.run(['powershell.exe','-NoProfile','-Command','Restart-Service clash_verge_service -Force -ErrorAction SilentlyContinue'],
+                     capture_output=True,timeout=20)
+     except (OSError,subprocess.SubprocessError):
+      pass
+     time.sleep(min(2.0,max(0.0,deadline-time.monotonic())))
    except (OSError,UnicodeError,ValueError,yaml.YAMLError,AssertionError,IndexError,KeyError,StopIteration,TypeError):
     pass # Retry partially written files and a temporarily unavailable controller.
    if time.monotonic()>=deadline:raise TimeoutError('Native client has not regenerated the current subscription')
