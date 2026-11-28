@@ -333,7 +333,7 @@ async function main() {
   const dynamic = environment('gui/js/pages/overview.js');
   dynamic.expose('globalThis.setup=render;');
   let discoveryCount=0, finishDiscovery;
-  const configureCtx={state:{capabilities:{managed_chain:true,static_exit:true,static_direct:true}},
+  const configureCtx={state:{capabilities:{managed_chain:true,static_exit:true,static_direct:true,gist_import:true}},
     loadNodes:async()=>{discoveryCount++;return new Promise(resolve=>{finishDiscovery=resolve;});}};
   dynamic.document.root.append(dynamic.context.setup(configureCtx));
   const mobileCard = dynamic.document.getElementById('mobile-export-card');
@@ -349,10 +349,12 @@ async function main() {
   const fields=dynamic.document.root.querySelector('.choice-area');
   const choose=value=>modeSelect.handlers.change({target:{value}});
   assert.equal(modeSelect.value,'');
-  assert.equal(modeSelect.children.length,5);
+  assert.equal(modeSelect.children.length,6);
   assert.equal(fields.children.length,0);
   assert.equal(discoveryCount,0);
   modeSelect.focus();
+  choose('gistImport');
+  assert(fields.textContent.includes('正在读取'));
   choose('staticDirect');
   assert(fields.textContent.includes('正在读取'));
   choose('static');
@@ -361,6 +363,9 @@ async function main() {
   await new Promise(resolve=>setImmediate(resolve));
   assert(fields.textContent.includes('公网静态 IPv4'));
   assert(fields.querySelector('[aria-label="前置（第一跳）节点"]'));
+  choose('gistImport');
+  assert(fields.querySelector('[aria-label="Secret Gist 链接"]'));
+  assert(fields.textContent.includes('读取并校验配置'));
   choose('staticDirect');
   assert(fields.textContent.includes('公网静态 IPv4'));
   assert(!fields.querySelector('[aria-label="前置（第一跳）节点"]'));

@@ -90,5 +90,74 @@ const ctx={state:{configured:true,capabilities:{managed_chain:true}},confirm:asy
  await p.beginApply(ctx);
  assert.equal(jobs.at(-1).subscription,'direct');
  assert(!('chain' in jobs.at(-1)));
+
+ // Secret Gist import mode contract checks
+ const savedGist={name:'Saved Gist',gist_import:true,topology:'chain',front_node:'Entry HK',gist_hint:'octo/…123456',has_saved_gist:true};
+ p.setData({subscriptions:[{uid:'ManagedChain111111111111',nodes:[savedGist.name],chain:savedGist}],regions:{}});
+ ctx.state.capabilities.gist_import=true;
+ const previewCalls=[];
+ ctx.api={post:async(url,body)=>{
+   previewCalls.push({url,body});
+   return {
+     token:'a'.repeat(32),
+     replace_uid:body.saved_uid || '',
+     summary:{
+       default_name:'Gist SG Node',
+       topology:'chain',
+       topology_label:'链式代理配置',
+       front_label:'Chain-Front-Pinned',
+       front_count:1,
+       front_group:false,
+       exit_label:'Gist SG Node',
+       udp_blocked:false,
+       region_hint:{code:'SG',source:'gist'},
+       gist_hint:'octo/…999999',
+     },
+   };
+ }};
+ vm.runInContext('Object.assign(globalThis.probe,{fetchGistPreview,gistImportReady});',context);
+ p.switchMode(ctx,'gistImport');
+ assert(!p.gistImportReady());
+ p.form.gistUrl='https://gist.github.com/octo/'+'a'.repeat(32);
+ await p.fetchGistPreview(ctx);
+ assert.equal(previewCalls.length,1);
+ assert.equal(previewCalls[0].url,'/api/gist-import/preview');
+ assert.equal(p.form.gistToken,'a'.repeat(32));
+ assert.equal(p.form.chainName,'Gist SG Node');
+ assert.equal(p.form.region,'SG');
+ assert.equal(p.form.gistRegionSource,'gist');
+ assert(p.gistImportReady());
+ p.switchMode(ctx,'single');
+ p.switchMode(ctx,'gistImport');
+ assert.equal(p.form.gistToken,'a'.repeat(32));
+ assert.equal(p.form.chainName,'Gist SG Node');
+ p.form.acknowledged=true;
+ await p.beginApply(ctx);
+ const importJob=jobs.at(-1);
+ assert.equal(importJob.node,'Gist SG Node');
+ assert.equal(importJob.subscription,'');
+ assert.equal(importJob.region,'SG');
+ assert.deepEqual(JSON.parse(JSON.stringify(importJob.gist_import)),{token:'a'.repeat(32),name:'Gist SG Node'});
+ assert(!JSON.stringify(importJob).includes('gist.github.com'));
+ Object.assign(p.form,{gistSaved:'ManagedChain111111111111',gistToken:'',gistSummary:null,gistReplaceUid:'',chainName:'Saved Gist',region:'JP',acknowledged:true});
+ assert(p.gistImportReady());
+ await p.beginApply(ctx);
+ const reapplyJob=jobs.at(-1);
+ assert.equal(reapplyJob.node,'Saved Gist');
+ assert.equal(reapplyJob.subscription,'ManagedChain111111111111');
+ assert(!('gist_import' in reapplyJob));
+ await p.fetchGistPreview(ctx,{savedUid:'ManagedChain111111111111'});
+ assert.equal(previewCalls.at(-1).body.saved_uid,'ManagedChain111111111111');
+ assert.equal(p.form.gistReplaceUid,'ManagedChain111111111111');
+ assert.equal(p.form.chainName,'Saved Gist');
+ p.form.acknowledged=true;
+ await p.beginApply(ctx);
+ const refetchJob=jobs.at(-1);
+ assert.equal(refetchJob.subscription,'ManagedChain111111111111');
+ assert.deepEqual(JSON.parse(JSON.stringify(refetchJob.gist_import)),{token:'a'.repeat(32),name:'Saved Gist',replace_uid:'ManagedChain111111111111'});
+ ctx.state.capabilities.gist_import=false;
+ const beforeCount=jobs.length;
+ await p.beginApply(ctx);
+ assert.equal(jobs.length,beforeCount);
  console.log('Offline chain UI checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

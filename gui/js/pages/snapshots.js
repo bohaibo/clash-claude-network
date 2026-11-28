@@ -48,13 +48,17 @@ function baselineCard(ctx) {
   return ui.card({
     title: '固定首次恢复点',
     help: '首次配置前自动保存的原始系统状态，不会被覆盖。',
-    actions: state.baseline ? ui.badge(verified ? '与配置关联' : '已固定', verified ? 'ok' : 'neutral') : ui.badge('缺失', 'bad'),
+    actions: state.baseline ? ui.badge(verified ? '与配置关联' : '已固定', verified ? 'ok' : 'neutral')
+      : ui.badge(state.configured ? '缺失' : '尚未创建', state.configured ? 'bad' : 'neutral'),
   },
   ui.kv([
     ['恢复点', state.baseline || '—'],
     ['配置关联', state.plan?.snapshot || '—'],
   ]),
-  !state.baseline ? ui.note('未找到首次恢复点，请完成一次配置或检查 .local/snapshots 目录。', 'bad') : null);
+  !state.baseline ? ui.note(state.configured
+    ? '未找到首次恢复点，请检查 .local/snapshots 目录。'
+    : '尚未创建首次恢复点；完成第一次「一键配置」时会自动保存本机原始状态。',
+    state.configured ? 'bad' : 'info') : null);
 }
 
 function listCard(ctx, snapshots) {

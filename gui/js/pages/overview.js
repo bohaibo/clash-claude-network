@@ -40,6 +40,14 @@ const form = {
   staticUser: '',
   staticPassword: '',
   staticSaved: '',
+  gistUrl: '',
+  gistSaved: '',
+  gistToken: '',
+  gistSummary: null,
+  gistError: '',
+  gistReplaceUid: '',
+  gistRegionSource: '',
+  gistLoading: false,
   node: '',
   subscription: '',
   region: '',
@@ -51,10 +59,11 @@ const form = {
   regionAuto: null,
   regionManual: false,
 };
-const modeDrafts = { single: null, chain: null, static: null, staticDirect: null };
+const modeDrafts = { single: null, chain: null, static: null, staticDirect: null, gistImport: null };
 const draftFields = ['node','subscription','region','regionAuto','regionManual','search',
   'frontSubscription','frontNode','frontGroup','chainName','frontSearch','exitSearch',
-  'staticProtocol','staticIp','staticPort','staticUser','staticPassword','staticSaved'];
+  'staticProtocol','staticIp','staticPort','staticUser','staticPassword','staticSaved',
+  'gistUrl','gistSaved','gistToken','gistSummary','gistError','gistReplaceUid','gistRegionSource'];
 const captureDraft = () => Object.fromEntries(draftFields.map(key => [key,form[key]]));
 const emptyDraft = captureDraft();
 
@@ -71,9 +80,10 @@ export function render(ctx) {
   const plan = state.plan || {};
   if (!form.initialized) {
     if (plan.node) {
-      const lastMode = !plan.chain ? 'single' : plan.chain.direct ? 'staticDirect' :
-        plan.chain.static_exit ? 'static' : 'chain';
-      if (plan.chain) loadChainSelection(ctx,plan.chain,plan.subscription);
+      const lastMode = !plan.chain ? 'single' : plan.chain.gist_import ? 'gistImport' :
+        plan.chain.direct ? 'staticDirect' : plan.chain.static_exit ? 'static' : 'chain';
+      if (plan.chain?.gist_import) loadGistSelection(ctx, plan.chain, plan.subscription, plan.region);
+      else if (plan.chain) loadChainSelection(ctx,plan.chain,plan.subscription);
       else Object.assign(form,{subscription:plan.subscription || '',node:plan.node});
       form.region = plan.region || '';
       form.regionManual = Boolean(form.region);
@@ -210,8 +220,9 @@ function setupCard(ctx) {
     {value:'chain',label:'链式代理配置'},
     {value:'static',label:'静态 IP 出口链式代理'},
     {value:'staticDirect',label:'单一静态 IP 配置'},
+    {value:'gistImport',label:'从 Secret Gist 导入配置'},
   ], form.mode, value => switchMode(ctx,value), {id:'configuration-mode'}),
-  '四种方式可以同时保留。在 Clash Verge 的「订阅」页启用要使用的配置。');
+  '五种方式可同时保留，在 Clash Verge「订阅」页切换使用。已有另一台电脑的 Secret Gist 时，直接选「从 Secret Gist 导入配置」最快。');
   const card = ui.card({
     title: configured ? '更换配置或重新配置' : '连接配置',
     help: '每份配置固定一个海外出口。配置会请求管理员权限。',
@@ -232,7 +243,8 @@ function renderImpact(ctx) {
   const preview = ctx.state.preview || {};
   const now = preview.current || {};
   const target = preview.regions?.[form.region] || {};
-  const selected = form.mode === 'single' ? Boolean(form.node && (currentSubscription(ctx)?.nodes || []).includes(form.node)) : chainReady();
+  const selected = form.mode === 'single' ? Boolean(form.node && (currentSubscription(ctx)?.nodes || []).includes(form.node))
+    : form.mode === 'gistImport' ? gistImportReady() : chainReady();
   const unknown = '未能确认';
   const pending = '选择节点后确定';
   const countryName = (code) => {
@@ -268,7 +280,7 @@ function renderImpact(ctx) {
     ['npm 代理', proxyState(now.npm), '关闭'],
     ['Docker 代理', proxyState(now.docker), '关闭'],
     ['网站连接方式', now.routing_simple, '按规则分流'],
-    ['国外连接节点', now.fixed_node || unknown, after(form.mode === 'single' ? form.node : form.chainName)],
+    ['国外连接节点', now.fixed_node || unknown, after(form.mode === 'single' ? form.node : form.mode === 'gistImport' ? (form.gistToken ? form.chainName.trim() : savedGistProfile()?.chain?.name) : form.chainName)],
     ['DNS 解析', now.dns_simple, '开启'],
     ['DNS 额外过滤', now.dns_filter_simple, '开启'],
     ['接管应用网络', now.tun_simple, '开启'],
@@ -397,10 +409,35 @@ function loadChainSelection(ctx, saved, uid) {
   } else applyRegionHint(ctx,form.node);
 }
 
+function loadGistSelection(ctx, saved, uid, region = '') {
+  form.gistSaved = uid || '';
+  form.chainName = saved.name || '';
+  form.gistToken = '';
+  form.gistSummary = null;
+  form.gistError = '';
+  form.gistReplaceUid = '';
+  form.gistRegionSource = '';
+  form.regionAuto = null;
+  form.regionManual = false;
+  form.acknowledged = false;
+  if (region) {
+    form.region = region;
+    form.regionManual = true;
+  } else if (uid === nodesState.data?.plan_subscription && nodesState.data?.plan_region) {
+    form.region = nodesState.data.plan_region;
+    form.regionManual = true;
+  } else {
+    const hint = nodesState.data?.regions?.[uid]?.[saved.name];
+    form.regionAuto = hint?.code ? hint : null;
+    form.region = form.regionAuto?.code || '';
+  }
+}
+
 function switchMode(ctx, value) {
   if (value===form.mode) return;
   if (form.mode) modeDrafts[form.mode]=captureDraft();
   form.mode=value;
+  form.gistLoading=false;
   form.acknowledged=false;
   nodesState.selectionNotice='';
   Object.assign(form,modeDrafts[value] || emptyDraft);
@@ -430,16 +467,21 @@ function renderChoices(ctx) {
   const data = nodesState.data;
   const subscriptions = (data?.subscriptions || []).filter(row=>!row.chain);
   if (reconcileSubscriptions(form, subscriptions)) nodesState.selectionNotice='原订阅已不可用，请重新选择订阅和节点。';
+  if (form.gistSaved && !(data?.subscriptions || []).some(row => row.uid === form.gistSaved && row.chain?.gist_import)) {
+    form.gistSaved = '';
+    if (form.gistReplaceUid) form.gistReplaceUid = '';
+  }
   if (form.mode!=='single') {
     if (!supportsMode(ctx)) {
       choicesHost.replaceChildren(ui.note('软件后台仍是旧版本。请关闭所有管理窗口后，重新运行「一键网络.cmd」。','warn'));
       return;
     }
+    if (form.mode === 'gistImport') { renderGistImportChoices(ctx); return; }
     renderChainChoices(ctx);return;
   }
   if (form.node && !form.regionAuto && !form.regionManual) applyRegionHint(ctx, form.node);
   if (!subscriptions.length) {
-    choicesHost.replaceChildren(ui.note('当前没有可读取的远程订阅。可以使用单一静态 IP，或在 Clash Verge 导入订阅。', 'warn'), reloadButton(ctx));
+    choicesHost.replaceChildren(ui.note('当前没有可读取的远程订阅。如需快速配置，可把上方「配置方式」切换为「从 Secret Gist 导入配置」或「单一静态 IP 配置」；也可先在 Clash Verge 导入订阅。', 'warn'), reloadButton(ctx));
     return;
   }
   const current = currentSubscription(ctx);
@@ -610,6 +652,18 @@ function readinessHint(ctx, ready, inside) {
     if (!form.acknowledged) return '请勾选上方确认框后继续';
     return '准备就绪，点击开始配置';
   }
+  if (form.mode === 'gistImport') {
+    if (form.gistLoading) return '正在读取并校验 Secret Gist…';
+    if (!form.gistToken && !savedGistProfile()) return '请粘贴 Secret Gist 链接并点击读取校验';
+    if (form.gistToken) {
+      if (!form.chainName.trim()) return '请填写配置名称';
+      if (chainNameConflict()) return '该配置名称已被已有配置使用，请换一个名称';
+    }
+    if (!form.region) return '请选择最终出口地区';
+    if (!ready) return '请先读取有效的 Secret Gist 配置';
+    if (!form.acknowledged) return '请勾选上方确认框后继续';
+    return '准备就绪，点击开始配置';
+  }
   const rows = (nodesState.data?.subscriptions || []).filter(r => !r.chain);
   if (form.mode !== 'staticDirect' && !hasFrontChoice(rows)) {
     return isStaticMode() && form.staticSaved ? '原前置节点已不可用，请切换「新建配置」重新设置' : '请选择前置（第一跳）订阅和节点';
@@ -639,7 +693,7 @@ function updateStartButton(ctx) {
   if (!button) return;
   const current = currentSubscription(ctx);
   const inside = Boolean(current && (current.nodes || []).includes(form.node));
-  const ready = form.mode === 'single' ? Boolean(form.node && inside) : chainReady();
+  const ready = form.mode === 'single' ? Boolean(form.node && inside) : form.mode === 'gistImport' ? gistImportReady() : chainReady();
   const enabled = Boolean(form.region && ready && form.acknowledged && !operationsBlocked(ctx));
   button.disabled = !enabled;
   button.title = form.mode === 'single' && form.node && !inside ? '所选节点不在当前订阅中，请重新选择。' : '';
@@ -651,6 +705,7 @@ function updateStartButton(ctx) {
 }
 
 function stateText(ctx) {
+  if (form.mode === 'gistImport') return form.gistReplaceUid ? '更新并配置此导入节点' : '配置此导入节点';
   if (isStaticMode()) return '配置此静态 IP 出口';
   return form.mode === 'chain' ? '配置此链式代理' : '配置此单一节点';
 }
@@ -660,13 +715,14 @@ function isStaticMode() {
 }
 
 function supportsMode(ctx) {
+  if (form.mode === 'gistImport') return ctx.state.capabilities?.gist_import;
   if (form.mode === 'staticDirect') return ctx.state.capabilities?.static_direct;
   return form.mode === 'static' ? ctx.state.capabilities?.static_exit : ctx.state.capabilities?.managed_chain;
 }
 
 function proxyRoute(selection) {
-  const exit = selection.static_exit?.ip || selection.exit_node;
-  return ['电脑', selection.front_node, exit, '目标网站'].filter(Boolean).join(' → ');
+  const exit = selection.static_exit?.ip || selection.exit_node || selection.name;
+  return ['电脑', selection.direct ? '' : selection.front_node, exit, '目标网站'].filter(Boolean).join(' → ');
 }
 
 function savedStatic() {
@@ -674,9 +730,60 @@ function savedStatic() {
     Boolean(row.chain.direct) === (form.mode === 'staticDirect'));
 }
 
+function savedGistProfile() {
+  return (nodesState.data?.subscriptions || []).find(row => row.uid === form.gistSaved && row.chain?.gist_import);
+}
+
+function gistImportReady() {
+  if (form.gistLoading) return false;
+  if (form.gistToken) {
+    return Boolean(form.gistSummary && form.chainName.trim() && !chainNameConflict());
+  }
+  return Boolean(savedGistProfile());
+}
+
 function staticEndpoint() {
   return {protocol:form.staticProtocol,ip:form.staticIp.trim(),port:Number(form.staticPort),
     username:form.staticUser,password:form.staticPassword};
+}
+
+async function fetchGistPreview(ctx, { savedUid = '' } = {}) {
+  if (form.gistLoading || operationsBlocked(ctx)) return;
+  const url = form.gistUrl.trim();
+  if (!savedUid && !url) {
+    form.gistError = '请先粘贴 GitHub Secret Gist 链接。';
+    renderChoices(ctx);
+    return;
+  }
+  form.gistLoading = true;
+  form.gistError = '';
+  renderChoices(ctx);
+  try {
+    const result = await ctx.api.post('/api/gist-import/preview',
+      savedUid ? { saved_uid: savedUid } : { gist_url: url }, { timeout: 60000 });
+    form.gistToken = result.token;
+    form.gistSummary = result.summary;
+    form.gistReplaceUid = result.replace_uid || savedUid || '';
+    const existingName = savedUid ? savedGistProfile()?.chain?.name : '';
+    form.chainName = existingName || result.summary?.default_name || '';
+    form.acknowledged = false;
+    const hint = result.summary?.region_hint;
+    if (hint?.code) {
+      form.region = hint.code;
+      form.gistRegionSource = hint.source || 'name';
+      form.regionAuto = hint.source === 'gist' ? null : hint;
+      form.regionManual = false;
+    } else if (!form.regionManual) {
+      form.region = '';
+      form.gistRegionSource = '';
+      form.regionAuto = null;
+    }
+  } catch (error) {
+    form.gistError = error.message || '读取 Secret Gist 失败。';
+  } finally {
+    form.gistLoading = false;
+    renderChoices(ctx);
+  }
 }
 
 async function beginApply(ctx) {
@@ -695,6 +802,65 @@ async function beginApply(ctx) {
   let node = form.node;
   let subscription = form.subscription;
   let chain = null;
+  if (form.mode === 'gistImport') {
+    if (!gistImportReady()) return;
+    if (form.gistToken) {
+      const name = form.chainName.trim();
+      const replaceUid = form.gistReplaceUid || '';
+      const summary = form.gistSummary || {};
+      const routeText = proxyRoute({
+        name,
+        direct: !summary.front_label,
+        front_node: summary.front_label,
+        static_exit: summary.udp_blocked ? { ip: summary.exit_label } : null,
+      });
+      const ok = await ctx.confirm({
+        title: replaceUid ? '更新并重新配置导入节点？' : '开始配置导入节点？',
+        subtitle: name + ' · ' + routeText + ' · 最终出口 ' + region,
+        description: '将在本机重新生成完整 Windows 分流规则、TUN 与系统防护并重启 Clash。',
+        items: IMPACT,
+        note: '配置期间网络会短暂断开，请先保存进行中的工作。',
+        noteType: 'warn',
+        confirmText: '确认配置',
+        requireCheck: '我已保存工作，确认开始配置。',
+      });
+      if (!ok) return;
+      ctx.startJob({
+        action: 'apply',
+        node: name,
+        subscription: replaceUid,
+        region,
+        gist_import: {
+          token: form.gistToken,
+          name,
+          ...(replaceUid ? { replace_uid: replaceUid } : {}),
+        },
+        confirm: 'APPLY',
+      });
+      return;
+    }
+    const savedGist = savedGistProfile();
+    if (!savedGist) return;
+    const ok = await ctx.confirm({
+      title: '开始配置网络？',
+      subtitle: savedGist.chain.name + ' · ' + proxyRoute(savedGist.chain) + ' · 最终出口 ' + region,
+      description: '将应用以下网络与系统设置并重启 Clash。',
+      items: IMPACT,
+      note: '配置期间网络会短暂断开，请先保存进行中的工作。',
+      noteType: 'warn',
+      confirmText: '确认配置',
+      requireCheck: '我已保存工作，确认开始配置。',
+    });
+    if (!ok) return;
+    ctx.startJob({
+      action: 'apply',
+      node: savedGist.chain.name,
+      subscription: savedGist.uid,
+      region,
+      confirm: 'APPLY',
+    });
+    return;
+  }
   if (form.mode === 'single') {
     const selected = currentSubscription(ctx);
     if (selected?.uid !== subscription || !selected.nodes.includes(node)) return;
@@ -741,11 +907,19 @@ function chainNameConflict() {
   const savedAll = (nodesState.data?.subscriptions || []).filter(row => row.chain);
   const matching = savedAll.filter(row => row.chain.name === name);
   if (!matching.length) return false;
+  if (form.mode === 'gistImport') {
+    if (form.gistReplaceUid) return matching.some(row => row.uid !== form.gistReplaceUid);
+    if (form.gistSaved && !form.gistToken) {
+      const picked = savedGistProfile();
+      return !(picked && picked.chain.name === name);
+    }
+    return true;
+  }
   if (isStaticMode()) {
     const picked = savedStatic();
     return !(picked && picked.chain.name === name);
   }
-  return !matching.some(row => !row.chain.static_exit && !row.chain.direct &&
+  return !matching.some(row => !row.chain.static_exit && !row.chain.direct && !row.chain.gist_import &&
     row.chain.front_subscription === form.frontSubscription &&
     row.chain.front_node === form.frontNode &&
     Boolean(row.chain.front_group) === form.frontGroup &&
@@ -767,6 +941,150 @@ function chainReady() {
   }
   return rows.some(r=>r.uid===form.subscription && r.nodes.includes(form.node)) &&
     !(form.subscription===form.frontSubscription && form.node===form.frontNode);
+}
+
+function renderGistImportChoices(ctx) {
+  const saved = (nodesState.data?.subscriptions || []).filter(row => row.chain?.gist_import);
+  const picked = savedGistProfile();
+  let acknowledgement;
+  const setField = (key, value) => {
+    form[key] = value;
+    form.acknowledged = false;
+    const check = acknowledgement?.querySelector?.('input');
+    if (check) check.checked = false;
+    updateStartButton(ctx);
+  };
+  const savedPicker = ui.field('已保存导入配置', ui.select([
+    { value: '', label: '新建：从 Secret Gist 导入' },
+    ...saved.map(row => ({
+      value: row.uid,
+      label: row.chain.name + (row.chain.gist_hint ? '（' + row.chain.gist_hint + '）' : ''),
+    })),
+  ], picked?.uid || '', value => {
+    const row = saved.find(item => item.uid === value);
+    if (row) loadGistSelection(ctx, row.chain, row.uid);
+    else {
+      form.gistSaved = '';
+      form.gistToken = '';
+      form.gistSummary = null;
+      form.gistError = '';
+      form.gistReplaceUid = '';
+      form.gistRegionSource = '';
+      form.chainName = '';
+      form.region = '';
+      form.regionAuto = null;
+      form.regionManual = false;
+      form.acknowledged = false;
+    }
+    renderChoices(ctx);
+  }));
+
+  const urlInput = !picked ? ui.input(form.gistUrl, {
+    type: 'url',
+    autocomplete: 'off',
+    placeholder: '粘贴 Secret Gist 页面地址或 android-clash-meta.yaml Raw 地址',
+    'aria-label': 'Secret Gist 链接',
+    oninput: event => {
+      form.gistUrl = event.target.value;
+      form.gistError = '';
+    },
+  }) : null;
+  const fetchBtn = !picked ? ui.button(form.gistLoading ? '正在读取…' : '读取并校验配置', {
+    variant: 'secondary',
+    loading: form.gistLoading,
+    disabled: form.gistLoading || operationsBlocked(ctx),
+    onClick: () => fetchGistPreview(ctx),
+  }) : null;
+  if (fetchBtn) fetchBtn.id = 'fetch-gist-import';
+
+  const refetchBtn = picked && picked.chain.has_saved_gist ? ui.button(form.gistLoading ? '正在拉取…' : '从原 Secret Gist 重新拉取最新节点', {
+    variant: 'secondary',
+    size: 'small',
+    loading: form.gistLoading,
+    disabled: form.gistLoading || operationsBlocked(ctx),
+    onClick: () => fetchGistPreview(ctx, { savedUid: picked.uid }),
+  }) : null;
+  if (refetchBtn) refetchBtn.id = 'refetch-gist-import';
+
+  const summary = form.gistSummary;
+  const activeRoute = summary ? proxyRoute({
+    name: form.chainName.trim() || summary.default_name,
+    direct: !summary.front_label,
+    front_node: summary.front_label,
+    static_exit: summary.udp_blocked ? { ip: summary.exit_label } : null,
+  }) : picked ? proxyRoute(picked.chain) : '';
+
+  const regionSelect = (summary || picked) ? ui.field('最终出口地区', ui.select(regionOptions(), form.region, value => {
+    form.region = value;
+    form.regionManual = Boolean(value);
+    form.regionAuto = null;
+    form.gistRegionSource = '';
+    form.acknowledged = false;
+    renderChoices(ctx);
+  }, { 'aria-label': '最终出口地区' }), '将按所选地区设置系统国家、区域格式和时区；完整网络验收会核对实际出口。') : null;
+
+  const regionBadge = form.regionManual ? ui.pill('手动选择', 'neutral')
+    : form.gistRegionSource === 'gist' ? ui.pill('来自 Gist 记录 ' + form.region, 'ok')
+    : form.regionAuto ? ui.pill('自动识别 ' + form.regionAuto.code, 'ok') : null;
+
+  const nameInput = summary ? ui.field('配置名称', ui.input(form.chainName, {
+    placeholder: '请输入配置名称',
+    'aria-label': '导入配置名称',
+    oninput: event => setField('chainName', event.target.value),
+  })) : null;
+
+  acknowledgement = ui.checkbox(form.acknowledged, '我已核对导入的节点配置，并了解将应用完整 Windows 网络防护。', value => {
+    form.acknowledged = value;
+    updateStartButton(ctx);
+  });
+  const start = ui.button(stateText(ctx), {
+    variant: 'ink',
+    icon: 'play',
+    disabled: !form.region || !gistImportReady() || !form.acknowledged || operationsBlocked(ctx),
+    onClick: () => beginApply(ctx),
+  });
+  start.id = 'start-apply';
+
+  choicesHost.replaceChildren(...[
+    ui.el('div', { class: 'chain-toolbar' }, savedPicker, reloadButton(ctx)),
+    ui.note(picked
+      ? '直接点下方按钮可沿用本机已保存的节点重新配置；如源电脑换了节点并更新 Gist，点「从原 Secret Gist 重新拉取最新节点」即可同步。'
+      : '粘贴另一台电脑的 Secret Gist 链接 → 点击「读取并校验配置」→ 核对出口地区后即可一键配置。只提取节点与代理链，所有 Windows 规则、TUN 与防火墙均在本机完整重建；无需导入订阅或登录 GitHub CLI。', 'info'),
+    !picked ? ui.el('div', { class: 'choice-grid' },
+      ui.field('Secret Gist 链接', urlInput, '支持粘贴 Gist 页面地址或 android-clash-meta.yaml 的 Raw 地址；不需要登录 GitHub CLI。'),
+      ui.el('div', { class: 'choice-foot-left' }, fetchBtn)) : null,
+    picked && !summary ? ui.el('div', { class: 'stack' },
+      ui.el('div', { class: 'selected-node' },
+        ui.el('span', { class: 'muted small', text: '已保存配置' }),
+        ui.el('strong', { text: picked.chain.name }),
+        picked.chain.gist_hint ? ui.pill('来源 ' + picked.chain.gist_hint, 'neutral') : null,
+        picked.chain.static_exit ? ui.pill('海外 UDP 阻断', 'neutral') : null),
+      refetchBtn ? ui.el('div', { class: 'choice-foot-left' }, refetchBtn)
+        : ui.note('此配置未记录原 Gist 链接；如需更新远端节点，请切换「新建：从 Secret Gist 导入」重新粘贴链接。', 'neutral')) : null,
+    form.gistError ? ui.note(form.gistError, 'bad') : null,
+    summary ? ui.el('div', { class: 'stack' },
+      ui.el('div', { class: 'selected-node' },
+        ui.el('span', { class: 'muted small', text: summary.topology_label }),
+        ui.el('strong', { text: summary.exit_label }),
+        summary.gist_hint ? ui.pill('来源 ' + summary.gist_hint, 'neutral') : null,
+        summary.udp_blocked ? ui.pill('海外 UDP 阻断', 'ok') : null,
+        regionBadge),
+      ui.note(summary.udp_blocked
+        ? '已识别为静态 IP 模式：本机配置后海外 TCP 经静态 IP 出口，海外 UDP 阻断，国内与局域网直连。'
+        : '远端配置已通过安全结构校验；本机定时规则更新只更新分流名单，不会自动拉取远端 Gist 换节点。', 'neutral')) : null,
+    activeRoute ? ui.el('p', { class: 'route-preview', text: activeRoute }) : null,
+    (summary || picked) ? ui.el('div', { class: 'choice-grid' }, nameInput, regionSelect) : null,
+    picked && !summary && regionBadge ? ui.el('div', { class: 'choice-foot-left' }, regionBadge) : null,
+    (summary || picked) && !form.region ? ui.note('未识别最终出口地区，请手动选择。', 'warn') : null,
+    acknowledgement,
+    ui.el('div', { class: 'choice-foot' },
+      ui.el('div', { class: 'choice-foot-left' },
+        ui.helpTip('配置需要管理员权限，期间可能短暂中断网络。详细改动可展开下方对照表查看，执行前会再次确认。', '配置影响'),
+        ui.el('span', { id: 'apply-readiness-hint', class: 'readiness-hint', 'aria-live': 'polite' })),
+      start),
+  ].filter(Boolean));
+  renderImpact(ctx);
+  updateStartButton(ctx);
 }
 
 function renderChainChoices(ctx) {

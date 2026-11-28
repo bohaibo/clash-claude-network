@@ -35,6 +35,7 @@ import gui_settings
 import node_region
 import region_profile
 import gui_window
+import gist_import
 import mobile_export
 import yaml
 from app_release import VERSION, ReleaseChecker
@@ -822,7 +823,7 @@ class App:
         return {
             'configuration_time': str(applied_at or last_run.get('configuration_time') or '')[:80] if configured else '',
             'preview': values['preview'],
-            'capabilities': {'managed_chain': True, 'static_exit': True, 'static_direct': True},
+            'capabilities': {'managed_chain': True, 'static_exit': True, 'static_direct': True, 'gist_import': True},
             'version': VERSION,
             'software': self.software_summary(),
             'admin': is_admin(),
@@ -925,6 +926,7 @@ class App:
             raise ApiError(500, '订阅输出格式无效。详情见日志。')
         subscriptions = []
         regions = {}
+        saved_gist_sources = gist_import.load_saved_sources(self.local)
         for row in parsed.get('subscriptions', []):
             if not isinstance(row, dict):
                 continue
@@ -936,16 +938,35 @@ class App:
                 clean_row['front_groups']=[group for group in row['front_groups'] if isinstance(group,str)]
             if isinstance(row.get('chain'), dict):
                 chain=row['chain']
-                fields=('name',) if chain.get('direct') else ('name','front_subscription','front_node')
-                if isinstance(chain.get('static_exit'), dict):
-                    endpoint=chain['static_exit']
-                    clean_row['chain']={k:str(chain.get(k) or '') for k in fields}
-                    clean_row['chain']['static_exit']={k:endpoint[k] for k in ('ip','port','protocol')}
-                    if chain.get('direct') is True:clean_row['chain']['direct']=True
+                if chain.get('gist_import') is True:
+                    clean_row['chain'] = {
+                        'name': str(chain.get('name') or ''),
+                        'gist_import': True,
+                        'topology': str(chain.get('topology') or ''),
+                        'has_saved_gist': uid in saved_gist_sources,
+                    }
+                    if chain.get('direct') is True:
+                        clean_row['chain']['direct'] = True
+                    else:
+                        clean_row['chain']['front_node'] = str(chain.get('front_node') or '')
+                        if chain.get('front_group') is True:
+                            clean_row['chain']['front_group'] = True
+                    if isinstance(chain.get('static_exit'), dict):
+                        endpoint = chain['static_exit']
+                        clean_row['chain']['static_exit'] = {k: endpoint[k] for k in ('ip', 'port', 'protocol')}
+                    if chain.get('gist_hint'):
+                        clean_row['chain']['gist_hint'] = str(chain['gist_hint'])
                 else:
-                    clean_row['chain']={k:str(chain.get(k) or '') for k in (*fields,'exit_subscription','exit_node')}
-                if 'front_node' in fields and chain.get('front_group') is True:
-                    clean_row['chain']['front_group']=True
+                    fields=('name',) if chain.get('direct') else ('name','front_subscription','front_node')
+                    if isinstance(chain.get('static_exit'), dict):
+                        endpoint=chain['static_exit']
+                        clean_row['chain']={k:str(chain.get(k) or '') for k in fields}
+                        clean_row['chain']['static_exit']={k:endpoint[k] for k in ('ip','port','protocol')}
+                        if chain.get('direct') is True:clean_row['chain']['direct']=True
+                    else:
+                        clean_row['chain']={k:str(chain.get(k) or '') for k in (*fields,'exit_subscription','exit_node')}
+                    if 'front_node' in fields and chain.get('front_group') is True:
+                        clean_row['chain']['front_group']=True
             subscriptions.append(clean_row)
             regions[uid] = {}
             subscription_hint = node_region.infer(name)
@@ -955,7 +976,7 @@ class App:
                     regions[uid][node] = hint
         for row in subscriptions:
             chain=row.get('chain')
-            if chain and 'static_exit' not in chain:
+            if chain and not chain.get('gist_import') and 'static_exit' not in chain:
                 hint=regions.get(chain['exit_subscription'],{}).get(chain['exit_node'])
                 if hint:regions[row['uid']][chain['name']]=hint
         plan = self.plan()
@@ -1158,7 +1179,41 @@ class App:
             if not REGION_RE.fullmatch(region):
                 raise ApiError(400, '出口地区须为两位国家代码，例如 SG。')
             params.update(node=node, subscription=subscription, region=region)
-            if payload.get('chain') is not None:
+            if payload.get('chain') is not None and payload.get('gist_import') is not None:
+                raise ApiError(400, '不能同时指定链式代理和 Gist 导入配置。')
+            if payload.get('gist_import') is not None:
+                spec_req = payload['gist_import']
+                if not isinstance(spec_req, dict) or not set(spec_req) <= {'token', 'name', 'replace_uid'}:
+                    raise ApiError(400, '无效的 Gist 导入请求。')
+                token = spec_req.get('token')
+                name = spec_req.get('name')
+                replace_uid = spec_req.get('replace_uid')
+                if not isinstance(token, str) or not JOB_ID_RE.fullmatch(token):
+                    raise ApiError(400, '导入预览令牌无效，请重新读取 Secret Gist。')
+                if (not isinstance(name, str) or not name.strip() or name != name.strip()
+                        or len(name) > 100 or any(ord(c) < 32 for c in name)):
+                    raise ApiError(400, '请填写有效的配置名称。')
+                if replace_uid is not None and (not isinstance(replace_uid, str) or not gist_import.UID_RE.fullmatch(replace_uid)):
+                    raise ApiError(400, '要更新的配置标识无效。')
+                try:
+                    staged = gist_import.load_staged(self.local, token)
+                except gist_import.GistImportError as exc:
+                    raise ApiError(409, str(exc)) from None
+                if staged.get('replace_uid') and replace_uid != staged['replace_uid']:
+                    raise ApiError(400, '导入预览目标配置不匹配。')
+                if node != name or subscription != (replace_uid or ''):
+                    raise ApiError(400, 'Gist 导入配置名称与目标订阅不一致。')
+                chain_payload = {
+                    'name': name,
+                    'gist_import': True,
+                    'spec': staged['spec'],
+                    'gist_url': staged['canonical_url'],
+                    'gist_hint': staged['gist_hint'],
+                }
+                if replace_uid:
+                    chain_payload['replace_uid'] = replace_uid
+                params['chain'] = chain_payload
+            elif payload.get('chain') is not None:
                 chain=payload['chain']
                 if not isinstance(chain,dict):
                     raise ApiError(400,'无效的链式代理选择。')
@@ -1220,7 +1275,7 @@ class App:
                 'folder': str(folder),
             }
             try:
-                if 'static_exit' in params.get('chain', {}):
+                if 'static_exit' in params.get('chain', {}) or params.get('chain', {}).get('gist_import'):
                     atomic_json(folder/'chain-selection.json',params.pop('chain'))
                 atomic_json(folder / 'job.json', {k: job[k] for k in ('id', 'action', 'params', 'created', 'state')})
                 atomic_json(folder / 'status.json', {'state': 'running', 'action': action, 'started': job['created'], 'exit_code': None})
@@ -1817,6 +1872,48 @@ class App:
             self.invalidate_background('update')
         return {'enabled': enabled}
 
+    def preview_gist_import(self, payload):
+        raw_url = payload.get('gist_url')
+        saved_uid = payload.get('saved_uid')
+        has_url = raw_url is not None and str(raw_url).strip() != ''
+        has_uid = saved_uid is not None and str(saved_uid).strip() != ''
+        if has_url == has_uid:
+            raise ApiError(400, '请提供 Secret Gist 链接或选择已保存的导入配置。')
+        replace_uid = ''
+        target_url = raw_url
+        if has_uid:
+            if not isinstance(saved_uid, str) or not gist_import.UID_RE.fullmatch(saved_uid):
+                raise ApiError(400, '已保存导入配置标识无效。')
+            import client
+            import managed_chain
+            plan_root = self.plan().get('root')
+            record = None
+            try:
+                root = client.root_path(plan_root)
+                record = managed_chain.records(root, self.local).get(saved_uid)
+            except Exception:
+                path = self.local / managed_chain.REGISTRY
+                if path.is_file():
+                    try:
+                        rows = json.loads(path.read_text(encoding='utf-8'))
+                        if isinstance(rows, dict):
+                            record = rows.get(saved_uid)
+                    except (OSError, ValueError):
+                        record = None
+            entry = gist_import.saved_source(self.local, saved_uid)
+            if not isinstance(record, dict) or record.get('gist_import') is not True or not entry:
+                raise ApiError(404, '找不到该配置保存的 Secret Gist 链接，请粘贴链接重新导入。')
+            replace_uid = saved_uid
+            target_url = entry['url']
+        elif not isinstance(target_url, str):
+            raise ApiError(400, '请输入有效的 GitHub Secret Gist 链接。')
+        try:
+            return gist_import.preview_from_url(self.local, target_url, replace_uid=replace_uid)
+        except gist_import.GistImportError as exc:
+            message = str(exc)
+            status = 502 if any(k in message for k in ('无法下载', '找不到该 Secret Gist', '重定向')) else 400
+            raise ApiError(status, message) from None
+
     def sync_mobile_gist(self, payload):
         identifier = payload.get('id')
         platforms = payload.get('platforms')
@@ -2314,6 +2411,8 @@ def make_handler(app):
                     self._json(app.manage_mobile_gist(payload))
                 elif parsed.path == '/api/mobile-gist-auto-sync':
                     self._json(app.save_mobile_gist_auto_sync(payload))
+                elif parsed.path == '/api/gist-import/preview':
+                    self._json(app.preview_gist_import(payload))
                 elif parsed.path == '/api/open-github-gist':
                     try:
                         os.startfile('https://gist.github.com/')

@@ -561,6 +561,12 @@ def assert_preparation_inputs(root,inputs):
 
 def setup_record(root,profiles,request,node,subscription):
  record=managed_chain.resolve(root,profiles,request,LOCAL)
+ if record.get('gist_import'):
+  if request.get('replace_uid'):
+   require(node==record['node'] and subscription==record['uid'],'Gist import selection changed')
+  else:
+   require(node==record['node'] and not subscription,'Gist import selection changed')
+  return record
  anchor=managed_chain.anchor(record)
  if anchor is None:
   require(node==record['node'] and not subscription,'Single static proxy selection changed')
@@ -579,7 +585,7 @@ def prepare(root,node,subscription,region,rules_bundle=None,chain_spec=None):
  if chain_spec is not None:
   record=setup_record(root,profiles,chain_spec,node,subscription)
   item=next((i for i in profiles['items'] if i['uid']==record['uid']),None)
-  if item is not None:record=managed_chain.registered(root,profiles,item['uid'],LOCAL)
+  if item is not None and not record.get('gist_import'):record=managed_chain.registered(root,profiles,item['uid'],LOCAL)
  else:
   item=select(root,node,subscription,profiles)
   record=managed_chain.registered(root,profiles,item['uid'],LOCAL) if item.get('type')=='local' else None
@@ -614,6 +620,11 @@ def prepare(root,node,subscription,region,rules_bundle=None,chain_spec=None):
   (LOCAL/'managed-chain-source.yaml').write_bytes(source_text.encode('utf-8'))
   plan['chain']=managed_chain.refreshed(record,source_text,root,profiles)
   plan['chain_profile_entry']=item
+ pending_gist=LOCAL/'managed-chain-gist-source.json'
+ if chain_spec and chain_spec.get('gist_import') and chain_spec.get('gist_url'):
+  write(pending_gist,{'uid':record['uid'],'url':chain_spec['gist_url'],'gist_hint':chain_spec.get('gist_hint','')})
+ else:
+  pending_gist.unlink(missing_ok=True)
  if (LOCAL/'plan.json').exists():
   earlier=json.loads((LOCAL/'plan.json').read_text(encoding='utf-8'))
   require(Path(earlier['root']).resolve()==root.resolve(),'Previous plan targets another client directory')
@@ -653,6 +664,8 @@ def apply_client():
  item=next((x for x in profiles['items'] if x['uid']==plan['subscription_uid']),None)
  if item is None and plan.get('chain'):
   item=copy.deepcopy(plan['chain_profile_entry']);profiles['items'].append(item)
+ elif item is not None and plan.get('chain') and item.get('name')!=plan['chain'].get('name'):
+  item['name']=plan['chain']['name']
  require(item is not None,'Selected subscription disappeared before apply')
  journal_path=(Path(plan['snapshot']) if plan.get('snapshot') else snapshot_dir())/'client-changes.json'
  journal=json.loads(journal_path.read_text(encoding='utf-8-sig')) if journal_path.exists() else {'subscriptions':{}}
@@ -675,6 +688,19 @@ def apply_client():
   registry={k:v for k,v in managed_chain.records(root,LOCAL).items() if k in live_uids}
   registry[plan['subscription_uid']]=plan['chain']
   targets[LOCAL/managed_chain.REGISTRY]=json.dumps(registry,ensure_ascii=False,indent=2)
+  pending_gist=LOCAL/'managed-chain-gist-source.json'
+  if plan['chain'].get('gist_import') and pending_gist.is_file():
+   import gist_import
+   source_info=json.loads(pending_gist.read_text(encoding='utf-8'))
+   require(source_info.get('uid')==plan['subscription_uid'],'Pending Gist import source mismatch')
+   updated_sources=gist_import.updated_saved_sources(LOCAL,plan['subscription_uid'],source_info['url'],source_info.get('gist_hint',''),live_uids=live_uids)
+   targets[LOCAL/gist_import.SOURCES_FILE]=json.dumps(updated_sources,ensure_ascii=False,indent=2)
+  elif (LOCAL/'gist-import-sources.json').is_file():
+   import gist_import
+   existing_sources=gist_import.load_saved_sources(LOCAL)
+   pruned={k:v for k,v in existing_sources.items() if k in live_uids}
+   if pruned!=existing_sources:
+    targets[LOCAL/gist_import.SOURCES_FILE]=json.dumps(pruned,ensure_ascii=False,indent=2)
  for filename,updates in [('verge.yaml',{'enable_tun_mode':True,'enable_system_proxy':False,'enable_dns_settings':False}),('config.yaml',{'mode':'rule','ipv6':False,'tun':yaml_loads(text)['tun']})]:
   value=load(root/filename) or {};value.update(updates);targets[root/filename]=yaml_dumps(value,allow_unicode=True,sort_keys=False)
  old={p:p.read_bytes() if p.exists() else None for p in targets}
@@ -689,6 +715,7 @@ def apply_client():
    if value is not None:path.write_bytes(value)
    elif path.exists():path.unlink()
   api(root,'PUT','/configs?force=true',{'payload':current});raise
+ (LOCAL/'managed-chain-gist-source.json').unlink(missing_ok=True)
  _,_,data,_=parse_project_wrapper(targets[safe_file(root,'profiles/'+plan['script_file'])])
  write(LOCAL/'sources.json',data.get('ruleSources',{}))
  return {'client_applied':True,'node':plan['node']}
@@ -954,7 +981,7 @@ if __name__=='__main__':
   chain_spec=None
   if args.chain_spec:
    spec_path=Path(args.chain_spec).resolve()
-   require(spec_path.is_relative_to(LOCAL.resolve()) and spec_path.stat().st_size<=16384,'Chain selection must stay under .local')
+   require(spec_path.is_relative_to(LOCAL.resolve()) and spec_path.stat().st_size<=4_000_000,'Chain selection must stay under .local')
    chain_spec=json.loads(spec_path.read_text(encoding='utf-8-sig'))
   if not re.fullmatch('[a-f0-9]{32}',os.environ.get('CCN_OPERATION_ID','')):
    os.environ['CCN_OPERATION_ID']=uuid.uuid4().hex

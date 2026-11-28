@@ -626,6 +626,13 @@ def prune_exports(local, *, keep=3, current=None, discard=None):
     return len(obsolete)
 
 
+def region_header(plan):
+    region = plan.get('region') if isinstance(plan, dict) else None
+    if isinstance(region, str) and re.fullmatch(r'[A-Z]{2}', region):
+        return f'# ccn-region: {region}\n'
+    return ''
+
+
 def export(plan, local, *, destination=None, platforms=FILES):
     if not all(plan.get(key) for key in ('root', 'node', 'subscription_uid', 'script_uid')):
         raise ExportError('请先应用一键配置，再导出手机配置。')
@@ -640,7 +647,7 @@ def export(plan, local, *, destination=None, platforms=FILES):
     identifier = uuid.uuid4().hex
     files = {}
     if 'android' in platforms:
-        files['android'] = dumps(profile, allow_unicode=True, sort_keys=False)
+        files['android'] = region_header(plan) + dumps(profile, allow_unicode=True, sort_keys=False)
     result = {}
     if 'ios' in platforms:
         try:

@@ -40,7 +40,7 @@ def static_exit(value):
 
 
 def anchor(record):
-    if record.get('direct'):
+    if record.get('direct') or record.get('gist_import'):
         return None
     if 'static_exit' in record:
         return record['front_uid'], record['front_node']
@@ -49,7 +49,7 @@ def anchor(record):
 
 def traffic(profiles, record):
     """Use the remaining-quota bottleneck's account counters, never invented chain usage."""
-    if record.get('direct'):
+    if record.get('direct') or record.get('gist_import'):
         return None
     sources = []
     keys = ('front_uid',) if 'static_exit' in record else ('front_uid', 'source_uid')
@@ -123,6 +123,21 @@ def registered(root, profiles, uid, local):
 
 def selection(record):
     fields = {'name': record['node']}
+    if record.get('gist_import'):
+        fields['gist_import'] = True
+        fields['topology'] = record.get('topology', '')
+        if record.get('direct'):
+            fields['direct'] = True
+        else:
+            fields['front_node'] = record['front_node']
+            if record.get('front_group'):
+                fields['front_group'] = True
+        if 'static_exit' in record:
+            endpoint = record['static_exit']
+            fields['static_exit'] = {key: endpoint[key] for key in ('ip', 'port', 'protocol')}
+        if record.get('gist_hint'):
+            fields['gist_hint'] = record['gist_hint']
+        return fields
     if record.get('direct'):
         fields['direct'] = True
     else:
@@ -189,6 +204,63 @@ def front_source(root, profiles, record):
     return nodes, group, chain_profile.node_dns(source, nodes)
 
 
+def _resolve_gist_import(root, profiles, request, local, name):
+    import gist_import
+    try:
+        spec = gist_import.validate_spec(request.get('spec'))
+    except gist_import.GistImportError as exc:
+        require(False, str(exc))
+    require(all(p['name'] != name for p in spec['front_nodes']),
+            'Imported profile name conflicts with a front group member')
+    known = records(root, local)
+    active_uids = {i.get('uid') for i in (profiles.get('items') or [])}
+    active_known = {uid: r for uid, r in known.items() if uid in active_uids}
+    replace_uid = request.get('replace_uid')
+    if replace_uid:
+        require(isinstance(replace_uid, str) and replace_uid in active_known,
+                'Target Gist import profile missing')
+        existing = registered(root, profiles, replace_uid, local)
+        require(existing is not None and existing.get('gist_import') is True,
+                'Target profile is not a Gist import')
+        require(not any(uid != replace_uid and r.get('node') == name for uid, r in active_known.items()),
+                'Chain name already exists; choose another name')
+        uid = replace_uid
+        file = existing['file']
+        existing_sha = existing.get('sha256')
+    else:
+        require(not any(r.get('node') == name for r in active_known.values()),
+                'Chain name already exists; choose another name')
+        uid = 'ManagedChain' + uuid.uuid4().hex[:12]
+        file = uid + '.yaml'
+        existing_sha = None
+    record = {
+        'root': str(Path(root).resolve()),
+        'uid': uid,
+        'file': file,
+        'node': name,
+        'name': name,
+        'gist_import': True,
+        'topology': spec['topology'],
+        'direct': not bool(spec['front_nodes']),
+        'gist_exit_node': spec['exit_node'],
+        'gist_front_nodes': spec['front_nodes'],
+        'gist_front_group': spec['front_group'],
+        'gist_node_dns': spec['node_dns'],
+    }
+    if spec['front_nodes']:
+        record['front_node'] = spec['front_label'] or FRONT
+    if spec['front_group'] is not None:
+        record['front_group'] = True
+    if spec['static_exit'] is not None:
+        record['static_exit'] = spec['static_exit']
+    gist_hint = request.get('gist_hint')
+    if isinstance(gist_hint, str) and gist_hint:
+        record['gist_hint'] = gist_hint[:100]
+    if existing_sha:
+        record['sha256'] = existing_sha
+    return record
+
+
 def resolve(root, profiles, request, local):
     require(isinstance(request, dict), 'Invalid chain selection')
     name = request.get('name')
@@ -196,6 +268,8 @@ def resolve(root, profiles, request, local):
             not any(ord(c) < 32 for c in name) and name not in RESERVED_NAMES and name not in
             ('Claude-Overseas-Pinned', FRONT, 'Chain-Exit'),
             'Invalid chain name')
+    if request.get('gist_import') is True:
+        return _resolve_gist_import(root, profiles, request, local, name)
     record = {'root': str(Path(root).resolve()), 'node': name, 'name': name}
     if 'front_group' in request:
         require(request['front_group'] is True and 'direct' not in request, 'Invalid automatic front selection')
@@ -262,7 +336,7 @@ def static_node(endpoint):
 
 
 def source_fingerprint(root, profiles, record):
-    if record.get('front_group'):
+    if record.get('gist_import') or record.get('front_group'):
         value = source(root, profiles, record)
         return chain_profile.digest(json.dumps(value, sort_keys=True, ensure_ascii=False).encode('utf-8'))
     if 'static_exit' not in record:
@@ -276,6 +350,27 @@ def source_fingerprint(root, profiles, record):
 
 def source(root, profiles, record):
     """Build an independent local profile from the exact front and exit."""
+    if record.get('gist_import'):
+        exit_node = copy.deepcopy(record['gist_exit_node'])
+        exit_node['name'] = record['node']
+        front_nodes = copy.deepcopy(record.get('gist_front_nodes') or [])
+        front_group = copy.deepcopy(record.get('gist_front_group'))
+        front_dns = copy.deepcopy(record.get('gist_node_dns') or {})
+        nodes = [exit_node, *front_nodes]
+        domestic = ['https://223.5.5.5/dns-query#DIRECT&disable-qtype-64=true&disable-qtype-65=true']
+        lan = ['NETWORK,udp,REJECT'] if 'static_exit' in record else []
+        group = 'Chain-Exit'
+        groups = [{'name': group, 'type': 'select', 'proxies': [record['node']]}]
+        if front_group is not None:
+            groups.append(front_group)
+        return {'mode': 'rule', 'ipv6': False, 'proxies': nodes,
+                'proxy-groups': groups, 'proxy-providers': {}, 'rule-providers': {},
+                'rules': lan + ['MATCH,' + group],
+                'dns': {'enable': True, 'ipv6': False, 'enhanced-mode': 'fake-ip',
+                        'default-nameserver': ['223.5.5.5'], 'proxy-server-nameserver': domestic,
+                        'proxy-server-nameserver-policy': front_dns,
+                        'nameserver': [f'https://1.1.1.1/dns-query#{group}&disable-qtype-64=true&disable-qtype-65=true']},
+                'x-portable-chain': selection(record)}
     if 'static_exit' in record:
         exit_node = static_node(static_exit(record['static_exit']))
     else:

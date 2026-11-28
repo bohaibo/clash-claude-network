@@ -11,7 +11,7 @@ GROUP = 'Claude-Overseas-Pinned'
 
 def source_digest(project=PROJECT):
     digest = hashlib.sha256()
-    for name in ('assets/secure-main.js', 'assets/claude-policy.json', 'scripts/client.py', 'scripts/safe_yaml.py', 'scripts/managed_chain.py', 'scripts/chain_profile.py'):
+    for name in ('assets/secure-main.js', 'assets/claude-policy.json', 'scripts/client.py', 'scripts/safe_yaml.py', 'scripts/managed_chain.py', 'scripts/chain_profile.py', 'scripts/gist_import.py'):
         digest.update((project / name).read_bytes())
     return digest.hexdigest()
 

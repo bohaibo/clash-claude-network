@@ -10,11 +10,16 @@ export function render(ctx) {
   }));
   root.append(ui.disclosure({ title: '第一次使用', open: true },
     ui.el('ol', { class: 'steps' },
-      ui.el('li', {}, ui.el('strong', { text: '准备软件' }), '仅支持 Windows 11。请先安装并启动 Clash Verge Rev（含后台服务），导入可用订阅；本机需有 Edge 或 Chrome 用于显示管理界面。'),
+      ui.el('li', {}, ui.el('strong', { text: '准备软件' }), '仅支持 Windows 11。请先安装并启动 Clash Verge Rev（含后台服务）。使用订阅节点时需先导入订阅；如使用「从 Secret Gist 导入配置」或「单一静态 IP」，无需预先导入订阅。'),
       ui.el('li', {}, ui.el('strong', { text: '打开工具' }), '双击根目录「一键网络.cmd」。首次运行会自动把 Python、Node.js 等下载到项目 .runtime 目录，不影响系统环境（命令行模式可用 一键网络.cmd --menu）。'),
-      ui.el('li', {}, ui.el('strong', { text: '选择节点' }), '在「一键配置」选择配置方式和现有节点。工具不会自动猜节点或替换节点。'),
-      ui.el('li', {}, ui.el('strong', { text: '确认并验收' }), '查看影响说明并授权管理员权限。首次配置会自动备份原始状态；写入完成后自动做网络验收，期间会短暂断网。'),
+      ui.el('li', {}, ui.el('strong', { text: '选择方式与节点' }), '在「一键配置」选择配置方式（已有另一台电脑上传的 Secret Gist 时，直接选「从 Secret Gist 导入配置」粘贴链接最省事）。工具不会自动猜节点或替换节点。'),
+      ui.el('li', {}, ui.el('strong', { text: '确认并验收' }), '查看影响说明并授权管理员权限。首次配置会自动备份本机原始状态；写入完成后自动做网络验收，期间会短暂断网。'),
   )));
+  root.append(ui.disclosure({ title: '多设备同步（另一台电脑 / 手机）' },
+    ui.el('ul', { class: 'check-list' },
+      ui.el('li', {}, '共用同一个 Secret Gist：在源电脑「一键配置 → 多设备同步与导出」点一次「创建 / 更新 Secret Gist」，即可直接一键复制 Windows 导入链接、Android 订阅链接或 iPhone 订阅链接。'),
+      ui.el('li', {}, '另一台 Windows 电脑选「从 Secret Gist 导入配置」，粘贴链接即可一键完成配置，无需导入原订阅或登录 GitHub CLI；工具会在本机完整重建 Windows 规则、TUN 与严格防火墙。'),
+      ui.el('li', {}, '源电脑换节点并点「更新 Secret Gist」后，另一台电脑选中已保存配置点「从原 Secret Gist 重新拉取最新节点」即可更新，无需再复制粘贴链接。'))));
   root.append(ui.disclosure({ title: '规则更新方式' },
     ui.el('div', { class: 'two-col' },
       ui.el('div', {}, ui.el('h3', { text: '手动更新' }), ui.el('p', {}, '不设后台任务，需要时在「规则更新」点「立即更新」。适合按需手动控制的用户。')),
@@ -23,7 +28,7 @@ export function render(ctx) {
     ui.note('只更新已审核的分流名单，不更新内核或节点；名单异常变化时会自动停止并保留原配置。', 'info')));
   root.append(ui.disclosure({title:'链式代理与完整防护'},
     ui.el('ul', { class: 'check-list' },
-      ui.el('li', {}, '单一节点、链式代理和静态 IP 配置可同时保留，在 Clash Verge「订阅」页切换使用。'),
+      ui.el('li', {}, '单一节点、链式代理、静态 IP 与 Secret Gist 导入五种配置可同时保留，在 Clash Verge「订阅」页切换使用。'),
       ui.el('li', {}, '前置节点负责中转，后置节点决定最终出口与地区，不影响原订阅。'),
       ui.el('li', {}, '任一跳故障时海外流量自动断开；内核停止时阻断全部公网。'),
       ui.el('li', {}, '流量条显示两份原订阅中剩余较少者的用量，到期日取较早者；在 Clash 刷新订阅后执行「规则更新」即可同步。'))));
@@ -55,6 +60,8 @@ export function render(ctx) {
       row('网络验收失败', '到「日志与验证」查看失败项，不要依赖旧的通过记录。'),
       row('配置中途出错', '先到「快照与恢复」恢复关联快照，再重新配置。'),
       row('规则更新被跳过', '订阅或脚本关联已变化，重新配置一次即可恢复更新。'),
+      row('新电脑无法读取 Secret Gist', '检查能否访问 gist.githubusercontent.com（工具会先直连，失败后尝试本机 Clash 端口）；请粘贴 Gist 页面地址或 android-clash-meta.yaml 的 Raw 地址（不要贴 iOS CONF 链接）。'),
+      row('源电脑换节点后怎么同步', '源电脑点「更新 Secret Gist」后，另一台电脑在「从 Secret Gist 导入配置」选中已保存配置，点「从原 Secret Gist 重新拉取最新节点」再重新配置即可。'),
       row('界面连不上', '关闭窗口后重新双击「一键网络.cmd」；命令行备用：一键网络.cmd --menu。'))));
   root.append(ui.disclosure({ title: '更新校验' },
     ui.el('ul', { class: 'check-list' },

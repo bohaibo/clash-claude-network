@@ -96,13 +96,14 @@ async function testSecretGist() {
   const createLabel = '创建 Secret Gist';
   const updateLabel = '更新 Secret Gist';
   const controls = () => flatten(context.mobileExportCard(auto));
-  const advancedTitle = '进阶设置（订阅、故障详情和清理）';
+  const advancedTitle = '进阶设置（已有 Gist、自动同步、详情和清理）';
   const initialCard = context.mobileExportCard(auto);
   const advanced = initialCard.children.find(node => node?.props?.title === advancedTitle);
   assert.ok(advanced && !advanced.props.open);
-  assert.ok(flatten(advanced).some(node => node.label === createLabel));
+  assert.ok(flatten(advanced).some(node => node.label === '查找已有 Secret Gist'));
   assert.ok(flatten(advanced).some(node => node.label === '清理旧导出'));
-  assert.ok(initialCard.children.every(node => node === advanced || !flatten(node).some(item => item.label === createLabel)));
+  assert.ok(!flatten(advanced).some(node => node.label === createLabel));
+  assert.ok(initialCard.children.some(node => node !== advanced && flatten(node).some(item => item.label === createLabel)));
 
   await controls().find(node => node.label === '下载安卓配置').onClick();
   assert.deepEqual(posts, ['/api/mobile-export']);
@@ -148,7 +149,13 @@ async function testSecretGist() {
   expectedGist = page;
   await controls().find(node => node.label === updateLabel).onClick();
   assert.deepEqual(posts, ['/api/mobile-export', '/api/mobile-gist']);
-  assert.ok(controls().some(node => node.text?.includes('已覆盖原 Gist')));
+  assert.ok(controls().some(node => node.text?.includes('已更新 Secret Gist')));
+  assert.ok(controls().some(node => node.label === '复制 Windows 导入链接'));
+  assert.ok(controls().some(node => node.label === '复制 Android 订阅链接'));
+  assert.ok(controls().some(node => node.label === '复制 iPhone 订阅链接'));
+  await controls().find(node => node.label === '复制 Windows 导入链接').onClick();
+  assert.equal(clipboard.at(-1), page);
+  clipboard.length = 0;
   delete auto.state.mobile_gist;
   const unbound = controls();
   const previousGist = unbound.find(node => node.field === '已有 Secret Gist（可选）').children[0];

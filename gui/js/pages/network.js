@@ -189,8 +189,8 @@ export function mobileExportCard(ctx) {
         ctx.acceptState('mobile_gist', result.binding);
         syncGistDraft = '';
         const updated = available.map(file => file.name).join(' / ');
-        gistNotice = destination ? '已覆盖原 Gist 的 ' + updated + ' 配置。现在可在手机上刷新原订阅。'
-          : '已创建并绑定 Secret Gist。以后同步可沿用同一订阅链接。';
+        gistNotice = destination ? '已更新 Secret Gist（' + updated + '）。手机与其他电脑可继续使用原链接。'
+          : '已创建并绑定 Secret Gist。下方可直接一键复制给其他 Windows 电脑或手机使用。';
       } catch (error) {
         if (!mobileExport?.error) gistError = error.message || '同步 Secret Gist 未完成。';
         if (boundUrl && mobileProgress === 'upload') ctx.refreshManually?.();
@@ -298,34 +298,57 @@ export function mobileExportCard(ctx) {
     error: chosen.platform === 'ios' && iosError ? '当前配置无法导出到 iPhone。原因见「进阶设置」。' : '',
     manual: Boolean(chosenCurrent), simple: true,
   }) : null;
-  const card = ui.card({title: '导出手机配置', subtitle: '选你的手机，下载配置文件。'},
-    ui.el('div', {class: 'mobile-export-buttons'}, downloads),
+  const windowsLink = boundUrl || (links.android ? links.android.replace('gist.githubusercontent.com', 'gist.github.com').replace(/\/raw\/.*$/, '') : '');
+  const quickCopyButtons = [
+    windowsLink ? ui.button('复制 Windows 导入链接', {
+      variant: 'secondary', size: 'small',
+      title: '复制到另一台电脑本软件的「一键配置 → 从 Secret Gist 导入配置」粘贴使用',
+      onClick: () => copyGistText(windowsLink, '已复制 Windows 导入链接，可在另一台电脑粘贴导入'),
+    }) : null,
+    links.android ? ui.button('复制 Android 订阅链接', {
+      variant: 'secondary', size: 'small',
+      onClick: () => copyGistText(links.android, '已复制 Android 订阅链接'),
+    }) : null,
+    links.ios ? ui.button('复制 iPhone 订阅链接', {
+      variant: 'secondary', size: 'small',
+      onClick: () => copyGistText(links.ios, '已复制 iPhone 订阅链接'),
+    }) : null,
+  ].filter(Boolean);
+  const card = ui.card({
+    title: '多设备同步与导出',
+    subtitle: '同一个 Secret Gist 可同时供另一台 Windows 电脑、安卓和 iPhone 使用；也可直接下载到本地传给手机。',
+  },
+    ui.el('div', {class: 'mobile-export-buttons'}, create, ...downloads),
     blockReason ? ui.note(blockReason, 'info') : null,
-    mobileProgress === 'export' ? ui.el('p', {class: 'muted small', role: 'status', text: progress}) : null,
+    progress ? ui.el('p', {class: 'muted small', role: 'status', text: progress}) : null,
+    binding.error ? ui.note(binding.error, 'warn') : null,
+    gistError ? ui.note(gistError, 'warn') : null,
+    gistNotice ? ui.note(gistNotice, 'ok') : null,
     downloadPlatform && mobileExport?.error ? ui.note('下载未开始，请重试。详情见「进阶设置」。', 'warn') : null,
+    quickCopyButtons.length ? ui.el('div', {class: 'stack'},
+      ui.el('div', {class: 'mobile-export-buttons'}, ...quickCopyButtons),
+      ui.el('p', {class: 'muted small', text: boundUrl
+        ? '已绑定 Secret Gist：换节点后点一次「更新 Secret Gist」，其他电脑与手机沿用原链接。'
+        : '点上方按钮一键复制对应设备链接；其他 Windows 电脑在「从 Secret Gist 导入配置」粘贴即可。'})) : null,
     localResult,
-    ui.disclosure({title: '进阶设置（订阅、故障详情和清理）', key: 'mobile-advanced'},
+    ui.disclosure({title: '进阶设置（已有 Gist、自动同步、详情和清理）', key: 'mobile-advanced'},
       ui.el('div', {class: 'mobile-export-option'},
-        ui.el('h3', {text: 'GitHub 订阅'}),
-        ui.el('p', {class: 'muted small', text: boundUrl ? '更新后继续使用原订阅链接。'
-          : '需要已登录的 GitHub CLI。沿用旧链接时，请先填入原地址。'}),
+        ui.el('h3', {text: 'GitHub Secret Gist 设置'}),
+        ui.el('p', {class: 'muted small', text: boundUrl ? '换节点或规则更新后，可继续覆盖同一 Secret Gist 并保持链接不变。'
+          : '自动上传需要本机已登录 GitHub CLI。如已有旧 Secret Gist，可先查找或粘贴原地址再点上方同步按钮。'}),
         destinationInput ? ui.field('已有 Secret Gist（可选）', destinationInput) : null,
         finderResults,
-        binding.error ? ui.note(binding.error, 'warn') : null,
-        ui.el('div', {class: 'mobile-export-buttons'}, create, find, manage,
+        ui.el('div', {class: 'mobile-export-buttons'}, find, manage,
           boundUrl ? ui.button('解除绑定', {variant: 'secondary', disabled: manageDisabled, onClick: () => manageBinding('unbind')}) : null),
         binding.auto_sync && ctx.state.update?.mobile_gist_auto_sync === false
           ? ui.note('规则更新中的总开关已暂停自动同步。', 'info') : null),
-      progress && mobileProgress !== 'export' ? ui.el('p', {class: 'muted small', role: 'status', text: progress}) : null,
       mobileExport?.error ? ui.note(mobileExport.error, 'warn') : null,
-      gistError ? ui.note(gistError, 'warn') : null,
-      gistNotice ? ui.note(gistNotice, 'ok') : null,
       mobileExport?.cleanup_warning ? ui.note(mobileExport.cleanup_warning, 'warn') : null,
       mobileExport?.generated_at && mobileProgress !== 'export' ? ui.el('p', {class: 'muted small',
         text: '来源节点 ' + mobileExport.source + ' · 生成于 ' + ui.formatTime(mobileExport.generated_at)}) : null,
       (files.length || Object.keys(links).length) && mobileProgress !== 'export'
         ? ui.el('div', {class: 'mobile-export-grid', id: 'mobile-export-results',
-          tabindex: '-1', 'aria-label': '手机配置结果'}, MOBILE_FILES.map(file => {
+          tabindex: '-1', 'aria-label': '多设备配置结果'}, MOBILE_FILES.map(file => {
             const exported = files.find(item => item.platform === file.platform);
             const current = currentFiles.some(item => item.platform === file.platform);
             const error = file.platform === 'ios' ? iosError : '';
@@ -506,6 +529,11 @@ function configCard(ctx) {
   const service = state.service || {};
   const awaitingVerification = state.last_run?.network_tested === false &&
     (!state.verification?.available || (Date.parse(state.verification.time) || 0) < (ui.configurationTime(state) || Infinity));
+  const chainKind = plan.chain?.gist_import
+    ? 'Secret Gist 导入' + (plan.chain.gist_hint ? '（' + plan.chain.gist_hint + '）' : '')
+    : plan.chain?.direct ? '单一静态 IP 配置'
+    : plan.chain?.static_exit ? '静态 IP 出口链式代理'
+    : plan.chain ? '链式代理配置' : '';
   return ui.card({
     title: '当前固定配置',
     subtitle: state.configured ? '项目分流配置正在运行。' : '当前未运行项目分流配置。',
@@ -516,6 +544,7 @@ function configCard(ctx) {
   ui.kv([
     ['网络验收', awaitingVerification ? '网络未验收' : state.verification?.dns_failed ? 'DNS 验收失败' : state.verification?.available ? ui.verificationLabel(state.verification) + ' · ' + ui.verificationRelation(state) : '尚未验收'],
     ['固定节点', plan.node || '—'],
+    ...(chainKind ? [['配置类型', chainKind]] : []),
     ['订阅', plan.subscription || '—'],
     ['出口地区', plan.region || 'SG'],
     ['回滚点', plan.snapshot || '—'],
@@ -575,7 +604,7 @@ function actionsCard(ctx) {
         ui.button('去规则更新', { variant: 'secondary', disabled: unavailable || ctx.busy, onClick: () => ctx.navigate('updates') })),
       actionRow('补充配置', '补齐防火墙、IPv6、地区及浏览器 WebRTC 设置。',
         ui.button('补充配置', { variant: 'secondary', icon: 'shield', disabled: unavailable || operationsBlocked(ctx), onClick: () => supplement(ctx) })),
-      actionRow('更换节点或地区', '前往「一键配置」切换节点、出口地区或代理模式。',
+      actionRow('更换节点或地区', '前往「一键配置」切换节点、出口地区、代理模式，或从 Secret Gist 导入/刷新节点。',
         ui.button('去一键配置', { variant: 'secondary', disabled: ctx.busy, onClick: () => ctx.navigate('overview') })),
       actionRow('恢复最早状态并重新配置', '先还原首次备份，再用当前节点重新完整配置。',
         ui.button('恢复并重新配置', { variant: 'danger', icon: 'alert', disabled: !state.baseline || !state.plan?.node || operationsBlocked(ctx), onClick: () => reconfigure(ctx) })),

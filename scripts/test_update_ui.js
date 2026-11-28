@@ -31,7 +31,7 @@ assert(rows.some(([label, text]) => label === '链式配置' && text.includes('�
 assert(rows.some(([label, text]) => label === '链式流量' && text.includes('缓存用量')));
 context.show({}, {last:{time:'fixture', success:true, mobile_gist_sync:{status:'failed', reason:'offline fixture'}}});
 assert.equal(badges.at(-1)[0], '成功');
-assert(rows.some(([label, text]) => label === '手机订阅' && text.includes('offline fixture')));
+assert(rows.some(([label, text]) => label === 'Secret Gist 同步' && text.includes('offline fixture')));
 const jobs=[];
 const recoveryCtx={state:{configured:false,operation:{pending_rule_update:true}},busy:false,
  confirm:async()=>true,startJob:payload=>jobs.push(payload)};
