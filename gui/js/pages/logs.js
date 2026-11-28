@@ -68,25 +68,46 @@ function logListCard(ctx, inline) {
   const files = ctx.state.log_files || [];
   let listArea;
   if (files.length) {
-    const list = ui.el('div', { class: 'log-list' });
+    const isErrorFile = file => file.kind ? file.kind === 'error' : /error|stderr/i.test(file.name || '');
+    const errorFiles = files.filter(isErrorFile);
+    const routineFiles = files.filter(file => !isErrorFile(file));
+    const host = ui.el('div', { class: 'stack' });
+    const makeRow = (file, active, isError) => ui.el('button', {
+      class: 'log-row', type: 'button', 'data-log-name': file.name,
+      'aria-pressed': String(Boolean(active && active === file.name)),
+      onclick: () => ctx.showLog(file.name),
+    },
+    ui.el('span', { class: 'log-icon' }, isError ? ui.el('span', { class: 'status-dot bad', 'aria-hidden': 'true' }) : icon('list', 16)),
+    ui.el('span', { class: 'log-name', text: file.label ? file.label + ' · ' + file.name : file.name }),
+    ui.el('span', { class: 'muted', text: ui.formatBytes(file.bytes) }),
+    ui.el('span', { class: 'muted', text: ui.relativeTime(file.time) }),
+    icon('chevron', 14));
     const renderRows = (query = '') => {
       const needle = query.trim().toLowerCase();
-      const matched = needle ? files.filter(file => file.name.toLowerCase().includes(needle)) : files;
-      if (!matched.length) {
-        list.replaceChildren(ui.el('p', { class: 'muted pad', text: '没有匹配的日志文件。' }));
+      const match = file => !needle || file.name.toLowerCase().includes(needle) || (file.label || '').toLowerCase().includes(needle);
+      const matchedErrors = errorFiles.filter(match);
+      const matchedRoutine = routineFiles.filter(match);
+      if (!matchedErrors.length && !matchedRoutine.length) {
+        host.replaceChildren(ui.el('p', { class: 'muted pad', text: '没有匹配的日志文件。' }));
         return;
       }
       const active = (typeof document !== 'undefined' ? document.getElementById?.('log-inline')?.dataset?.activeLog : null) ?? inline.dataset?.activeLog;
-      list.replaceChildren(...matched.map((file) => ui.el('button', {
-        class: 'log-row', type: 'button', 'data-log-name': file.name,
-        'aria-pressed': String(Boolean(active && active === file.name)),
-        onclick: () => ctx.showLog(file.name),
-      },
-      ui.el('span', { class: 'log-icon' }, icon('list', 16)),
-      ui.el('span', { class: 'log-name', text: file.name }),
-      ui.el('span', { class: 'muted', text: ui.formatBytes(file.bytes) }),
-      ui.el('span', { class: 'muted', text: ui.relativeTime(file.time) }),
-      icon('chevron', 14))));
+      const children = [];
+      if (matchedErrors.length) {
+        children.push(ui.el('div', { class: 'log-list' }, ...matchedErrors.map(file => makeRow(file, active, true))));
+      } else if (!needle) {
+        children.push(ui.el('p', { class: 'muted small', text: '当前没有报错日志。' }));
+      }
+      if (matchedRoutine.length) {
+        const routineList = ui.el('div', { class: 'log-list' }, ...matchedRoutine.map(file => makeRow(file, active, false)));
+        const disclosure = ui.disclosure({
+          title: '常规运行日志（' + matchedRoutine.length + ' 项，无报错默认折叠）',
+          key: 'logs-routine',
+          open: Boolean(needle && !matchedErrors.length),
+        }, routineList);
+        children.push(disclosure);
+      }
+      host.replaceChildren(...children);
     };
     renderRows();
     if (files.length > 5) {
@@ -95,14 +116,14 @@ function logListCard(ctx, inline) {
         'aria-label': '筛选日志文件',
         oninput: (event) => renderRows(event.target.value),
       });
-      listArea = ui.el('div', {}, filter, list);
+      listArea = ui.el('div', { class: 'stack' }, filter, host);
     } else {
-      listArea = list;
+      listArea = host;
     }
   } else {
     listArea = ui.empty('还没有日志文件', '操作产生错误或更新结果时会生成日志。');
   }
-  return ui.card({ title: '本地日志', help: '点击文件名即可查看，所有日志仅保存在本地。' }, ui.el('div', {class: 'log-layout'}, listArea, inline));
+  return ui.card({ title: '本地日志', help: '有报错时会直接置顶显示；常规运行日志默认折叠。所有日志仅保存在本地。' }, ui.el('div', {class: 'log-layout'}, listArea, inline));
 }
 
 function reconfigureCard(ctx) {

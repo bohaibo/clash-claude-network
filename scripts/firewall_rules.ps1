@@ -145,25 +145,34 @@ function Assert-StrictFirewall([string]$coreProgram,[switch]$AllowAdditionalLoca
   if(@($profiles | Where-Object {$_.DefaultOutboundAction.ToString() -ne 'Block'}).Count){
     throw '实际默认出站动作不是 Block，无法确认严格防火墙生效。'
   }
-  $timer=[Diagnostics.Stopwatch]::StartNew()
-  while($true){
-    $tun=@(Get-NetAdapter -ErrorAction Stop | Where-Object {$_.Name -ceq 'Meta'})
-    if($tun.Count -eq 1 -and [string]$tun[0].Status -eq 'Up'){break}
-    if(!$WaitForTun -or $timer.Elapsed.TotalSeconds -ge 10){
-      $failure=[InvalidOperationException]::new('Meta TUN 网卡不存在、不唯一或未启用。')
-      $failure.Data['ccn_failed_check']='meta_tun'
-      throw $failure
-    }
-    Start-Sleep -Milliseconds 250
-  }
   $core=ConvertTo-FirewallProgram $coreProgram
   if(!(Test-Path -LiteralPath $core -PathType Leaf)){throw '配置记录中的核心程序不存在。'}
   # Existence alone must not hide access restrictions on the recorded image.
   $coreStream=[IO.File]::OpenRead($core)
   try{if($coreStream.Length -le 0){throw '核心程序文件为空。'}}finally{$coreStream.Dispose()}
-  $running=@(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'verge-mihomo.exe'" -ErrorAction Stop | Select-Object -ExpandProperty ExecutablePath -Unique)
-  if($running.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$running[0]) -or (ConvertTo-FirewallProgram ([string]$running[0])) -ine $core){
-    throw '运行中的核心路径与配置记录不一致或无法唯一确认。'
+  $timer=[Diagnostics.Stopwatch]::StartNew()
+  while($true){
+    $tun=@(Get-NetAdapter -ErrorAction Stop | Where-Object {$_.Name -ceq 'Meta'})
+    $tunOk=$tun.Count -eq 1 -and [string]$tun[0].Status -eq 'Up'
+    $running=@()
+    $coreOk=$false
+    if($tunOk){
+      $running=@(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'verge-mihomo.exe'" -ErrorAction Stop | Select-Object -ExpandProperty ExecutablePath -Unique)
+      $coreOk=$running.Count -eq 1 -and ![string]::IsNullOrWhiteSpace([string]$running[0]) -and (ConvertTo-FirewallProgram ([string]$running[0])) -ieq $core
+    }
+    if($tunOk -and $coreOk){break}
+    if(!$WaitForTun -or $timer.Elapsed.TotalSeconds -ge 10){
+      if(!$tunOk){
+        $failure=[InvalidOperationException]::new('Meta TUN 网卡不存在、不唯一或未启用。')
+        $failure.Data['ccn_failed_check']='meta_tun'
+        throw $failure
+      }
+      $observed=if($running.Count){($running | ForEach-Object {if([string]::IsNullOrWhiteSpace([string]$_)){'<空路径>'}else{[string]$_}}) -join '; '}else{'未检测到运行中的 verge-mihomo.exe 进程'}
+      $failure=[InvalidOperationException]::new('运行中的核心路径与配置记录不一致或无法唯一确认（记录：'+$core+'；实际：'+$observed+'）。')
+      $failure.Data['ccn_failed_check']='core_process'
+      throw $failure
+    }
+    Start-Sleep -Milliseconds 250
   }
   $lan=@('10.0.0.0/8','100.64.0.0/10','127.0.0.0/8','169.254.0.0/16','172.16.0.0/12','192.168.0.0/16','224.0.0.0/4')
   foreach($store in @('PersistentStore','ActiveStore')){

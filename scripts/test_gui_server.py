@@ -644,6 +644,44 @@ class GuiServer(unittest.TestCase):
         finally:
             self.app._settings_busy = False
 
+    def test_log_files_expose_non_empty_errors_and_classify_routine_logs(self):
+        (self.local / 'firewall-audit-error.log').write_text('运行中的核心路径不一致\n', encoding='utf-8')
+        (self.local / 'update-error.log').write_text('Traceback\n', encoding='utf-8')
+        (self.local / 'dependency-error.log').write_text('', encoding='utf-8')
+        (self.local / 'candidate-validation.stderr.log').write_text('   \r\n', encoding='utf-8')
+        (self.local / 'update-result.json').write_text('{"success":true}', encoding='utf-8')
+        self.app.log('routine startup')
+        files = self.app.log_files()
+        by_name = {row['name']: row for row in files}
+        self.assertEqual(by_name['firewall-audit-error.log']['kind'], 'error')
+        self.assertEqual(by_name['update-error.log']['kind'], 'error')
+        self.assertNotIn('dependency-error.log', by_name)
+        self.assertNotIn('candidate-validation.stderr.log', by_name)
+        self.assertEqual(by_name['update-result.json']['kind'], 'info')
+        self.assertEqual(by_name['gui/server.log']['kind'], 'info')
+        self.assertIn('运行中的核心路径不一致', self.app.log_text('firewall-audit-error.log')['text'])
+        self.assertIn('Traceback', self.app.log_text('update-error.log')['text'])
+        # Error files appear before routine logs
+        kinds = [row['kind'] for row in files]
+        self.assertEqual(kinds, ['error', 'error', 'info', 'info'])
+
+    def test_connection_aborted_on_send_is_ignored_without_logging_failure(self):
+        before = self.app.server_log.read_text(encoding='utf-8') if self.app.server_log.exists() else ''
+        handler = gui_server.make_handler(self.app)
+        instance = object.__new__(handler)
+        instance.path = '/api/ping'
+        instance.command = 'GET'
+        instance.headers = {'Host': f'127.0.0.1:{self.port}', 'X-CCN-Token': self.app.token}
+        instance.send_response = lambda *a: None
+        instance._security_headers = lambda *a: None
+        instance.send_header = lambda *a: None
+        instance.end_headers = lambda: None
+        instance.wfile = type('W', (), {'write': lambda self, data: (_ for _ in ()).throw(ConnectionAbortedError(10053, 'aborted'))})()
+        instance.do_GET()
+        self.assertTrue(instance.close_connection)
+        after = self.app.server_log.read_text(encoding='utf-8') if self.app.server_log.exists() else ''
+        self.assertNotIn('GET failure', after[len(before):])
+
     def test_update_settings_passes_interval_days(self):
         def checkpoint(action, *args, state_file=None):
             if action == 'snapshot':

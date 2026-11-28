@@ -312,6 +312,16 @@ async function main() {
   assert(!byText(pendingDrill,'重试本次恢复'));
   assert(logHost.scrolledIntoView);
 
+  const mixedLogs=logPage.context.probe.render({state:{log_files:[
+    {name:'firewall-audit-error.log',label:'防火墙复核错误',kind:'error',bytes:128,time:'2026-11-28T20:00:00+08:00'},
+    {name:'gui/server.log',label:'界面后台运行日志',kind:'info',bytes:512,time:'2026-11-28T20:01:00+08:00'},
+  ]}});
+  const routineDisclosure=mixedLogs.querySelectorAll('details').find(node=>node.textContent.includes('常规运行日志'));
+  assert(routineDisclosure && !routineDisclosure.open,'routine logs must collapse by default');
+  assert(mixedLogs.querySelector('[data-log-name="firewall-audit-error.log"]'));
+  assert(!routineDisclosure.querySelector('[data-log-name="firewall-audit-error.log"]'));
+  assert(routineDisclosure.querySelector('[data-log-name="gui/server.log"]'));
+
   const chain = environment('gui/js/pages/overview.js');
   chain.context.host = chain.document.root;
   chain.context.fixture = {subscriptions:[

@@ -104,6 +104,11 @@ class SafetyAudit(unittest.TestCase):
    self.assertIn('-WaitForTun',run.call_args.args[0])
    self.assertTrue(firewall.verify_firewall('firewall-after')['success'])
    self.assertNotIn('-WaitForTun',run.call_args.args[0])
+  failed=Mock(returncode=0,stdout=json.dumps({'success':False,'full_verified':False,'status':'failed','administrator':True,'failed_check':'core_process','error_message':'运行中的核心路径与配置记录不一致'}).encode())
+  buf=io.StringIO()
+  with patch.object(firewall.subprocess,'run',return_value=failed),contextlib.redirect_stdout(buf):
+   self.assertFalse(firewall.verify_firewall('firewall-before')['success'])
+  self.assertIn('运行中的核心路径与配置记录不一致',buf.getvalue())
  def test_firewall_preflight_failure_stops_all_drills(self):
   with patch.object(audit,'verify_firewall',return_value={'success':False}),patch.object(audit,'verify') as network,patch.object(audit,'verify_tun') as drill,patch.object(audit,'verify_core_exit') as core:
    self.assertFalse(audit.run_audit()['success'])

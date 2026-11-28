@@ -70,6 +70,23 @@ ADMIN_ACTIONS = {'apply', 'supplement', 'snapshot', 'restore', 'reconfigure', 'a
 RUN_ACTIONS = ADMIN_ACTIONS
 LOCAL_ACTIONS = {'settings-recover': None}
 PUBLIC_FILES = {'favicon.svg'}
+ERROR_LOGS = (
+    ('firewall-audit-error.log', '防火墙复核错误'),
+    ('last-error.log', '最近操作错误'),
+    ('client-error.log', 'Clash 客户端错误'),
+    ('update-error.log', '规则更新错误'),
+    ('reconfigure-error.log', '安全重配置错误'),
+    ('rollback-error.log', '防火墙回滚错误'),
+    ('snapshot-error.log', '快照保存错误'),
+    ('dependency-error.log', '运行环境依赖错误'),
+    ('audit-ipv6-recheck.stderr.log', 'IPv6 复查错误'),
+    ('candidate-validation.stderr.log', '内核配置校验错误'),
+)
+ROUTINE_LOGS = (
+    ('update-result.json', '最近规则更新结果'),
+    ('verification.json', '最近网络验收详情'),
+    ('gui/server.log', '界面后台运行日志'),
+)
 MIME = {
     '.html': 'text/html; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
@@ -871,25 +888,52 @@ class App:
         }
 
     def log_files(self):
-        rows = []
-        for name in ('last-error.log', 'client-error.log', 'snapshot-error.log', 'rollback-error.log',
-                     'dependency-error.log', 'update-result.json'):
+        error_rows = []
+        for name, label in ERROR_LOGS:
             path = self.local / name
-            if path.is_file():
-                rows.append({'name': name, 'bytes': path.stat().st_size,
-                             'time': datetime.datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec='seconds')})
-        server = self.local / 'gui' / 'server.log'
-        if server.is_file():
-            rows.append({'name': 'gui/server.log', 'bytes': server.stat().st_size,
-                         'time': datetime.datetime.fromtimestamp(server.stat().st_mtime).astimezone().isoformat(timespec='seconds')})
-        return rows
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+                if stat.st_size <= 0:
+                    continue
+                with path.open('rb') as stream:
+                    sample = stream.read(4096)
+                if not sample.decode('utf-8-sig', errors='replace').strip():
+                    continue
+                error_rows.append({
+                    'name': name, 'label': label, 'kind': 'error', 'bytes': stat.st_size,
+                    'time': datetime.datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec='seconds'),
+                    '_mtime': stat.st_mtime,
+                })
+            except OSError:
+                continue
+        routine_rows = []
+        for name, label in ROUTINE_LOGS:
+            path = self.local / name
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+                if stat.st_size <= 0:
+                    continue
+                routine_rows.append({
+                    'name': name, 'label': label, 'kind': 'info', 'bytes': stat.st_size,
+                    'time': datetime.datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec='seconds'),
+                    '_mtime': stat.st_mtime,
+                })
+            except OSError:
+                continue
+        error_rows.sort(key=lambda row: row.pop('_mtime'), reverse=True)
+        routine_rows.sort(key=lambda row: row.pop('_mtime'), reverse=True)
+        return error_rows + routine_rows
 
     def log_text(self, name):
-        if name == 'gui/server.log':
-            path = self.local / 'gui' / 'server.log'
-        elif name in ('last-error.log', 'client-error.log', 'snapshot-error.log', 'rollback-error.log',
-                      'dependency-error.log', 'update-result.json'):
-            path = self.local / name
+        allowed = {item[0] for item in ERROR_LOGS} | {item[0] for item in ROUTINE_LOGS}
+        if name in allowed:
+            path = (self.local / name).resolve()
+            if not path.is_relative_to(self.local.resolve()):
+                raise ApiError(404, '日志名称无效。')
         else:
             match = re.fullmatch(r'gui/jobs/([a-f0-9]{32})/console\.log', str(name))
             if not match:
@@ -2195,14 +2239,14 @@ def make_handler(app):
         def _send(self, status, body=b'', content_type='application/json; charset=utf-8', headers=None):
             if isinstance(body, str):
                 body = body.encode('utf-8')
-            self.send_response(status)
-            self._security_headers(content_type, len(body))
-            for name, value in (headers or {}).items():
-                self.send_header(name, value)
-            self.end_headers()
             try:
+                self.send_response(status)
+                self._security_headers(content_type, len(body))
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
                 self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
             self.close_connection = True
 

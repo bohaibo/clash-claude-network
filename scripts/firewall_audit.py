@@ -17,5 +17,7 @@ def verify_firewall(stage='firewall-before'):
   if not report['success'] and report.get('status')=='passed':report['status']='unverified'
   if not report['success'] and report.get('failed_check')=='meta_tun':
    print('Meta TUN 网卡未就绪。请确认 Clash Verge 的 TUN 已启用，且只有一块名为 Meta 的活动网卡。',flush=True)
+  elif not report['success'] and report.get('error_message'):
+   print('复核生效防火墙失败：'+str(report['error_message'])+'（详情见 .local/firewall-audit-error.log）',flush=True)
  except Exception as exc:report['error_type']=type(exc).__name__
  return save_report(report,stage)

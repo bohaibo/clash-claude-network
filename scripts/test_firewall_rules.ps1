@@ -10,7 +10,17 @@ function Get-Service { @('BFE','MpsSvc') | ForEach-Object {[pscustomobject]@{Nam
 function Get-NetFirewallProfile {
  @('Domain','Private','Public') | ForEach-Object {[pscustomobject]@{Name=$_;Enabled=($script:change -ne 'disabled');DefaultOutboundAction='Block'}}
 }
-function Get-CimInstance { [pscustomobject]@{ExecutablePath=$core} }
+function Get-CimInstance {
+ $script:coreQueries++
+ if($script:change -eq 'core-restarting'){
+  if($script:coreQueries -eq 1){return @()}
+  if($script:coreQueries -eq 2){return @([pscustomobject]@{ExecutablePath=$core},[pscustomobject]@{ExecutablePath='C:\other\verge-mihomo.exe'})}
+ }
+ if($script:change -eq 'core-mismatch'){
+  return @([pscustomobject]@{ExecutablePath='C:\other\verge-mihomo.exe'})
+ }
+ [pscustomobject]@{ExecutablePath=$core}
+}
 function Get-NetAdapter {
  $script:tunQueries++
  if($script:change -eq 'tun-missing' -or ($script:change -eq 'tun-starting' -and $script:tunQueries -eq 1)){return}
@@ -112,6 +122,17 @@ $script:change='tun-missing'
 $reported=$false
 try{Assert-StrictFirewall -coreProgram $core}catch{$reported=$_.Exception.Data['ccn_failed_check'] -eq 'meta_tun'}
 if(!$reported -or $script:tunQueries -ne 1){throw 'Strict audit must reject a missing Meta adapter with its specific reason.'}
+$script:cases++
+$script:tunQueries=0;$script:coreQueries=0
+$script:change='core-restarting'
+Assert-StrictFirewall -coreProgram $core -WaitForTun
+if($script:coreQueries -ne 3){throw 'Audit should wait while the core process is restarting.'}
+$script:cases++
+$script:coreQueries=0
+$script:change='core-mismatch'
+$coreReported=$false;$coreDetail=''
+try{Assert-StrictFirewall -coreProgram $core}catch{$coreReported=$_.Exception.Data['ccn_failed_check'] -eq 'core_process';$coreDetail=$_.Exception.Message}
+if(!$coreReported -or $coreDetail -notlike '*verge-mihomo.exe*'){throw 'Strict audit must report recorded and observed core paths on mismatch.'}
 $script:cases++
 foreach($case in @('windows-mask','windows-range','split','dynamic-covered')){
  $script:change=$case
